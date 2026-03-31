@@ -1,0 +1,9 @@
+[default]
+extend-ignore-identifiers-re = ["2nd", "2ND", "MF2", "MFC"]
+
+[default.extend-words]
+LITS = "LITS"
+curren = "curren"
+
+[files]
+extend-exclude = ["target/**", "tr35-messageFormat.html"]

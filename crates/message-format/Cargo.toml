@@ -1,0 +1,26 @@
+[package]
+name = "message-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Facade API for compiling and formatting message-format catalogs."
+
+[features]
+default = ["std"]
+std = ["message-format-runtime/std"]
+icu4x = ["message-format-runtime/icu4x"]
+compile = ["dep:message-format-compiler"]
+
+[dependencies]
+icu_locale_core = { default-features = false, version = "2.1.1" }
+message-format-compiler = { optional = true, path = "../message-format-compiler" }
+message-format-runtime = { path = "../message-format-runtime" }
+
+[lints]
+workspace = true

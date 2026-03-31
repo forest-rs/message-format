@@ -1,0 +1,19 @@
+[package]
+name = "message-format-resource-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "JSON resource adapters for message-format compiler resource inputs."
+
+[dependencies]
+json-spanned-value = "0.2.2"
+message-format-compiler.workspace = true
+
+[lints]
+workspace = true

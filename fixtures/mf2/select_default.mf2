@@ -1,0 +1,4 @@
+.input { $kind :string }
+.match $kind
+formal {{Good evening}}
+* {{Hi}}

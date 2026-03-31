@@ -1,0 +1,13 @@
+[messages]
+"app.title" = "Example App"
+"user.greeting" = "Hello { $name }!"
+"cart.items" = "{ $count :number } items in your cart."
+"price.display" = "Total: { $amount :number style=currency }"
+"broken.expr" = "The value is { $x : }."
+
+[messages."task.summary"]
+value = "{ $done :number } of { $total :number } tasks complete."
+description = "Shows task completion progress."
+
+[messages."event.date"]
+value = "Scheduled for { $date :date style=long }."

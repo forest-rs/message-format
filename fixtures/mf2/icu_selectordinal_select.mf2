@@ -1,0 +1,6 @@
+.input { $n :number select=ordinal }
+.match $n
+one {{one}}
+two {{two}}
+few {{few}}
+* {{other}}

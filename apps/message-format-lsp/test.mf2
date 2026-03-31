@@ -1,0 +1,20 @@
+greeting = Hello, {$name}!
+greeting_morning = Good morning, {$name}. You have {$count :number} new messages.
+greeting_formal = Dear {$title} {$lastName}, welcome back.
+unread_count = You have {$count :integer} unread items.
+email_subject = Re: {$subject}
+notification_badge = {$count :number minimumIntegerDigits=2}
+broken_expr = The value is {$x : }.
+task_summary = {$done :number} of {$total :number} tasks complete.
+price_display = Total: {$amount :number style=percent}
+invoice_line = {$qty :integer} x {$item} @ {$price :currency currency=USD}
+greeting = Howdy, {$name}!
+event_date = Scheduled for {$date :date style=long}.
+reminder_time = Reminder at {$time :time style=short}.
+full_timestamp = {$ts :datetime dateStyle=medium timeStyle=short}
+dangling_brace = This is {$oops
+bold_name = Welcome, {#bold}{$name}{/bold}!
+linked_action = Please {#link href=$url}click here{/link} to continue.
+bad_var = Hello {$ }.
+percentage = You are {$pct :number style=percent} done.
+welcome_back = Welcome back, {$user}. Last login: {$lastLogin :datetime dateStyle=short}.

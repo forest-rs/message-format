@@ -1,0 +1,39 @@
+[package]
+name = "message-format-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "no_std runtime for compiled message-format catalogs."
+
+[dependencies]
+fixed_decimal = { default-features = false, optional = true, version = "0.7.1" }
+icu_calendar = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+icu_datetime = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+icu_locale_core = { default-features = false, optional = true, version = "2.1.1" }
+icu_plurals = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+
+[features]
+default = []
+std = []
+icu4x = [
+    "dep:fixed_decimal",
+    "dep:icu_locale_core",
+    "dep:icu_plurals",
+    "dep:icu_calendar",
+    "dep:icu_datetime",
+]
+
+[lints]
+workspace = true

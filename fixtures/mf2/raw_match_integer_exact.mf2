@@ -1,0 +1,1 @@
+.local $sel = {1 :integer select=exact} .match $sel 1 {{literal select {$sel}}} * {{OTHER}}

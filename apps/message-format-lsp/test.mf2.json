@@ -1,0 +1,7 @@
+{
+  "app.title": "Example App",
+  "user.greeting": "Hello { $name }!",
+  "cart.items": "{ $count :number } items in your cart.",
+  "price.display": "Total: { $amount :number currenc=USD }",
+  "broken.expr": "The value is { $x : }."
+}

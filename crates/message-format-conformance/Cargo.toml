@@ -1,0 +1,21 @@
+[package]
+name = "message-format-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Conformance and golden tests for message-format compiler/runtime."
+publish = false
+
+[dependencies]
+message-format = { features = ["compile", "icu4x"], path = "../message-format" }
+serde = { features = ["derive"], version = "1.0" }
+serde_json = "1.0"
+
+[lints]
+workspace = true
