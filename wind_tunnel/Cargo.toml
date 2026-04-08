@@ -16,10 +16,8 @@ workspace = true
 
 [dependencies]
 icu_locale_core = { default-features = false, version = "2.1.1" }
-message-format-compiler = { path = "../crates/message-format-compiler" }
-message-format-runtime = { features = [
-    "icu4x",
-], path = "../crates/message-format-runtime" }
+message-format-compiler.workspace = true
+message-format-runtime = { features = ["icu4x"], workspace = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
