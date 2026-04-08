@@ -35,5 +35,8 @@ icu4x = [
     "dep:icu_datetime",
 ]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true

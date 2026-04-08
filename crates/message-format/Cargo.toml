@@ -22,5 +22,8 @@ icu_locale_core = { default-features = false, version = "2.1.1" }
 message-format-compiler = { optional = true, path = "../message-format-compiler" }
 message-format-runtime = { path = "../message-format-runtime" }
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true
