@@ -1,6 +1,17 @@
 [default]
 extend-ignore-identifiers-re = ["2nd", "2ND", "MF2", "MFC"]
 
+extend-ignore-re = [
+    # ignore typos on the next line
+    "(#|//)\\s*typos:ignore-next-line\\r?\\n.*",
+
+    # ignore typos on this line
+    "(?Rm)^.*(#|//)\\s*typos:ignore-line$",
+
+    # ignore typos in this block
+    "(?s)(#|//)\\s*typos:off.*?\\r?\\n\\s*(#|//)\\s*typos:on",
+]
+
 [default.extend-words]
 LITS = "LITS"
 curren = "curren"
