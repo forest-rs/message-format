@@ -1042,10 +1042,8 @@ mod tests {
     use core::mem::size_of;
 
     use super::*;
-    use crate::vm::{
-        OP_CALL_FUNC, OP_CASE_DEFAULT, OP_CASE_STR, OP_EXPR_FALLBACK, OP_HALT, OP_JMP, OP_LOAD_ARG,
-        OP_OUT_ARG, OP_OUT_LIT, OP_OUT_SLICE, OP_OUT_VAL, OP_SELECT_ARG, OP_SELECT_END,
-    };
+    use crate::schema::TestOps;
+    use crate::vm::{OP_CASE_STR, OP_HALT};
 
     fn chunk_entry_offset(index: usize) -> usize {
         HEADER_LEN + (index * CHUNK_ENTRY_LEN)
@@ -1053,7 +1051,7 @@ mod tests {
 
     #[test]
     fn catalog_round_trip_minimal() {
-        let code = [OP_OUT_SLICE, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_slice(0, 5).halt().build();
         let bytes = build_catalog(
             &["hello"],
             "Hello",
@@ -1106,7 +1104,7 @@ mod tests {
 
     #[test]
     fn bad_jump_fails_verification() {
-        let code = [OP_HALT, OP_JMP, 99, 0, 0, 0];
+        let code = TestOps::new().halt().jmp_rel(99).build();
         let bytes = build_catalog(
             &["hello"],
             "",
@@ -1254,7 +1252,7 @@ mod tests {
 
     #[test]
     fn unterminated_entry_is_rejected() {
-        let code = [OP_OUT_SLICE, 0, 0, 0, 0, 1, 0, 0, 0];
+        let code = TestOps::new().out_slice(0, 1).build();
         let bytes = build_catalog(
             &["main"],
             "x",
@@ -1270,7 +1268,7 @@ mod tests {
 
     #[test]
     fn stack_underflowing_bytecode_is_rejected() {
-        let code = [OP_OUT_VAL, OP_HALT];
+        let code = TestOps::new().out_val().halt().build();
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1286,7 +1284,7 @@ mod tests {
 
     #[test]
     fn out_arg_bytecode_is_verified() {
-        let code = [OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let bytes = build_catalog(
             &["main", "name"],
             "",
@@ -1297,12 +1295,12 @@ mod tests {
             &code,
         );
         let catalog = Catalog::from_bytes(&bytes).expect("valid catalog");
-        assert_eq!(catalog.code(), &code);
+        assert_eq!(catalog.code(), code.as_slice());
     }
 
     #[test]
     fn invalid_output_string_ref_is_rejected() {
-        let code = [OP_OUT_LIT, 99, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_lit(99).halt().build();
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1318,7 +1316,7 @@ mod tests {
 
     #[test]
     fn invalid_literal_slice_ref_is_rejected() {
-        let code = [OP_OUT_SLICE, 4, 0, 0, 0, 4, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_slice(4, 4).halt().build();
         let bytes = build_catalog(
             &["main"],
             "abc",
@@ -1341,29 +1339,14 @@ mod tests {
 
     #[test]
     fn select_arg_bytecode_is_verified() {
-        let code = [
-            OP_SELECT_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CASE_DEFAULT,
-            9,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_SELECT_END,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .select_arg(1)
+            .case_default("end")
+            .out_slice(0, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let bytes = build_catalog(
             &["main", "sel"],
             "x",
@@ -1374,12 +1357,12 @@ mod tests {
             &code,
         );
         let catalog = Catalog::from_bytes(&bytes).expect("valid catalog");
-        assert_eq!(catalog.code(), &code);
+        assert_eq!(catalog.code(), code.as_slice());
     }
 
     #[test]
     fn case_without_active_selector_is_rejected() {
-        let code = [OP_CASE_STR, 1, 0, 0, 0, 0, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().case_str_rel(1, 0).halt().build();
         let bytes = build_catalog(
             &["main", "one"],
             "",
@@ -1401,7 +1384,7 @@ mod tests {
 
     #[test]
     fn expr_fallback_without_immediate_call_is_rejected() {
-        let code = [OP_EXPR_FALLBACK, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().expr_fallback(1).halt().build();
         let bytes = build_catalog(
             &["main", "{$value}"],
             "",
@@ -1417,7 +1400,7 @@ mod tests {
 
     #[test]
     fn invalid_function_ref_is_rejected() {
-        let code = [OP_CALL_FUNC, 9, 0, 0, 0, OP_OUT_VAL, OP_HALT];
+        let code = TestOps::new().call_func(9, 0, 0).out_val().halt().build();
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1433,20 +1416,12 @@ mod tests {
 
     #[test]
     fn call_func_stack_requirements_are_verified() {
-        let code = [
-            OP_LOAD_ARG,
-            0,
-            0,
-            0,
-            0,
-            OP_CALL_FUNC,
-            0,
-            0,
-            2,
-            0,
-            OP_OUT_VAL,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(0)
+            .call_func(0, 2, 0)
+            .out_val()
+            .halt()
+            .build();
         let bytes = build_catalog_with_funcs(
             &["main"],
             "",
@@ -1664,7 +1639,7 @@ mod tests {
                 name_str_id: 0,
                 entry_pc: 0,
             }],
-            &[OP_OUT_SLICE, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT],
+            &TestOps::new().out_slice(0, 5).halt().build(),
         );
 
         let mut seed = 0x4d46_4341_545f_4655_u64;
