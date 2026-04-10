@@ -183,3 +183,375 @@ fn opcode_len(opcode: u8) -> Option<usize> {
         _ => return None,
     })
 }
+
+/// Fluent bytecode builder for tests.
+///
+/// Eliminates manual byte arithmetic — especially for jump offsets — by
+/// supporting symbolic labels that are resolved in `build()`.
+#[cfg(test)]
+pub(crate) struct TestOps {
+    code: Vec<u8>,
+    labels: alloc::collections::BTreeMap<&'static str, usize>,
+    /// (label name, patch offset of rel32, `next_pc` after the instruction)
+    fixups: Vec<(&'static str, usize, usize)>,
+}
+
+#[cfg(test)]
+#[allow(
+    unreachable_pub,
+    dead_code,
+    reason = "pub methods are the builder API surface used in tests"
+)]
+impl TestOps {
+    pub fn new() -> Self {
+        Self {
+            code: Vec::new(),
+            labels: alloc::collections::BTreeMap::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    // -- 1-byte instructions --------------------------------------------------
+
+    pub fn halt(mut self) -> Self {
+        self.code.push(OP_HALT);
+        self
+    }
+
+    pub fn select_begin(mut self) -> Self {
+        self.code.push(OP_SELECT_BEGIN);
+        self
+    }
+
+    pub fn select_end(mut self) -> Self {
+        self.code.push(OP_SELECT_END);
+        self
+    }
+
+    pub fn out_val(mut self) -> Self {
+        self.code.push(OP_OUT_VAL);
+        self
+    }
+
+    // -- 5-byte: opcode + u32 -------------------------------------------------
+
+    pub fn push_const(mut self, str_id: u32) -> Self {
+        self.code.push(OP_PUSH_CONST);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    pub fn load_arg(mut self, str_id: u32) -> Self {
+        self.code.push(OP_LOAD_ARG);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    pub fn out_lit(mut self, str_id: u32) -> Self {
+        self.code.push(OP_OUT_LIT);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    pub fn out_arg(mut self, str_id: u32) -> Self {
+        self.code.push(OP_OUT_ARG);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    pub fn select_arg(mut self, str_id: u32) -> Self {
+        self.code.push(OP_SELECT_ARG);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    pub fn expr_fallback(mut self, str_id: u32) -> Self {
+        self.code.push(OP_EXPR_FALLBACK);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    // -- 9-byte: opcode + u32 + u32 -------------------------------------------
+
+    pub fn out_slice(mut self, offset: u32, len: u32) -> Self {
+        self.code.push(OP_OUT_SLICE);
+        self.code.extend_from_slice(&offset.to_le_bytes());
+        self.code.extend_from_slice(&len.to_le_bytes());
+        self
+    }
+
+    pub fn out_expr(mut self, offset: u32, len: u32) -> Self {
+        self.code.push(OP_OUT_EXPR);
+        self.code.extend_from_slice(&offset.to_le_bytes());
+        self.code.extend_from_slice(&len.to_le_bytes());
+        self
+    }
+
+    // -- label-based jumps (rel32 resolved in build) --------------------------
+
+    pub fn jmp(mut self, label: &'static str) -> Self {
+        self.code.push(OP_JMP);
+        let patch = self.code.len();
+        self.code.extend_from_slice(&0_i32.to_le_bytes());
+        let next_pc = self.code.len();
+        self.fixups.push((label, patch, next_pc));
+        self
+    }
+
+    pub fn jmp_if_false(mut self, label: &'static str) -> Self {
+        self.code.push(OP_JMP_IF_FALSE);
+        let patch = self.code.len();
+        self.code.extend_from_slice(&0_i32.to_le_bytes());
+        let next_pc = self.code.len();
+        self.fixups.push((label, patch, next_pc));
+        self
+    }
+
+    pub fn case_str(mut self, str_id: u32, label: &'static str) -> Self {
+        self.code.push(OP_CASE_STR);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        let patch = self.code.len();
+        self.code.extend_from_slice(&0_i32.to_le_bytes());
+        let next_pc = self.code.len();
+        self.fixups.push((label, patch, next_pc));
+        self
+    }
+
+    pub fn case_default(mut self, label: &'static str) -> Self {
+        self.code.push(OP_CASE_DEFAULT);
+        let patch = self.code.len();
+        self.code.extend_from_slice(&0_i32.to_le_bytes());
+        let next_pc = self.code.len();
+        self.fixups.push((label, patch, next_pc));
+        self
+    }
+
+    // -- raw-offset jumps (no label resolution) -------------------------------
+
+    pub fn jmp_rel(mut self, rel: i32) -> Self {
+        self.code.push(OP_JMP);
+        self.code.extend_from_slice(&rel.to_le_bytes());
+        self
+    }
+
+    pub fn jmp_if_false_rel(mut self, rel: i32) -> Self {
+        self.code.push(OP_JMP_IF_FALSE);
+        self.code.extend_from_slice(&rel.to_le_bytes());
+        self
+    }
+
+    pub fn case_str_rel(mut self, str_id: u32, rel: i32) -> Self {
+        self.code.push(OP_CASE_STR);
+        self.code.extend_from_slice(&str_id.to_le_bytes());
+        self.code.extend_from_slice(&rel.to_le_bytes());
+        self
+    }
+
+    pub fn case_default_rel(mut self, rel: i32) -> Self {
+        self.code.push(OP_CASE_DEFAULT);
+        self.code.extend_from_slice(&rel.to_le_bytes());
+        self
+    }
+
+    // -- function calls: opcode + u16(fn_id) + u8(arg_count) + u8(optc) ------
+
+    pub fn call_func(mut self, fn_id: u16, arg_count: u8, optc: u8) -> Self {
+        self.code.push(OP_CALL_FUNC);
+        self.code.extend_from_slice(&fn_id.to_le_bytes());
+        self.code.push(arg_count);
+        self.code.push(optc);
+        self
+    }
+
+    pub fn call_select(mut self, fn_id: u16, arg_count: u8, optc: u8) -> Self {
+        self.code.push(OP_CALL_SELECT);
+        self.code.extend_from_slice(&fn_id.to_le_bytes());
+        self.code.push(arg_count);
+        self.code.push(optc);
+        self
+    }
+
+    // -- markup: opcode + u32(name_id) + u8(optc) ----------------------------
+
+    pub fn markup_open(mut self, name_id: u32, optc: u8) -> Self {
+        self.code.push(OP_MARKUP_OPEN);
+        self.code.extend_from_slice(&name_id.to_le_bytes());
+        self.code.push(optc);
+        self
+    }
+
+    pub fn markup_close(mut self, name_id: u32, optc: u8) -> Self {
+        self.code.push(OP_MARKUP_CLOSE);
+        self.code.extend_from_slice(&name_id.to_le_bytes());
+        self.code.push(optc);
+        self
+    }
+
+    // -- pseudo-instructions --------------------------------------------------
+
+    /// Zero-width label marker at the current byte offset.
+    pub fn label(mut self, name: &'static str) -> Self {
+        let offset = self.code.len();
+        if self.labels.insert(name, offset).is_some() {
+            panic!("duplicate label: {name}");
+        }
+        self
+    }
+
+    /// Append raw bytes (escape hatch for unusual encodings).
+    pub fn raw(mut self, bytes: &[u8]) -> Self {
+        self.code.extend_from_slice(bytes);
+        self
+    }
+
+    /// Consume the builder and return the bytecode, resolving all label fixups.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any label referenced by a jump was never defined.
+    pub fn build(mut self) -> Vec<u8> {
+        for (label, patch, next_pc) in &self.fixups {
+            let target = self
+                .labels
+                .get(label)
+                .unwrap_or_else(|| panic!("unresolved label: {label}"));
+            let target_i = isize::try_from(*target).expect("target overflows isize");
+            let next_i = isize::try_from(*next_pc).expect("next_pc overflows isize");
+            let rel = i32::try_from(target_i - next_i).expect("jump offset overflows i32");
+            self.code[*patch..*patch + 4].copy_from_slice(&rel.to_le_bytes());
+        }
+        self.code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn simple_bytecode_matches_expected_bytes() {
+        let code = TestOps::new().out_arg(1).halt().build();
+        assert_eq!(code, vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT]);
+    }
+
+    #[test]
+    fn forward_label_resolution() {
+        let code = TestOps::new()
+            .jmp("end")
+            .out_arg(1)
+            .label("end")
+            .halt()
+            .build();
+        // JMP next_pc=5, target=10 → rel=5
+        assert_eq!(
+            code,
+            vec![OP_JMP, 5, 0, 0, 0, OP_OUT_ARG, 1, 0, 0, 0, OP_HALT]
+        );
+    }
+
+    #[test]
+    fn backward_label_resolution() {
+        let code = TestOps::new()
+            .label("top")
+            .load_arg(1)
+            .jmp_if_false("top")
+            .halt()
+            .build();
+        // JMP_IF_FALSE next_pc=10, target=0 → rel=-10
+        let rel = (-10_i32).to_le_bytes();
+        assert_eq!(
+            code,
+            vec![
+                OP_LOAD_ARG,
+                1,
+                0,
+                0,
+                0,
+                OP_JMP_IF_FALSE,
+                rel[0],
+                rel[1],
+                rel[2],
+                rel[3],
+                OP_HALT,
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate label")]
+    fn duplicate_label_panics() {
+        TestOps::new().label("x").label("x").build();
+    }
+
+    #[test]
+    #[should_panic(expected = "unresolved label")]
+    fn unresolved_label_panics() {
+        TestOps::new().jmp("missing").build();
+    }
+
+    #[test]
+    fn select_dispatch_matches_handwritten_bytes() {
+        // Reproduce the canonical select pattern from vm.rs tests.
+        let handwritten: Vec<u8> = vec![
+            OP_SELECT_ARG,
+            1,
+            0,
+            0,
+            0,
+            OP_CASE_STR,
+            2,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            OP_CASE_DEFAULT,
+            14,
+            0,
+            0,
+            0,
+            OP_OUT_SLICE,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            OP_JMP,
+            9,
+            0,
+            0,
+            0,
+            OP_OUT_SLICE,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            OP_SELECT_END,
+            OP_HALT,
+        ];
+        let built = TestOps::new()
+            .select_arg(1)
+            .case_str(2, "hit")
+            .case_default("default")
+            .label("hit")
+            .out_slice(0, 1)
+            .jmp("end")
+            .label("default")
+            .out_slice(1, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
+        assert_eq!(built, handwritten);
+    }
+}

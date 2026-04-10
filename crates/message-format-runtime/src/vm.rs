@@ -1211,6 +1211,7 @@ mod tests {
     use super::*;
     use crate::catalog::{FuncEntry, MessageEntry, build_catalog, build_catalog_with_funcs};
     use crate::error::{ImplementationFailure, MessageFunctionError};
+    use crate::schema::TestOps;
 
     fn catalog_for_test(strings: &[&str], literals: &str, code: &[u8]) -> Catalog {
         let bytes = if let Some(func_count) = max_function_id(code).map(|id| usize::from(id) + 1) {
@@ -1328,32 +1329,12 @@ mod tests {
 
     #[test]
     fn executes_literal_and_arg() {
-        let code = vec![
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            6,
-            0,
-            0,
-            0,
-            OP_OUT_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            6,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .out_slice(0, 6)
+            .out_arg(1)
+            .out_slice(6, 1)
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["hello", "name"], "Hello !", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = vec![(arg_id(&catalog, "name"), Value::Str("World".to_string()))];
@@ -1365,7 +1346,7 @@ mod tests {
 
     #[test]
     fn missing_arg_renders_fallback() {
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let out = formatter
@@ -1376,7 +1357,7 @@ mod tests {
 
     #[test]
     fn missing_arg_direct_interpolation_records_diagnostic() {
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = TestStringSink::default();
@@ -1389,25 +1370,13 @@ mod tests {
 
     #[test]
     fn missing_arg_in_function_call_records_diagnostic_and_uses_expr_fallback() {
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_EXPR_FALLBACK,
-            2,
-            0,
-            0,
-            0,
-            OP_CALL_FUNC,
-            9,
-            0,
-            1,
-            0,
-            OP_OUT_VAL,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .expr_fallback(2)
+            .call_func(9, 1, 0)
+            .out_val()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "name", "{$name}"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = TestStringSink::default();
@@ -1430,52 +1399,19 @@ mod tests {
 
     #[test]
     fn missing_selector_records_diagnostic_and_uses_default_arm() {
-        let code = vec![
-            OP_SELECT_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CASE_STR,
-            2,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0,
-            OP_CASE_DEFAULT,
-            14,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_JMP,
-            9,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            1,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_SELECT_END,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .select_arg(1)
+            .case_str(2, "hit")
+            .case_default("default")
+            .label("hit")
+            .out_slice(0, 1)
+            .jmp("end")
+            .label("default")
+            .out_slice(1, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "sel", "hit"], "HD", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = TestStringSink::default();
@@ -1516,58 +1452,21 @@ mod tests {
             }
         }
 
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CALL_SELECT,
-            0,
-            0,
-            1,
-            0,
-            OP_SELECT_BEGIN,
-            OP_CASE_STR,
-            2,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0,
-            OP_CASE_DEFAULT,
-            14,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_JMP,
-            9,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            1,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_SELECT_END,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .call_select(0, 1, 0)
+            .select_begin()
+            .case_str(2, "hit")
+            .case_default("default")
+            .label("hit")
+            .out_slice(0, 1)
+            .jmp("end")
+            .label("default")
+            .out_slice(1, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "sel", "hit"], "HD", &code);
         let mut formatter = Formatter::new(&catalog, FailingSelectHost);
         let args = vec![(arg_id(&catalog, "sel"), Value::Int(1))];
@@ -1588,53 +1487,20 @@ mod tests {
 
     #[test]
     fn legacy_load_arg_select_begin_sequence_still_formats() {
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_SELECT_BEGIN,
-            OP_CASE_STR,
-            2,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0,
-            OP_CASE_DEFAULT,
-            14,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_JMP,
-            9,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            1,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            OP_SELECT_END,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .select_begin()
+            .case_str(2, "hit")
+            .case_default("default")
+            .label("hit")
+            .out_slice(0, 1)
+            .jmp("end")
+            .label("default")
+            .out_slice(1, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "sel", "hit"], "HD", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = vec![(arg_id(&catalog, "sel"), Value::Str("hit".to_string()))];
@@ -1646,7 +1512,7 @@ mod tests {
 
     #[test]
     fn unknown_function_is_error_by_default() {
-        let code = vec![OP_CALL_FUNC, 7, 0, 0, 0, OP_OUT_VAL, OP_HALT];
+        let code = TestOps::new().call_func(7, 0, 0).out_val().halt().build();
         let catalog = catalog_for_test(&["main"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let err = formatter
@@ -1671,25 +1537,13 @@ mod tests {
             }
         }
 
-        let code = vec![
-            OP_PUSH_CONST,
-            1,
-            0,
-            0,
-            0, // key
-            OP_PUSH_CONST,
-            2,
-            0,
-            0,
-            0, // value
-            OP_CALL_FUNC,
-            1,
-            0,
-            0,
-            1, // arg_count=0 optc=1
-            OP_OUT_VAL,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .push_const(1)
+            .push_const(2)
+            .call_func(1, 0, 1)
+            .out_val()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "k", "v"], "", &code);
         let mut formatter = Formatter::new(&catalog, HostEchoOptCount);
         let out = formatter
@@ -1700,7 +1554,7 @@ mod tests {
 
     #[test]
     fn format_handle_matches_by_id() {
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let handle = formatter.resolve("main").expect("resolved");
@@ -1728,7 +1582,7 @@ mod tests {
             }
         }
 
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = RefOnlyArgs {
@@ -1813,29 +1667,14 @@ mod tests {
 
     #[test]
     fn fuel_exhaustion_traps() {
-        // Construct a loop that passes the verifier (halt is reachable via
-        // the fall-through edge of JMP_IF_FALSE) but always takes the backward
-        // branch at runtime because LOAD_ARG for a missing arg pushes Null
-        // which is falsey.
-        //
-        // pc  0: LOAD_ARG "missing"  (5 bytes)  -> pushes Null
-        // pc  5: JMP_IF_FALSE rel=-10 (5 bytes) -> Null is falsey, jumps to pc 0
-        // pc 10: HALT                 (1 byte)   -> reachable for verifier
-        let rel: i32 = -10;
-        let rel_bytes = rel.to_le_bytes();
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_JMP_IF_FALSE,
-            rel_bytes[0],
-            rel_bytes[1],
-            rel_bytes[2],
-            rel_bytes[3],
-            OP_HALT,
-        ];
+        // Infinite loop: LOAD_ARG for missing arg pushes Null (falsey),
+        // so JMP_IF_FALSE always jumps back. HALT is reachable for the verifier.
+        let code = TestOps::new()
+            .label("top")
+            .load_arg(1)
+            .jmp_if_false("top")
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "missing"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         formatter.set_fuel(Some(100));
@@ -1847,7 +1686,7 @@ mod tests {
 
     #[test]
     fn fuel_sufficient_succeeds() {
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         formatter.set_fuel(Some(10));
@@ -1860,7 +1699,7 @@ mod tests {
 
     #[test]
     fn fuel_none_is_unlimited() {
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         formatter.set_fuel(None);
@@ -1873,7 +1712,7 @@ mod tests {
 
     #[test]
     fn legacy_load_arg_out_val_sequence_still_formats() {
-        let code = vec![OP_LOAD_ARG, 1, 0, 0, 0, OP_OUT_VAL, OP_HALT];
+        let code = TestOps::new().load_arg(1).out_val().halt().build();
         let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = vec![(arg_id(&catalog, "name"), Value::Str("Ada".to_string()))];
@@ -1910,22 +1749,12 @@ mod tests {
             }
         }
 
-        // String pool: 0="main", 1="x", 2="yes"
-        // LOAD_ARG "x", CALL_SELECT fn=0 args=1 opts=0, OUT_VAL, HALT
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CALL_SELECT,
-            0,
-            0,
-            1,
-            0,
-            OP_OUT_VAL,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .call_select(0, 1, 0)
+            .out_val()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "x", "yes"], "", &code);
         let mut formatter = Formatter::new(&catalog, SelectOnlyHost);
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
@@ -1951,20 +1780,12 @@ mod tests {
             }
         }
 
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CALL_SELECT,
-            0,
-            0,
-            1,
-            0,
-            OP_OUT_VAL,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .call_select(0, 1, 0)
+            .out_val()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "x"], "", &code);
         let mut formatter = Formatter::new(&catalog, DefaultSelectHost);
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
@@ -1997,7 +1818,7 @@ mod tests {
             }
         }
 
-        let code = vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "n"], "", &code);
         let mut formatter = Formatter::new(&catalog, DefaultFormatHost);
         let args = vec![(arg_id(&catalog, "n"), Value::Int(7))];
@@ -2025,7 +1846,7 @@ mod tests {
             }
         }
 
-        let code = vec![OP_CALL_FUNC, 0, 0, 0, 0, OP_OUT_VAL, OP_HALT];
+        let code = TestOps::new().call_func(0, 0, 0).out_val().halt().build();
         let catalog = catalog_for_test(&["main"], "", &code);
         let mut formatter = Formatter::new(&catalog, FailingHost);
         let err = formatter
@@ -2056,66 +1877,21 @@ mod tests {
             }
         }
 
-        // String pool: 0="main", 1="x", 2="alpha", 3="beta"
-        // Bytecode: LOAD_ARG "x", CALL_FUNC fn=0 args=1 opts=0,
-        //           SELECT_BEGIN,
-        //           CASE_STR "alpha"(2) -> hit branch,
-        //           CASE_DEFAULT -> miss branch,
-        //           hit: OUT_SLICE "HIT", JMP end,
-        //           miss: OUT_SLICE "MISS",
-        //           SELECT_END, HALT
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0, // pc 0
-            OP_CALL_FUNC,
-            0,
-            0,
-            1,
-            0,               // pc 5
-            OP_SELECT_BEGIN, // pc 10
-            OP_CASE_STR,
-            2,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0, // pc 11, jump +5 -> pc 25
-            OP_CASE_DEFAULT,
-            14,
-            0,
-            0,
-            0, // pc 20, jump +14 -> pc 39
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            3,
-            0,
-            0,
-            0, // pc 25, "HIT"
-            OP_JMP,
-            9,
-            0,
-            0,
-            0, // pc 34, jump +9 -> pc 48
-            OP_OUT_SLICE,
-            3,
-            0,
-            0,
-            0,
-            4,
-            0,
-            0,
-            0,             // pc 39, "MISS"
-            OP_SELECT_END, // pc 48
-            OP_HALT,       // pc 49
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .call_func(0, 1, 0)
+            .select_begin()
+            .case_str(2, "hit")
+            .case_default("miss")
+            .label("hit")
+            .out_slice(0, 3)
+            .jmp("end")
+            .label("miss")
+            .out_slice(3, 4)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "x", "alpha", "beta"], "HITMISS", &code);
         let mut formatter = Formatter::new(&catalog, StrRefHost);
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
@@ -2144,58 +1920,21 @@ mod tests {
 
         // Same layout as above but host returns StrRef(3)="beta",
         // CASE_STR checks for "alpha"(2) — ID mismatch, falls to default.
-        let code = vec![
-            OP_LOAD_ARG,
-            1,
-            0,
-            0,
-            0,
-            OP_CALL_FUNC,
-            0,
-            0,
-            1,
-            0,
-            OP_SELECT_BEGIN,
-            OP_CASE_STR,
-            2,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0,
-            OP_CASE_DEFAULT,
-            14,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            3,
-            0,
-            0,
-            0,
-            OP_JMP,
-            9,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            3,
-            0,
-            0,
-            0,
-            4,
-            0,
-            0,
-            0,
-            OP_SELECT_END,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .load_arg(1)
+            .call_func(0, 1, 0)
+            .select_begin()
+            .case_str(2, "hit")
+            .case_default("miss")
+            .label("hit")
+            .out_slice(0, 3)
+            .jmp("end")
+            .label("miss")
+            .out_slice(3, 4)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "x", "alpha", "beta"], "HITMISS", &code);
         let mut formatter = Formatter::new(&catalog, StrRefMissHost);
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
@@ -2248,31 +1987,12 @@ mod tests {
 
     #[test]
     fn markup_open_close_produce_no_string_output() {
-        // OP_MARKUP_OPEN "b" (str_id=1) optc=0, OP_MARKUP_CLOSE "b" optc=0
-        let code = vec![
-            OP_MARKUP_OPEN,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            2,
-            0,
-            0,
-            0,
-            OP_MARKUP_CLOSE,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .markup_open(1, 0)
+            .out_slice(0, 2)
+            .markup_close(1, 0)
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "b"], "hi", &code);
         let mut formatter = formatter_noop(&catalog);
         let out = formatter
@@ -2284,8 +2004,8 @@ mod tests {
     #[test]
     fn out_expr_produces_same_string_as_out_slice() {
         // OP_OUT_EXPR uses same encoding as OP_OUT_SLICE
-        let code_expr = vec![OP_OUT_EXPR, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT];
-        let code_slice = vec![OP_OUT_SLICE, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT];
+        let code_expr = TestOps::new().out_expr(0, 5).halt().build();
+        let code_slice = TestOps::new().out_slice(0, 5).halt().build();
         let catalog_expr = catalog_for_test(&["main"], "Hello", &code_expr);
         let catalog_slice = catalog_for_test(&["main"], "Hello", &code_slice);
         let mut fmt_expr = formatter_noop(&catalog_expr);
@@ -2299,38 +2019,14 @@ mod tests {
 
     #[test]
     fn format_to_sink_receives_correct_events() {
-        // "Hello " (literal text) + $name (expression) + markup open/close around it
-        // MARKUP_OPEN "b" optc=0, OUT_SLICE "Hello ", LOAD_ARG "name", OUT_VAL, MARKUP_CLOSE "b" optc=0
-        let code = vec![
-            OP_MARKUP_OPEN,
-            1,
-            0,
-            0,
-            0,
-            0, // {#b}
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            6,
-            0,
-            0,
-            0, // "Hello "
-            OP_LOAD_ARG,
-            2,
-            0,
-            0,
-            0,          // $name
-            OP_OUT_VAL, // output
-            OP_MARKUP_CLOSE,
-            1,
-            0,
-            0,
-            0,
-            0, // {/b}
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .markup_open(1, 0)
+            .out_slice(0, 6)
+            .load_arg(2)
+            .out_val()
+            .markup_close(1, 0)
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "b", "name"], "Hello ", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = vec![(arg_id(&catalog, "name"), Value::Str("World".to_string()))];
@@ -2352,42 +2048,14 @@ mod tests {
 
     #[test]
     fn markup_options_with_literal_values_resolve_in_sink() {
-        // PUSH_CONST "href"(2), PUSH_CONST "https://example.com"(3),
-        // MARKUP_OPEN "a"(1) optc=1
-        let code = vec![
-            OP_PUSH_CONST,
-            2,
-            0,
-            0,
-            0,
-            OP_PUSH_CONST,
-            3,
-            0,
-            0,
-            0,
-            OP_MARKUP_OPEN,
-            1,
-            0,
-            0,
-            0,
-            1,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            4,
-            0,
-            0,
-            0,
-            OP_MARKUP_CLOSE,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .push_const(2)
+            .push_const(3)
+            .markup_open(1, 1)
+            .out_slice(0, 4)
+            .markup_close(1, 0)
+            .halt()
+            .build();
         let catalog =
             catalog_for_test(&["main", "a", "href", "https://example.com"], "link", &code);
         let mut formatter = formatter_noop(&catalog);
@@ -2410,42 +2078,14 @@ mod tests {
 
     #[test]
     fn markup_options_with_variable_values_resolve_in_sink() {
-        // PUSH_CONST "href"(2), LOAD_ARG "url"(3),
-        // MARKUP_OPEN "a"(1) optc=1
-        let code = vec![
-            OP_PUSH_CONST,
-            2,
-            0,
-            0,
-            0,
-            OP_LOAD_ARG,
-            3,
-            0,
-            0,
-            0,
-            OP_MARKUP_OPEN,
-            1,
-            0,
-            0,
-            0,
-            1,
-            OP_OUT_SLICE,
-            0,
-            0,
-            0,
-            0,
-            5,
-            0,
-            0,
-            0,
-            OP_MARKUP_CLOSE,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .push_const(2)
+            .load_arg(3)
+            .markup_open(1, 1)
+            .out_slice(0, 5)
+            .markup_close(1, 0)
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "a", "href", "url"], "click", &code);
         let mut formatter = formatter_noop(&catalog);
         let args = vec![(
@@ -2471,22 +2111,11 @@ mod tests {
 
     #[test]
     fn self_closing_markup_produces_open_close_events() {
-        // MARKUP_OPEN "br"(1) optc=0, MARKUP_CLOSE "br"(1) optc=0
-        let code = vec![
-            OP_MARKUP_OPEN,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_MARKUP_CLOSE,
-            1,
-            0,
-            0,
-            0,
-            0,
-            OP_HALT,
-        ];
+        let code = TestOps::new()
+            .markup_open(1, 0)
+            .markup_close(1, 0)
+            .halt()
+            .build();
         let catalog = catalog_for_test(&["main", "br"], "", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = CollectingSink::default();
@@ -2504,7 +2133,7 @@ mod tests {
 
     #[test]
     fn out_expr_dispatches_as_expression_event() {
-        let code = vec![OP_OUT_EXPR, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_expr(0, 5).halt().build();
         let catalog = catalog_for_test(&["main"], "hello", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = CollectingSink::default();
@@ -2519,7 +2148,7 @@ mod tests {
 
     #[test]
     fn out_slice_dispatches_as_literal_event() {
-        let code = vec![OP_OUT_SLICE, 0, 0, 0, 0, 5, 0, 0, 0, OP_HALT];
+        let code = TestOps::new().out_slice(0, 5).halt().build();
         let catalog = catalog_for_test(&["main"], "hello", &code);
         let mut formatter = formatter_noop(&catalog);
         let mut sink = CollectingSink::default();
