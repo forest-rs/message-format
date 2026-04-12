@@ -34,10 +34,15 @@
 //!
 //! # Advanced Flow
 //!
+//! A [`CatalogBundle`] creates a multi-catalog formatter with message-level
+//! fallback. All catalogs whose locale appears in the CLDR fallback chain for
+//! the requested locale are searched in order, so a message missing from a
+//! more-specific catalog can still be found in a less-specific one.
+//!
 //! ```rust
 //! # #[cfg(all(feature = "compile", feature = "icu4x"))]
 //! # {
-//! use message_format::{CatalogBundle, Locale, LocalePolicy, MessageArgs, MessageCatalog, compiler::CompileOptions};
+//! use message_format::{CatalogBundle, Locale, MessageArgs, MessageCatalog, compiler::CompileOptions};
 //!
 //! let mut bundle = CatalogBundle::new();
 //! let fr: Locale = "fr".parse().unwrap();
@@ -48,7 +53,7 @@
 //! bundle.insert(en.clone(), en_catalog);
 //!
 //! let requested: Locale = "fr-CA".parse().unwrap();
-//! let mut formatter = bundle.formatter_with_locale(&requested, LocalePolicy::Lookup).unwrap();
+//! let mut formatter = bundle.formatter_for_locale(&requested).unwrap();
 //! let mut args = MessageArgs::new();
 //! args.insert("name", "Ada");
 //! assert_eq!(formatter.format_by_id("main", &args).unwrap(), "Salut Ada");
@@ -80,15 +85,15 @@ pub use message_format_compiler as compiler;
 mod args;
 mod catalog;
 mod formatter;
-mod options;
-
 pub use args::MessageArgs;
 pub use catalog::{CatalogBundle, LocalizedCatalog, MessageCatalog};
 pub use formatter::MessageFormatter;
-pub use options::LocalePolicy;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    use crate::catalog::locale_candidates;
+
     #[cfg(all(feature = "compile", feature = "icu4x"))]
     use super::runtime::{FormatError, Trap};
     #[cfg(any(
@@ -225,7 +230,7 @@ mod tests {
         );
 
         let mut formatter = bundle
-            .formatter_with_locale(&locale("fr-CA"), LocalePolicy::Lookup)
+            .formatter_for_locale(&locale("fr-CA"))
             .expect("lookup formatter");
 
         let mut args = MessageArgs::new();
@@ -238,7 +243,7 @@ mod tests {
 
     #[cfg(all(feature = "compile", feature = "icu4x"))]
     #[test]
-    fn bundle_exact_uses_requested_locale_catalog() {
+    fn bundle_returns_exact_match_when_available() {
         let mut bundle = CatalogBundle::new();
         let en_catalog = MessageCatalog::compile_str("Hello").expect("compile en");
         let fr_catalog = MessageCatalog::compile_str("Bonjour").expect("compile fr");
@@ -246,8 +251,8 @@ mod tests {
         bundle.insert(locale("fr"), fr_catalog);
 
         let mut formatter = bundle
-            .formatter_with_locale(&locale("fr"), LocalePolicy::Exact)
-            .expect("exact formatter");
+            .formatter_for_locale(&locale("fr"))
+            .expect("formatter");
         let args = MessageArgs::new();
         assert_eq!(
             formatter.format_by_id("main", &args).expect("format"),
@@ -267,7 +272,7 @@ mod tests {
         bundle.insert(locale("fr"), fr_catalog);
 
         let mut formatter = bundle
-            .formatter_with_locale(&locale("en-AU"), LocalePolicy::Lookup)
+            .formatter_for_locale(&locale("en-AU"))
             .expect("lookup formatter");
 
         let mut args = MessageArgs::new();
@@ -284,9 +289,35 @@ mod tests {
     fn empty_bundle_reports_missing_locale_catalog() {
         let bundle = CatalogBundle::new();
         let err = bundle
-            .formatter_with_locale(&locale("en"), LocalePolicy::Lookup)
+            .formatter_for_locale(&locale("en"))
             .expect_err("must fail");
         assert_eq!(err, FormatError::Trap(Trap::MissingLocaleCatalog));
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn bundle_lookup_uses_cldr_parent_locale() {
+        // pt-MZ has CLDR parent pt-PT, not pt (naive truncation would skip pt-PT)
+        let mut bundle = CatalogBundle::new();
+        bundle.insert(
+            locale("pt-PT"),
+            MessageCatalog::compile_str("Olá { $name }").expect("compile pt-PT"),
+        );
+        bundle.insert(
+            locale("pt"),
+            MessageCatalog::compile_str("Oi { $name }").expect("compile pt"),
+        );
+
+        let mut formatter = bundle
+            .formatter_for_locale(&locale("pt-MZ"))
+            .expect("lookup formatter");
+
+        let mut args = MessageArgs::new();
+        args.insert("name", "Ada");
+        assert_eq!(
+            formatter.format_by_id("main", &args).expect("format"),
+            "Olá Ada"
+        );
     }
 
     #[cfg(all(feature = "compile", feature = "icu4x"))]
@@ -299,8 +330,105 @@ mod tests {
         );
 
         let err = bundle
-            .formatter_with_locale(&locale("en-US"), LocalePolicy::Lookup)
+            .formatter_for_locale(&locale("en-US"))
             .expect_err("must fail");
         assert_eq!(err, FormatError::Trap(Trap::MissingLocaleCatalog));
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    fn compile_messages(messages: &[(&str, &str)]) -> MessageCatalog {
+        let (catalog, _) = MessageCatalog::compile_inputs(
+            messages.iter().map(|(id, source)| compiler::CompileInput {
+                name: id,
+                message_id: id,
+                source,
+                kind: compiler::SourceKind::MessageFormat,
+            }),
+            compiler::CompileOptions::default(),
+        )
+        .expect("compile");
+        catalog
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn bundle_message_level_fallback_across_catalogs() {
+        let mut bundle = CatalogBundle::new();
+        // pt-PT only has "greeting"
+        bundle.insert(locale("pt-PT"), compile_messages(&[("greeting", "Olá")]));
+        // pt has both "greeting" and "farewell"
+        bundle.insert(
+            locale("pt"),
+            compile_messages(&[("greeting", "Oi"), ("farewell", "Tchau")]),
+        );
+
+        // pt-MZ CLDR chain: pt-MZ → pt-PT → pt → und
+        let mut formatter = bundle
+            .formatter_for_locale(&locale("pt-MZ"))
+            .expect("lookup formatter");
+        let args = MessageArgs::new();
+
+        // "greeting" found in pt-PT (first catalog in chain)
+        assert_eq!(
+            formatter.format_by_id("greeting", &args).expect("format"),
+            "Olá"
+        );
+        // "farewell" not in pt-PT, falls back to pt (second catalog)
+        assert_eq!(
+            formatter.format_by_id("farewell", &args).expect("format"),
+            "Tchau"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn bundle_fallback_resolves_args_against_matched_catalog() {
+        let mut bundle = CatalogBundle::new();
+        // pt-PT has "greeting" (literal only — "recipient" is NOT interned)
+        bundle.insert(locale("pt-PT"), compile_messages(&[("greeting", "Olá")]));
+        // pt has "farewell" which uses $recipient (interned in pt's string pool)
+        bundle.insert(
+            locale("pt"),
+            compile_messages(&[("farewell", "Adeus { $recipient }")]),
+        );
+
+        let mut formatter = bundle
+            .formatter_for_locale(&locale("pt-MZ"))
+            .expect("lookup formatter");
+        let mut args = MessageArgs::new();
+        args.insert("recipient", "Ada");
+
+        // If args resolved against pt-PT (bug), "recipient" would not be
+        // interned and silently dropped, producing fallback "{$recipient}".
+        assert_eq!(
+            formatter.format_by_id("farewell", &args).expect("format"),
+            "Adeus Ada"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn formatter_host_locale_independent_of_catalog() {
+        // Compile a catalog with a bare expression (no :number annotation).
+        // Float values go through BuiltinHost::format_default which is
+        // locale-sensitive.
+        let catalog = MessageCatalog::compile_str("{ $n }").expect("compile");
+
+        // Create a formatter with host locale "fr" (French formatting uses
+        // comma as decimal separator) — the catalog itself has no locale.
+        let mut formatter = MessageFormatter::new(
+            core::iter::once(catalog.as_runtime_catalog()),
+            locale_candidates(&locale("fr")),
+        )
+        .expect("formatter");
+
+        let mut args = MessageArgs::new();
+        args.insert("n", 123.5);
+
+        let result = formatter.format_by_id("main", &args).expect("format");
+
+        // French replaces '.' with ',' → "123,5".
+        // English would produce "123.5" (period decimal).
+        assert_eq!(result, "123,5");
     }
 }

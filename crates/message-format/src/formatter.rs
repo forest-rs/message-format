@@ -5,7 +5,7 @@ use alloc::string::String;
 
 use icu_locale_core::Locale;
 
-use crate::{MessageArgs, options::LocalePolicy, runtime};
+use crate::{MessageArgs, runtime};
 
 struct OutputStringSink<'a> {
     out: &'a mut String,
@@ -25,59 +25,50 @@ impl runtime::FormatSink for OutputStringSink<'_> {
     fn markup_close(&mut self, _name: &str, _options: &[runtime::FormatOption<'_>]) {}
 }
 
-/// Reusable formatter bound to a loaded catalog and host behavior.
+/// Reusable formatter that resolves messages across one or more catalogs.
+///
+/// When multiple catalogs are provided, messages are resolved by searching
+/// catalogs in the order they were given. This enables message-level fallback:
+/// if a message is missing from the primary catalog, it can be found in a
+/// secondary one without duplicating messages at compile time.
+///
+/// Arguments are automatically resolved against the catalog that owns the
+/// matched message, so string-pool ids stay consistent.
 #[derive(Debug)]
 pub struct MessageFormatter<'a> {
-    catalog: &'a runtime::Catalog,
     #[cfg(feature = "icu4x")]
-    inner: runtime::Formatter<'a, runtime::BuiltinHost>,
+    inner: runtime::MultiFormatter<'a, runtime::BuiltinHost>,
     #[cfg(not(feature = "icu4x"))]
-    inner: runtime::Formatter<'a, runtime::NoopHost>,
+    inner: runtime::MultiFormatter<'a, runtime::NoopHost>,
 }
 
 impl<'a> MessageFormatter<'a> {
     #[cfg(feature = "icu4x")]
     pub(crate) fn new(
-        catalog: &'a runtime::Catalog,
-        locale: &Locale,
-        policy: LocalePolicy,
+        catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
+        candidates: impl IntoIterator<Item = Locale>,
     ) -> Result<Self, runtime::FormatError> {
-        match policy {
-            LocalePolicy::Exact => {
-                let host = runtime::BuiltinHost::new(locale)?;
-                Ok(Self {
-                    catalog,
-                    inner: runtime::Formatter::new(catalog, host)?,
-                })
-            }
-            LocalePolicy::Lookup => {
-                let mut last_err = None;
-                for candidate in runtime::locale_fallback_candidates(locale) {
-                    match runtime::BuiltinHost::new(&candidate) {
-                        Ok(host) => {
-                            return Ok(Self {
-                                catalog,
-                                inner: runtime::Formatter::new(catalog, host)?,
-                            });
-                        }
-                        Err(err) => last_err = Some(err),
-                    }
+        let mut last_err = None;
+        for candidate in candidates {
+            match runtime::BuiltinHost::new(&candidate) {
+                Ok(host) => {
+                    return Ok(Self {
+                        inner: runtime::MultiFormatter::new(catalogs, host)?,
+                    });
                 }
-                Err(last_err
-                    .unwrap_or(runtime::FormatError::Trap(runtime::Trap::UnsupportedLocale)))
+                Err(err) => last_err = Some(err),
             }
         }
+        Err(last_err.unwrap_or(runtime::FormatError::Trap(runtime::Trap::UnsupportedLocale)))
     }
 
     #[cfg(not(feature = "icu4x"))]
     pub(crate) fn new(
-        catalog: &'a runtime::Catalog,
-        _locale: &Locale,
-        _policy: LocalePolicy,
+        catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
+        _candidates: impl IntoIterator<Item = Locale>,
     ) -> Result<Self, runtime::FormatError> {
         Ok(Self {
-            catalog,
-            inner: runtime::Formatter::new(catalog, runtime::NoopHost)?,
+            inner: runtime::MultiFormatter::new(catalogs, runtime::NoopHost)?,
         })
     }
 
@@ -88,23 +79,25 @@ impl<'a> MessageFormatter<'a> {
 
     /// Resolve a message id to a reusable handle.
     ///
-    /// Reuse the returned handle across repeated formatting calls to avoid
-    /// per-call message-id lookup.
+    /// Searches catalogs in the order they were provided and returns a handle
+    /// to the first catalog that contains the message. Reuse the returned
+    /// handle across repeated formatting calls to avoid per-call lookup.
     pub fn resolve(
         &self,
         message_id: &str,
-    ) -> Result<runtime::MessageHandle, runtime::FormatError> {
+    ) -> Result<runtime::MultiMessageHandle, runtime::FormatError> {
         self.inner.resolve(message_id)
     }
 
     /// Format one message from a previously resolved handle.
     ///
-    /// Recoverable diagnostics from fallback rendering are ignored in this
-    /// convenience API. Markup is flattened away; use
-    /// [`runtime::Formatter::format_to`] for structured output.
+    /// Arguments are resolved against the catalog that owns the matched
+    /// message. Recoverable diagnostics from fallback rendering are ignored
+    /// in this convenience API. Markup is flattened away; use
+    /// [`runtime::MultiFormatter::format_to`] for structured output.
     pub fn format(
         &mut self,
-        message: runtime::MessageHandle,
+        message: runtime::MultiMessageHandle,
         args: &MessageArgs,
     ) -> Result<String, runtime::FormatError> {
         let mut out = String::new();
@@ -118,12 +111,13 @@ impl<'a> MessageFormatter<'a> {
     /// convenience API. Use runtime-level sink APIs when diagnostics are needed.
     fn format_into(
         &mut self,
-        message: runtime::MessageHandle,
+        message: runtime::MultiMessageHandle,
         args: &MessageArgs,
         out: &mut String,
     ) -> Result<(), runtime::FormatError> {
         out.clear();
-        let resolved = args.resolve(self.catalog);
+        let catalog = self.inner.catalog_for(message)?;
+        let resolved = args.resolve(catalog);
         let mut sink = OutputStringSink { out };
         let _diagnostics = self.inner.format_to(message, &resolved, &mut sink)?;
         Ok(())
@@ -133,7 +127,7 @@ impl<'a> MessageFormatter<'a> {
     ///
     /// Recoverable diagnostics from fallback rendering are ignored in this
     /// convenience API. Markup is flattened away; use
-    /// [`runtime::Formatter::format_to`] for structured output.
+    /// [`runtime::MultiFormatter::format_to`] for structured output.
     pub fn format_by_id(
         &mut self,
         message_id: &str,
