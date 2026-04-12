@@ -252,6 +252,8 @@ pub enum Trap {
     InvalidFallbackStringId,
     /// A program counter computation overflowed the runtime range.
     ProgramCounterOverflow,
+    /// A multi-formatter catalog slot index was out of range.
+    InvalidCatalogIndex,
 }
 
 impl From<CatalogError> for FormatError {
@@ -453,6 +455,7 @@ impl fmt::Display for Trap {
             Self::MarkupOptionKeyWrongType => "MARKUP option key must be int/strref",
             Self::InvalidFallbackStringId => "invalid fallback str id",
             Self::ProgramCounterOverflow => "program counter overflow",
+            Self::InvalidCatalogIndex => "invalid catalog index",
         })
     }
 }
