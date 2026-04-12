@@ -189,9 +189,10 @@ pub use error::{
     CatalogError, FormatError, HostCallError, ImplementationFailure, MessageFunctionError, Trap,
     UnsupportedOperation,
 };
+pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry};
 pub use value::{ArgNameError, Args, MessageArgs, StrId, Value};
-pub use vm::{FormatOption, FormatSink, Formatter, Host, HostFn, MessageHandle, NoopHost};
+pub use vm::{FormatOption, FormatSink, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.
 pub mod catalog;
@@ -201,6 +202,9 @@ pub mod schema;
 
 /// Runtime errors.
 mod error;
+
+/// High-level formatting wrappers.
+mod formatter;
 
 /// Runtime value model and argument adapters.
 mod value;
