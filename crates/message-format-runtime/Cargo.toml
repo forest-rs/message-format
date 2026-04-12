@@ -19,6 +19,9 @@ icu_calendar = { default-features = false, features = [
 icu_datetime = { default-features = false, features = [
     "compiled_data",
 ], optional = true, version = "2.1.1" }
+icu_locale = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
 icu_locale_core = { default-features = false, optional = true, version = "2.1.1" }
 icu_plurals = { default-features = false, features = [
     "compiled_data",
@@ -29,6 +32,7 @@ default = []
 std = []
 icu4x = [
     "dep:fixed_decimal",
+    "dep:icu_locale",
     "dep:icu_locale_core",
     "dep:icu_plurals",
     "dep:icu_calendar",

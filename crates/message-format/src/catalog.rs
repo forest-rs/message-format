@@ -10,16 +10,20 @@ use alloc::vec::Vec;
 
 use icu_locale_core::Locale;
 
-use crate::{formatter::MessageFormatter, options::LocalePolicy, runtime};
+use crate::{formatter::MessageFormatter, runtime};
 
 #[cfg(feature = "icu4x")]
-fn locale_candidates(locale: &Locale) -> Vec<Locale> {
+pub(crate) fn locale_candidates(locale: &Locale) -> Vec<Locale> {
     runtime::locale_fallback_candidates(locale)
 }
 
 #[cfg(not(feature = "icu4x"))]
-fn locale_candidates(locale: &Locale) -> Vec<Locale> {
-    vec![locale.clone()]
+pub(crate) fn locale_candidates(locale: &Locale) -> Vec<Locale> {
+    if locale.id.is_unknown() {
+        vec![locale.clone()]
+    } else {
+        vec![locale.clone(), Locale::UNKNOWN]
+    }
 }
 
 /// Loaded catalog with high-level formatter construction APIs.
@@ -56,27 +60,16 @@ impl MessageCatalog {
         self.catalog.string_id(value)
     }
 
-    /// Create a formatter bound to one locale for repeated formatting calls.
+    /// Create a single-catalog formatter bound to one locale.
     ///
-    /// Equivalent to calling [`Self::formatter_with_locale`] with
-    /// [`LocalePolicy::Lookup`].
+    /// Uses CLDR-aware locale fallback to find the best available host locale.
+    /// For message-level fallback across multiple catalogs, use
+    /// [`CatalogBundle::formatter_for_locale`] instead.
     pub fn formatter_for_locale(
         &self,
         locale: &Locale,
     ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
-        self.formatter_with_locale(locale, LocalePolicy::Lookup)
-    }
-
-    /// Create a formatter bound to one locale with explicit fallback policy.
-    ///
-    /// With `icu4x`, `locale` is resolved according to `policy`.
-    /// Without `icu4x`, `locale` is ignored.
-    pub fn formatter_with_locale(
-        &self,
-        locale: &Locale,
-        policy: LocalePolicy,
-    ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
-        MessageFormatter::new(&self.catalog, locale, policy)
+        MessageFormatter::new(core::iter::once(&self.catalog), locale_candidates(locale))
     }
 }
 
@@ -267,47 +260,37 @@ impl CatalogBundle {
         self.insert(localized.locale, localized.catalog);
     }
 
-    /// Create a formatter for locale by searching catalogs according to policy.
-    pub fn formatter_with_locale(
-        &self,
-        locale: &Locale,
-        policy: LocalePolicy,
-    ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
-        match policy {
-            LocalePolicy::Exact => {
-                let entry = self
-                    .catalogs
-                    .iter()
-                    .find(|entry| &entry.locale == locale)
-                    .ok_or(runtime::FormatError::Trap(
-                        runtime::Trap::MissingLocaleCatalog,
-                    ))?;
-                entry
-                    .catalog
-                    .formatter_with_locale(locale, LocalePolicy::Exact)
-            }
-            LocalePolicy::Lookup => {
-                for candidate in locale_candidates(locale) {
-                    if let Some(entry) =
-                        self.catalogs.iter().find(|entry| entry.locale == candidate)
-                    {
-                        return entry
-                            .catalog
-                            .formatter_with_locale(&candidate, LocalePolicy::Exact);
-                    }
-                }
-                Err(runtime::FormatError::Trap(
-                    runtime::Trap::MissingLocaleCatalog,
-                ))
-            }
-        }
-    }
-
-    /// Create a formatter using lookup fallback policy.
+    /// Create a multi-catalog formatter with message-level fallback.
+    ///
+    /// Collects all catalogs whose locale appears in the CLDR fallback chain
+    /// for the requested locale, ordered from most specific to least. Messages
+    /// are resolved by searching these catalogs in order, so a message missing
+    /// from a more-specific catalog can still be found in a less-specific one.
+    ///
+    /// The host locale (used for number/date formatting) is derived from the
+    /// requested `locale` via its own CLDR fallback, independent of which
+    /// catalog locales matched.
     pub fn formatter_for_locale(
         &self,
         locale: &Locale,
     ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
-        self.formatter_with_locale(locale, LocalePolicy::Lookup)
+        let candidates = locale_candidates(locale);
+        let catalogs: Vec<&runtime::Catalog> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                self.catalogs
+                    .iter()
+                    .find(|entry| entry.locale == *candidate)
+                    .map(|entry| entry.catalog.as_runtime_catalog())
+            })
+            .collect();
+
+        if catalogs.is_empty() {
+            return Err(runtime::FormatError::Trap(
+                runtime::Trap::MissingLocaleCatalog,
+            ));
+        }
+
+        MessageFormatter::new(catalogs, candidates)
     }
 }

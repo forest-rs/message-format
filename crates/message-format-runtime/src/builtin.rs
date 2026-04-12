@@ -479,24 +479,28 @@ impl BuiltinHost {
     }
 }
 
-/// Build a locale fallback candidate chain by progressively truncating subtags.
+/// Build a locale fallback candidate chain using CLDR-aware locale fallback.
 ///
-/// Example: `fr-CA-x-private` -> `fr-CA-x` -> `fr-CA` -> `fr`.
+/// Uses ICU4X [`LocaleFallbacker`](icu_locale::fallback::LocaleFallbacker) with
+/// compiled CLDR data for language-priority fallback. This produces
+/// linguistically correct chains — e.g. `pt-MZ` → `pt-PT` → `pt` → `und`
+/// (rather than naive subtag truncation which would skip `pt-PT`).
 #[must_use]
 pub fn locale_fallback_candidates(locale: &Locale) -> Vec<Locale> {
+    use icu_locale::fallback::LocaleFallbacker;
+
+    let fallbacker = LocaleFallbacker::new();
+    let mut iter = fallbacker
+        .for_config(icu_locale::fallback::LocaleFallbackConfig::default())
+        .fallback_for(locale.into());
+
     let mut out = Vec::new();
-    let mut current = locale.to_string();
-    if current.is_empty() {
-        return out;
-    }
-    while !current.is_empty() {
-        if let Ok(parsed) = Locale::from_str(&current) {
-            out.push(parsed);
-        }
-        let Some(idx) = current.rfind('-') else {
+    loop {
+        out.push(iter.get().into_locale());
+        if iter.get().is_unknown() {
             break;
-        };
-        current.truncate(idx);
+        }
+        iter.step();
     }
     out
 }
