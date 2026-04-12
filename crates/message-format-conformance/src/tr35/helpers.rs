@@ -50,8 +50,8 @@ fn format_output_with_locale(
     let bytes = compile_source(source).expect("compile failed");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog load failed");
     let locale = parse_locale(locale);
-    let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host init failed");
-    let mut formatter = Formatter::new(&catalog, host);
+    let host = BuiltinHost::new(&locale).expect("host init failed");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let args = resolve_args(&catalog, args);
     runtime_helpers::format_with_diagnostics_by_id(&mut formatter, "main", &args)
 }
@@ -64,9 +64,8 @@ fn format_output_with_options_and_locale(
 ) -> Result<runtime_helpers::FormatOutput, FormatError> {
     let bytes = compile_source_with_options(source, opts).expect("compile failed");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog load failed");
-    let host =
-        BuiltinHost::from_catalog(&catalog, &parse_locale(locale)).expect("host init failed");
-    let mut formatter = Formatter::new(&catalog, host);
+    let host = BuiltinHost::new(&parse_locale(locale)).expect("host init failed");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let args = resolve_args(&catalog, args);
     runtime_helpers::format_with_diagnostics_by_id(&mut formatter, "main", &args)
 }

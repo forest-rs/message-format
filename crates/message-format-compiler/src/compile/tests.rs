@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use message_format_runtime::schema;
-use message_format_runtime::{
-    Catalog, FormatError, Formatter, Host, HostCallError, NoopHost, Value,
-};
+use message_format_runtime::{Catalog, FormatError, Formatter, Host, HostFn, NoopHost, Value};
 
 use crate::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionOptionValueKind, FunctionSchema,
@@ -183,7 +181,7 @@ fn markup_option_variables_are_canonicalized_like_other_variables() {
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     assert!(catalog.string_id("näme").is_some());
 
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let message = formatter.resolve("main").expect("message");
     let args = vec![arg(
         &catalog,
@@ -208,7 +206,7 @@ fn exact_match_beats_default_even_if_default_appears_first() {
         compile_str(".input { $kind :string }\n.match $kind\n* {{Hi}}\nformal {{Good evening}}")
             .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
 
     let out = formatter
         .format_by_id_for_test(
@@ -283,7 +281,7 @@ fn compile_inputs_merges_multiple_files_and_tracks_origins() {
     );
 
     let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     assert_eq!(
         formatter
             .format_by_id_for_test("bye", &Vec::<(u32, Value)>::new())
@@ -309,7 +307,7 @@ fn compile_resources_merges_named_message_bodies() {
     assert_eq!(compiled.source_map.messages[0].origin, None);
 
     let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     assert_eq!(
         formatter
             .format_by_id_for_test("hello", &Vec::<(u32, Value)>::new())
@@ -690,7 +688,7 @@ fn catalog_builder_accepts_structured_messages_without_text_roundtrip() {
     );
 
     let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     assert_eq!(
         formatter
             .format_by_id_for_test("hello", &Vec::<(u32, Value)>::new())
@@ -1306,7 +1304,7 @@ fn catalog_builder_builder_api_formats_structured_select() {
 
     let compiled = expect_compiled(builder.compile());
     let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
 
     let formal = formatter
         .format_by_id_for_test(
@@ -1329,7 +1327,7 @@ fn catalog_builder_builder_api_formats_structured_select() {
 fn compiles_and_formats_interpolation() {
     let bytes = compile_str("Hello { $name }!").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "name", Value::Str("World".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1391,24 +1389,14 @@ fn default_bidi_isolation_rewrites_bare_literal_expression_to_string_call() {
 
 #[test]
 fn compiles_and_formats_call() {
-    #[derive(Default)]
-    struct TestHost;
-
-    impl Host for TestHost {
-        fn call(
-            &mut self,
-            _fn_id: u16,
-            _args: &[Value],
-            _opts: &[(u32, Value)],
-        ) -> Result<Value, HostCallError> {
-            Ok(Value::Str("CALLED".to_string()))
-        }
-    }
-
     let source = "{ $n :double }";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, TestHost);
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(|_fn_id, _args, _opts| Ok(Value::Str("CALLED".to_string()))),
+    )
+    .expect("formatter");
     let args = vec![arg(&catalog, "n", Value::Int(12))];
     assert_eq!(
         formatter
@@ -1634,7 +1622,7 @@ fn match_keyword_spacing_error_uses_character_column() {
 fn literal_expression_formats() {
     let bytes = compile_str("hello {world}{|!|}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1645,7 +1633,7 @@ fn literal_expression_formats() {
 fn raw_message_source_uses_main_id() {
     let bytes = compile_str("Hello { $name }!").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "name", Value::Str("WG".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1657,7 +1645,7 @@ fn raw_message_source_uses_main_id() {
 fn raw_quoted_pattern_is_extracted() {
     let bytes = compile_str(".input {$x} {{Hello}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1668,7 +1656,7 @@ fn raw_quoted_pattern_is_extracted() {
 fn local_literal_declaration_is_substituted() {
     let bytes = compile_str(".local $x = {1} {{A {$x} B}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1679,7 +1667,7 @@ fn local_literal_declaration_is_substituted() {
 fn leading_declarations_without_quoted_pattern_are_stripped() {
     let bytes = compile_str(".input {$name} .local $x = {ok} {{Hello {$x}!}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1706,7 +1694,7 @@ fn raw_match_statement_is_rewritten_and_formatted() {
         ".input {$kind :string} .match $kind formal {{Good evening}} casual {{Hi}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
 
     let args1 = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
     assert_eq!(
@@ -1738,7 +1726,7 @@ fn raw_match_with_local_literal_selector_resolves_at_compile_time() {
     let source = ".local $kind = {formal :string} .match $kind formal {{Good evening}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1751,7 +1739,7 @@ fn raw_match_with_local_alias_selector_uses_input() {
         ".input {$kind :string} .local $k = {$kind} .match $k formal {{Good evening}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1763,7 +1751,7 @@ fn raw_match_with_local_alias_selector_uses_input() {
 fn local_alias_is_substituted() {
     let bytes = compile_str(".local $a = {$name} {{Hello {$a}!}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "name", Value::Str("World".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1776,7 +1764,7 @@ fn chained_local_aliases_are_substituted() {
     let bytes =
         compile_str(".local $a = {$name} .local $b = {$a} {{Hello {$b}!}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "name", Value::Str("Chain".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1809,7 +1797,7 @@ fn alias_cycle_reports_resolution_overflow() {
 fn local_integer_function_is_evaluated() {
     let bytes = compile_str(".local $x = {4.2 :integer} {{X={$x}}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1821,7 +1809,7 @@ fn local_test_select_decimal_places_is_evaluated() {
     let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1.0 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1834,7 +1822,7 @@ fn raw_match_with_dynamic_select_option_uses_default_arm() {
         ".input {$mode} .local $x = {1 :test:select select=$mode} .match $x 1 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1846,7 +1834,7 @@ fn raw_match_with_unstable_selector_chain_uses_default_arm() {
     let source = ".input {$mode} .local $a = {1 :test:select select=$mode} .local $x = {$a :integer} .match $x 1 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1858,7 +1846,7 @@ fn raw_match_with_two_local_selectors_resolves_at_compile_time() {
     let source = ".local $x = {1 :test:select} .local $y = {0 :test:select} .match $x $y 1 1 {{1,1}} 1 * {{1,*}} * 1 {{*,1}} * * {{*,*}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1870,7 +1858,7 @@ fn raw_match_with_two_runtime_selectors_is_rewritten() {
     let source = ".input {$x :string} .input {$y :string} .match $x $y 1 1 {{1,1}} * * {{*,*}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args_11 = vec![
         arg(&catalog, "x", Value::Int(1)),
         arg(&catalog, "y", Value::Int(1)),
@@ -1896,7 +1884,7 @@ fn raw_match_with_escaped_quoted_key_selects_expected_arm() {
     let source = ".input {$kind :string} .match $kind |a\\|b| {{pipe}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args_hit = vec![arg(&catalog, "kind", Value::Str(String::from("a|b")))];
     let args_default = vec![arg(&catalog, "kind", Value::Str(String::from("x")))];
 
@@ -1916,7 +1904,7 @@ fn raw_match_with_integer_select_exact_formats_literal_arm() {
     let source = ".local $sel = {1 :integer select=exact} .match $sel 1 {{literal select {$sel}}} * {{OTHER}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1928,7 +1916,7 @@ fn local_offset_result_can_be_used_in_match_selector() {
     let source = ".local $x = {10 :integer} .local $y = {$x :offset subtract=6} .match $y 10 {{=10}} 4 {{=4}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -1963,7 +1951,7 @@ fn bare_plus_is_valid_literal() {
 fn quoted_literal_allows_braces_inside() {
     let bytes = compile_str("{|foo{bar}baz|}").expect("braces inside quoted literal");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -1975,7 +1963,7 @@ fn quoted_literal_allows_braces_inside() {
 fn quoted_literal_allows_dot_and_at() {
     let bytes = compile_str("{|a.b@c|}").expect("dot and at inside quoted literal");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2022,7 +2010,7 @@ fn text_escape_backslash_n_fails() {
 fn text_escape_backslash_backslash_succeeds() {
     let bytes = compile_str("hello\\\\world").expect("\\\\");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2034,7 +2022,7 @@ fn text_escape_backslash_backslash_succeeds() {
 fn text_escape_open_brace_succeeds() {
     let bytes = compile_str("hello\\{world").expect("\\{");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2046,7 +2034,7 @@ fn text_escape_open_brace_succeeds() {
 fn quoted_escape_pipe_succeeds() {
     let bytes = compile_str("{|a\\|b|}").expect("\\| in quoted literal");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2111,7 +2099,7 @@ fn attribute_without_value_succeeds() {
 fn standalone_quoted_pattern() {
     let bytes = compile_str("{{Hello}}").expect("standalone quoted pattern");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args: Vec<(u32, Value)> = vec![];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2128,7 +2116,7 @@ fn standalone_quoted_pattern_with_declarations() {
 fn standalone_quoted_pattern_with_expression() {
     let bytes = compile_str("{{Hello {$name}}}").expect("quoted pattern with expression");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost);
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let args = vec![arg(&catalog, "name", Value::Str("World".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)

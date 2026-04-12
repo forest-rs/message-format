@@ -211,7 +211,8 @@ fn main() {
     match mode.as_str() {
         "plain" => {
             let catalog = build_plain_select_catalog();
-            let mut formatter = Formatter::new(&catalog, message_format_runtime::NoopHost);
+            let mut formatter =
+                Formatter::new(&catalog, message_format_runtime::NoopHost).expect("formatter");
             let message = formatter.resolve("main").expect("resolved message");
             let args = message_args(&catalog, &[("kind", Value::Str("formal".to_string()))]);
             let mut checksum = 0_usize;
@@ -229,8 +230,8 @@ fn main() {
         "builtin-plural" => {
             let catalog = build_plural_select_catalog();
             let locale = locale("en-US");
-            let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host");
-            let mut formatter = Formatter::new(&catalog, host);
+            let host = BuiltinHost::new(&locale).expect("host");
+            let mut formatter = Formatter::new(&catalog, host).expect("formatter");
             let message = formatter.resolve("main").expect("resolved message");
             let args = message_args(&catalog, &[("count", Value::Int(1))]);
             let mut checksum = 0_usize;
@@ -248,8 +249,8 @@ fn main() {
         "builtin-number" => {
             let catalog = build_number_percent_catalog();
             let locale = locale("en-US");
-            let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host");
-            let mut formatter = Formatter::new(&catalog, host);
+            let host = BuiltinHost::new(&locale).expect("host");
+            let mut formatter = Formatter::new(&catalog, host).expect("formatter");
             let message = formatter.resolve("main").expect("resolved message");
             let args = message_args(&catalog, &[("amount", Value::Float(42.125))]);
             let mut checksum = 0_usize;
@@ -267,8 +268,8 @@ fn main() {
         "builtin-datetime" => {
             let catalog = build_datetime_catalog();
             let locale = locale("en-US");
-            let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host");
-            let mut formatter = Formatter::new(&catalog, host);
+            let host = BuiltinHost::new(&locale).expect("host");
+            let mut formatter = Formatter::new(&catalog, host).expect("formatter");
             let message = formatter.resolve("main").expect("resolved message");
             let args = message_args(
                 &catalog,

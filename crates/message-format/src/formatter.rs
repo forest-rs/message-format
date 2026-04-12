@@ -30,7 +30,7 @@ impl runtime::FormatSink for OutputStringSink<'_> {
 pub struct MessageFormatter<'a> {
     catalog: &'a runtime::Catalog,
     #[cfg(feature = "icu4x")]
-    inner: runtime::Formatter<'a, runtime::BuiltinHost<'a>>,
+    inner: runtime::Formatter<'a, runtime::BuiltinHost>,
     #[cfg(not(feature = "icu4x"))]
     inner: runtime::Formatter<'a, runtime::NoopHost>,
 }
@@ -44,20 +44,20 @@ impl<'a> MessageFormatter<'a> {
     ) -> Result<Self, runtime::FormatError> {
         match policy {
             LocalePolicy::Exact => {
-                let host = runtime::BuiltinHost::from_catalog(catalog, locale)?;
+                let host = runtime::BuiltinHost::new(locale)?;
                 Ok(Self {
                     catalog,
-                    inner: runtime::Formatter::new(catalog, host),
+                    inner: runtime::Formatter::new(catalog, host)?,
                 })
             }
             LocalePolicy::Lookup => {
                 let mut last_err = None;
                 for candidate in runtime::locale_fallback_candidates(locale) {
-                    match runtime::BuiltinHost::from_catalog(catalog, &candidate) {
+                    match runtime::BuiltinHost::new(&candidate) {
                         Ok(host) => {
                             return Ok(Self {
                                 catalog,
-                                inner: runtime::Formatter::new(catalog, host),
+                                inner: runtime::Formatter::new(catalog, host)?,
                             });
                         }
                         Err(err) => last_err = Some(err),
@@ -77,7 +77,7 @@ impl<'a> MessageFormatter<'a> {
     ) -> Result<Self, runtime::FormatError> {
         Ok(Self {
             catalog,
-            inner: runtime::Formatter::new(catalog, runtime::NoopHost),
+            inner: runtime::Formatter::new(catalog, runtime::NoopHost)?,
         })
     }
 

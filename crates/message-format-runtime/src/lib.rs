@@ -57,7 +57,7 @@
 //! }
 //!
 //! # fn render(catalog: &Catalog) -> Result<String, FormatError> {
-//! let mut formatter = Formatter::new(catalog, NoopHost);
+//! let mut formatter = Formatter::new(catalog, NoopHost)?;
 //! let message = formatter.resolve("main")?;
 //! let mut args = MessageArgs::new(catalog);
 //! args.insert("name", "Ada")
@@ -143,7 +143,7 @@
 //! }
 //!
 //! # fn collect(catalog: &Catalog) -> Result<Vec<Event>, FormatError> {
-//! let mut formatter = Formatter::new(catalog, NoopHost);
+//! let mut formatter = Formatter::new(catalog, NoopHost)?;
 //! let message = formatter.resolve("main")?;
 //! let mut args = MessageArgs::new(catalog);
 //! args.insert("url", "https://example.com")
@@ -180,6 +180,9 @@ extern crate alloc;
 pub use builtin::BuiltinHost;
 #[cfg(feature = "icu4x")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
+pub use builtin::BuiltinHostCatalogIndex;
+#[cfg(feature = "icu4x")]
+#[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
 pub use builtin::locale_fallback_candidates;
 pub use catalog::Catalog;
 pub use error::{
@@ -188,7 +191,7 @@ pub use error::{
 };
 pub use schema::{FuncEntry, MessageEntry};
 pub use value::{ArgNameError, Args, MessageArgs, StrId, Value};
-pub use vm::{FormatOption, FormatSink, Formatter, Host, MessageHandle, NoopHost};
+pub use vm::{FormatOption, FormatSink, Formatter, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.
 pub mod catalog;

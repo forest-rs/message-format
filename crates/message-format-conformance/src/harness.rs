@@ -9,9 +9,7 @@ use crate::runtime_helpers;
 use message_format::{
     Locale,
     compiler::{CompileError, CompileOptions, compile, compile_str},
-    runtime::{
-        Catalog, FormatError, Formatter, Host, HostCallError, MessageFunctionError, NoopHost, Value,
-    },
+    runtime::{Catalog, FormatError, Formatter, HostFn, MessageFunctionError, NoopHost, Value},
 };
 use serde::Deserialize;
 
@@ -27,20 +25,6 @@ enum HostMode {
     Noop,
     Call,
     Builtin { locale: &'static str },
-}
-
-#[derive(Default)]
-struct CallHost;
-
-impl Host for CallHost {
-    fn call(
-        &mut self,
-        _fn_id: u16,
-        _args: &[Value],
-        _opts: &[(u32, Value)],
-    ) -> Result<Value, HostCallError> {
-        Ok(Value::Str("CALLED".to_string()))
-    }
 }
 
 /// Execute all curated conformance fixtures.
@@ -65,12 +49,17 @@ fn run_case(case: &Case) -> Result<(), String> {
 
     let output = match case.host_mode {
         HostMode::Call => {
-            let mut formatter = Formatter::new(&catalog, CallHost);
+            let mut formatter = Formatter::new(
+                &catalog,
+                HostFn(|_fn_id, _args, _opts| Ok(Value::Str("CALLED".to_string()))),
+            )
+            .map_err(|err| format!("formatter failed: {err:?}"))?;
             runtime_helpers::format_by_id(&mut formatter, case.message_id, &args)
                 .map_err(|err| format!("format failed: {err:?}"))?
         }
         HostMode::Noop => {
-            let mut formatter = Formatter::new(&catalog, NoopHost);
+            let mut formatter = Formatter::new(&catalog, NoopHost)
+                .map_err(|err| format!("formatter failed: {err:?}"))?;
             runtime_helpers::format_by_id(&mut formatter, case.message_id, &args)
                 .map_err(|err| format!("format failed: {err:?}"))?
         }
@@ -78,9 +67,10 @@ fn run_case(case: &Case) -> Result<(), String> {
             let parsed = locale
                 .parse::<Locale>()
                 .map_err(|err| format!("invalid locale {locale}: {err:?}"))?;
-            let host = message_format::runtime::BuiltinHost::from_catalog(&catalog, &parsed)
+            let host = message_format::runtime::BuiltinHost::new(&parsed)
                 .map_err(|err| format!("builtin host failed: {err:?}"))?;
-            let mut formatter = Formatter::new(&catalog, host);
+            let mut formatter = Formatter::new(&catalog, host)
+                .map_err(|err| format!("formatter failed: {err:?}"))?;
             runtime_helpers::format_by_id(&mut formatter, case.message_id, &args)
                 .map_err(|err| format!("format failed: {err:?}"))?
         }
@@ -476,15 +466,20 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
                     format!("err:{actual}"),
                 );
             };
-            let Ok(host) = message_format::runtime::BuiltinHost::from_catalog(&catalog, &parsed)
-            else {
+            let Ok(host) = message_format::runtime::BuiltinHost::new(&parsed) else {
                 let actual = "unknown-function";
                 return (
                     matches_expected_error(test, actual),
                     format!("err:{actual}"),
                 );
             };
-            let mut formatter = Formatter::new(&catalog, host);
+            let Ok(mut formatter) = Formatter::new(&catalog, host) else {
+                let actual = "unknown-function";
+                return (
+                    matches_expected_error(test, actual),
+                    format!("err:{actual}"),
+                );
+            };
             let args = wg_params_to_args(&catalog, &test.params);
             let message_id = if catalog.message_pc("main").is_some() {
                 "main"
