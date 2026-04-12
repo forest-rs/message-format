@@ -37,7 +37,7 @@ impl runtime::FormatSink for OutputStringSink<'_> {
 #[derive(Debug)]
 pub struct MessageFormatter<'a> {
     #[cfg(feature = "icu4x")]
-    inner: runtime::MultiFormatter<'a, runtime::BuiltinHost>,
+    inner: runtime::MultiFormatter<'a, alloc::boxed::Box<runtime::BuiltinHost>>,
     #[cfg(not(feature = "icu4x"))]
     inner: runtime::MultiFormatter<'a, runtime::NoopHost>,
 }
@@ -46,14 +46,14 @@ impl<'a> MessageFormatter<'a> {
     #[cfg(feature = "icu4x")]
     pub(crate) fn new(
         catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
-        candidates: impl IntoIterator<Item = Locale>,
+        candidates: &[Locale],
     ) -> Result<Self, runtime::FormatError> {
         let mut last_err = None;
         for candidate in candidates {
-            match runtime::BuiltinHost::new(&candidate) {
+            match runtime::BuiltinHost::new(candidate) {
                 Ok(host) => {
                     return Ok(Self {
-                        inner: runtime::MultiFormatter::new(catalogs, host)?,
+                        inner: runtime::MultiFormatter::new(catalogs, host.into())?,
                     });
                 }
                 Err(err) => last_err = Some(err),
@@ -65,7 +65,7 @@ impl<'a> MessageFormatter<'a> {
     #[cfg(not(feature = "icu4x"))]
     pub(crate) fn new(
         catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
-        _candidates: impl IntoIterator<Item = Locale>,
+        _candidates: &[Locale],
     ) -> Result<Self, runtime::FormatError> {
         Ok(Self {
             inner: runtime::MultiFormatter::new(catalogs, runtime::NoopHost)?,
