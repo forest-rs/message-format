@@ -47,9 +47,21 @@ impl MessageHandle {
 /// Implement this trait to provide function behavior for `OP_CALL_FUNC`.
 /// The VM also consults [`Host::format_default`] for plain interpolation output.
 pub trait Host {
+    /// Catalog-specific data computed once and reused across format calls.
+    type CatalogIndex;
+
+    /// Pre-compute catalog-specific data for this host.
+    ///
+    /// Called once by [`Formatter::new`] and stored for the lifetime of the
+    /// formatter.  Implementations that do not need catalog data should use
+    /// `type CatalogIndex = ();` and return `Ok(())`.
+    fn index(&mut self, catalog: &Catalog) -> Result<Self::CatalogIndex, FormatError>;
+
     /// Call function id with positional args and `(key, value)` options.
     fn call(
         &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
         opts: &[(u32, Value)],
@@ -61,17 +73,24 @@ pub trait Host {
     /// to return `Value::StrRef` for known categories, avoiding allocation.
     fn call_select(
         &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
         opts: &[(u32, Value)],
     ) -> Result<Value, HostCallError> {
-        self.call(fn_id, args, opts)
+        self.call(catalog, index, fn_id, args, opts)
     }
 
     /// Optionally format a value for default interpolation.
     ///
     /// Return `Some(String)` to override how this value is rendered by `{ $var }`.
-    fn format_default(&mut self, _value: &Value) -> Option<String> {
+    fn format_default(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _value: &Value,
+    ) -> Option<String> {
         None
     }
 }
@@ -81,13 +100,51 @@ pub trait Host {
 pub struct NoopHost;
 
 impl Host for NoopHost {
+    type CatalogIndex = ();
+
+    fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
+        Ok(())
+    }
+
     fn call(
         &mut self,
+        _catalog: &Catalog,
+        _index: &(),
         fn_id: u16,
         _args: &[Value],
         _opts: &[(u32, Value)],
     ) -> Result<Value, HostCallError> {
         Err(HostCallError::UnknownFunction { fn_id })
+    }
+}
+
+/// Wrapper that turns a closure into a [`Host`] with no catalog index.
+///
+/// Useful for tests and simple hosts that only need `call`.
+#[expect(missing_debug_implementations, reason = "Can't Debug an FnMut")]
+pub struct HostFn<F>(pub F)
+where
+    F: FnMut(u16, &[Value], &[(u32, Value)]) -> Result<Value, HostCallError>;
+
+impl<F> Host for HostFn<F>
+where
+    F: FnMut(u16, &[Value], &[(u32, Value)]) -> Result<Value, HostCallError>,
+{
+    type CatalogIndex = ();
+
+    fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
+        Ok(())
+    }
+
+    fn call(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &(),
+        fn_id: u16,
+        args: &[Value],
+        opts: &[(u32, Value)],
+    ) -> Result<Value, HostCallError> {
+        (self.0)(fn_id, args, opts)
     }
 }
 
@@ -159,24 +216,11 @@ impl DiagnosticsSink for VecDiagnostics {
 /// function and formats its result.
 ///
 /// ```rust,no_run
-/// use message_format_runtime::{Catalog, FormatError, Formatter, Host, HostCallError, Value};
-///
-/// #[derive(Default)]
-/// struct DemoHost;
-///
-/// impl Host for DemoHost {
-///     fn call(
-///         &mut self,
-///         _fn_id: u16,
-///         _args: &[Value],
-///         _opts: &[(u32, Value)],
-///     ) -> Result<Value, HostCallError> {
-///         Ok(Value::Str("called".to_string()))
-///     }
-/// }
+/// use message_format_runtime::{Catalog, FormatError, Formatter, HostFn, HostCallError, Value};
 ///
 /// # fn render(catalog: &Catalog) -> Result<String, FormatError> {
-/// let mut formatter = Formatter::new(&catalog, DemoHost);
+/// let host = HostFn(|_fn_id, _args, _opts| Ok(Value::Str("called".to_string())));
+/// let mut formatter = Formatter::new(&catalog, host)?;
 /// let message = formatter.resolve("main")?;
 /// struct StringSink<'a>(&'a mut String);
 /// impl message_format_runtime::FormatSink for StringSink<'_> {
@@ -195,6 +239,7 @@ impl DiagnosticsSink for VecDiagnostics {
 /// ```
 pub struct Formatter<'a, H: Host> {
     catalog: &'a Catalog,
+    index: H::CatalogIndex,
     host: H,
     fuel: Option<u64>,
     stack: Vec<Value>,
@@ -324,16 +369,19 @@ impl<H: Host> fmt::Debug for Formatter<'_, H> {
 
 impl<'a, H: Host> Formatter<'a, H> {
     /// Create a formatter for a loaded catalog.
-    #[must_use]
-    pub fn new(catalog: &'a Catalog, host: H) -> Self {
-        Self {
+    ///
+    /// Calls [`Host::index`] to pre-compute catalog-specific data.
+    pub fn new(catalog: &'a Catalog, mut host: H) -> Result<Self, FormatError> {
+        let index = host.index(catalog)?;
+        Ok(Self {
             catalog,
+            index,
             host,
             fuel: None,
             stack: Vec::new(),
             call_args: Vec::new(),
             call_options: Vec::new(),
-        }
+        })
     }
 
     /// Set the maximum number of instructions the VM may execute per message.
@@ -369,6 +417,7 @@ impl<'a, H: Host> Formatter<'a, H> {
         run_bytecode(
             self.catalog,
             &mut self.host,
+            &self.index,
             message.entry_pc,
             args,
             self.fuel,
@@ -382,9 +431,10 @@ impl<'a, H: Host> Formatter<'a, H> {
     }
 }
 
-fn run_bytecode<S>(
+fn run_bytecode<H: Host, S>(
     catalog: &Catalog,
-    host: &mut dyn Host,
+    host: &mut H,
+    index: &H::CatalogIndex,
     entry_pc: u32,
     args: &dyn Args,
     fuel: Option<u64>,
@@ -443,6 +493,7 @@ where
                 handle_output_instruction(
                     sink,
                     host,
+                    index,
                     stack,
                     catalog,
                     args,
@@ -474,6 +525,7 @@ where
             OP_CALL_FUNC | OP_CALL_SELECT => {
                 handle_call_opcode(
                     host,
+                    index,
                     stack,
                     catalog,
                     opcode,
@@ -503,9 +555,10 @@ fn record_diagnostic(diagnostics: &mut Option<&mut dyn DiagnosticsSink>, error: 
     }
 }
 
-fn handle_output_instruction<S>(
+fn handle_output_instruction<H: Host, S>(
     sink: &mut S,
-    host: &mut dyn Host,
+    host: &mut H,
+    index: &H::CatalogIndex,
     stack: &mut Vec<Value>,
     catalog: &Catalog,
     args: &dyn Args,
@@ -533,11 +586,11 @@ where
         }
         OP_OUT_VAL => {
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-            emit_output_value(sink, host, catalog, &value);
+            emit_output_value(sink, host, index, catalog, &value);
         }
         OP_OUT_ARG => {
             let key_id = read_u32(catalog.code(), base + 1)?;
-            emit_arg_direct_or_fallback(sink, catalog, host, args, key_id, diagnostics);
+            emit_arg_direct_or_fallback(sink, catalog, host, index, args, key_id, diagnostics);
         }
         _ => return Err(FormatError::Trap(Trap::InvalidOutputOpcode)),
     }
@@ -683,8 +736,9 @@ fn resolve_markup_option_key(key: Value, _catalog: &Catalog) -> Result<u32, Form
     }
 }
 
-fn handle_call_opcode(
-    host: &mut dyn Host,
+fn handle_call_opcode<H: Host>(
+    host: &mut H,
+    index: &H::CatalogIndex,
     stack: &mut Vec<Value>,
     catalog: &Catalog,
     opcode: u8,
@@ -702,6 +756,7 @@ fn handle_call_opcode(
     decode_call_operands(stack, catalog, arg_count, optc, call_args, call_options)?;
     handle_call_instruction(
         host,
+        index,
         opcode,
         fn_id,
         call_args,
@@ -744,8 +799,9 @@ where
     Ok(())
 }
 
-fn handle_call_instruction(
-    host: &mut dyn Host,
+fn handle_call_instruction<H: Host>(
+    host: &mut H,
+    index: &H::CatalogIndex,
     opcode: u8,
     fn_id: u16,
     call_args: &[Value],
@@ -778,9 +834,9 @@ fn handle_call_instruction(
     }
 
     let call_result = if opcode == OP_CALL_SELECT {
-        host.call_select(fn_id, call_args, call_options)
+        host.call_select(catalog, index, fn_id, call_args, call_options)
     } else {
-        host.call(fn_id, call_args, call_options)
+        host.call(catalog, index, fn_id, call_args, call_options)
     };
 
     match call_result {
@@ -955,29 +1011,31 @@ fn emit_value_ref<S: FormatSink + ?Sized>(sink: &mut S, catalog: &Catalog, value
     }
 }
 
-fn emit_output_value<S: FormatSink + ?Sized>(
+fn emit_output_value<H: Host, S: FormatSink + ?Sized>(
     sink: &mut S,
-    host: &mut dyn Host,
+    host: &mut H,
+    index: &H::CatalogIndex,
     catalog: &Catalog,
     value: &Value,
 ) {
-    if let Some(formatted) = host.format_default(value) {
+    if let Some(formatted) = host.format_default(catalog, index, value) {
         sink.expression(&formatted);
     } else {
         emit_value_ref(sink, catalog, value);
     }
 }
 
-fn emit_arg_direct_or_fallback<S: FormatSink + ?Sized>(
+fn emit_arg_direct_or_fallback<H: Host, S: FormatSink + ?Sized>(
     sink: &mut S,
     catalog: &Catalog,
-    host: &mut dyn Host,
+    host: &mut H,
+    index: &H::CatalogIndex,
     args: &dyn Args,
     key_id: StrId,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) {
     if let Some(value) = args.get_ref(key_id) {
-        if let Some(formatted) = host.format_default(value) {
+        if let Some(formatted) = host.format_default(catalog, index, value) {
             sink.expression(&formatted);
         } else {
             emit_value_ref(sink, catalog, value);
@@ -1264,7 +1322,7 @@ mod tests {
     }
 
     fn formatter_noop(catalog: &Catalog) -> Formatter<'_, NoopHost> {
-        Formatter::new(catalog, NoopHost)
+        Formatter::new(catalog, NoopHost).expect("noop host")
     }
 
     fn arg_id(catalog: &Catalog, name: &str) -> u32 {
@@ -1433,8 +1491,14 @@ mod tests {
         struct FailingSelectHost;
 
         impl Host for FailingSelectHost {
+            type CatalogIndex = ();
+            fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
+                Ok(())
+            }
             fn call(
                 &mut self,
+                _catalog: &Catalog,
+                _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
                 _opts: &[(u32, Value)],
@@ -1444,6 +1508,8 @@ mod tests {
 
             fn call_select(
                 &mut self,
+                _catalog: &Catalog,
+                _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
                 _opts: &[(u32, Value)],
@@ -1468,7 +1534,7 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "sel", "hit"], "HD", &code);
-        let mut formatter = Formatter::new(&catalog, FailingSelectHost);
+        let mut formatter = Formatter::new(&catalog, FailingSelectHost).expect("host");
         let args = vec![(arg_id(&catalog, "sel"), Value::Int(1))];
         let mut sink = TestStringSink::default();
         let errors = formatter
@@ -1523,20 +1589,6 @@ mod tests {
 
     #[test]
     fn call_func_preserves_option_count() {
-        #[derive(Default)]
-        struct HostEchoOptCount;
-
-        impl Host for HostEchoOptCount {
-            fn call(
-                &mut self,
-                _fn_id: u16,
-                _args: &[Value],
-                opts: &[(u32, Value)],
-            ) -> Result<Value, HostCallError> {
-                Ok(Value::Str(opts.len().to_string()))
-            }
-        }
-
         let code = TestOps::new()
             .push_const(1)
             .push_const(2)
@@ -1545,7 +1597,11 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "k", "v"], "", &code);
-        let mut formatter = Formatter::new(&catalog, HostEchoOptCount);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_fn_id, _args, opts| Ok(Value::Str(opts.len().to_string()))),
+        )
+        .expect("host");
         let out = formatter
             .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
             .expect("formatted");
@@ -1729,8 +1785,14 @@ mod tests {
         struct SelectOnlyHost;
 
         impl Host for SelectOnlyHost {
+            type CatalogIndex = ();
+            fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
+                Ok(())
+            }
             fn call(
                 &mut self,
+                _catalog: &Catalog,
+                _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
                 _opts: &[(u32, Value)],
@@ -1740,6 +1802,8 @@ mod tests {
 
             fn call_select(
                 &mut self,
+                _catalog: &Catalog,
+                _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
                 _opts: &[(u32, Value)],
@@ -1756,7 +1820,7 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "x", "yes"], "", &code);
-        let mut formatter = Formatter::new(&catalog, SelectOnlyHost);
+        let mut formatter = Formatter::new(&catalog, SelectOnlyHost).expect("host");
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
         let out = formatter
             .format_by_id_for_test("main", &args)
@@ -1766,20 +1830,6 @@ mod tests {
 
     #[test]
     fn call_select_defaults_to_call_when_host_does_not_override() {
-        #[derive(Default)]
-        struct DefaultSelectHost;
-
-        impl Host for DefaultSelectHost {
-            fn call(
-                &mut self,
-                _fn_id: u16,
-                _args: &[Value],
-                _opts: &[(u32, Value)],
-            ) -> Result<Value, HostCallError> {
-                Ok(Value::Str("delegated".to_string()))
-            }
-        }
-
         let code = TestOps::new()
             .load_arg(1)
             .call_select(0, 1, 0)
@@ -1787,7 +1837,11 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "x"], "", &code);
-        let mut formatter = Formatter::new(&catalog, DefaultSelectHost);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_fn_id, _args, _opts| Ok(Value::Str("delegated".to_string()))),
+        )
+        .expect("host");
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
         let out = formatter
             .format_by_id_for_test("main", &args)
@@ -1801,8 +1855,14 @@ mod tests {
         struct DefaultFormatHost;
 
         impl Host for DefaultFormatHost {
+            type CatalogIndex = ();
+            fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
+                Ok(())
+            }
             fn call(
                 &mut self,
+                _catalog: &Catalog,
+                _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
                 _opts: &[(u32, Value)],
@@ -1810,7 +1870,12 @@ mod tests {
                 unreachable!("plain interpolation should only use format_default")
             }
 
-            fn format_default(&mut self, value: &Value) -> Option<String> {
+            fn format_default(
+                &mut self,
+                _catalog: &Catalog,
+                _index: &(),
+                value: &Value,
+            ) -> Option<String> {
                 match value {
                     Value::Int(v) => Some(format!("int:{v}")),
                     _ => None,
@@ -1820,7 +1885,7 @@ mod tests {
 
         let code = TestOps::new().out_arg(1).halt().build();
         let catalog = catalog_for_test(&["main", "n"], "", &code);
-        let mut formatter = Formatter::new(&catalog, DefaultFormatHost);
+        let mut formatter = Formatter::new(&catalog, DefaultFormatHost).expect("host");
         let args = vec![(arg_id(&catalog, "n"), Value::Int(7))];
         let out = formatter
             .format_by_id_for_test("main", &args)
@@ -1830,25 +1895,17 @@ mod tests {
 
     #[test]
     fn host_function_error_is_returned_without_expr_fallback() {
-        #[derive(Default)]
-        struct FailingHost;
-
-        impl Host for FailingHost {
-            fn call(
-                &mut self,
-                _fn_id: u16,
-                _args: &[Value],
-                _opts: &[(u32, Value)],
-            ) -> Result<Value, HostCallError> {
+        let code = TestOps::new().call_func(0, 0, 0).out_val().halt().build();
+        let catalog = catalog_for_test(&["main"], "", &code);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_fn_id, _args, _opts| {
                 Err(HostCallError::Function(
                     MessageFunctionError::Implementation(ImplementationFailure::Host),
                 ))
-            }
-        }
-
-        let code = TestOps::new().call_func(0, 0, 0).out_val().halt().build();
-        let catalog = catalog_for_test(&["main"], "", &code);
-        let mut formatter = Formatter::new(&catalog, FailingHost);
+            }),
+        )
+        .expect("host");
         let err = formatter
             .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
             .expect_err("must fail");
@@ -1862,21 +1919,6 @@ mod tests {
 
     #[test]
     fn case_str_fast_path_matches_strref_by_id() {
-        /// Host that returns StrRef(2) which is "alpha" in the pool.
-        #[derive(Default)]
-        struct StrRefHost;
-
-        impl Host for StrRefHost {
-            fn call(
-                &mut self,
-                _fn_id: u16,
-                _args: &[Value],
-                _opts: &[(u32, Value)],
-            ) -> Result<Value, HostCallError> {
-                Ok(Value::StrRef(2))
-            }
-        }
-
         let code = TestOps::new()
             .load_arg(1)
             .call_func(0, 1, 0)
@@ -1893,7 +1935,11 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "x", "alpha", "beta"], "HITMISS", &code);
-        let mut formatter = Formatter::new(&catalog, StrRefHost);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_fn_id, _args, _opts| Ok(Value::StrRef(2))),
+        )
+        .expect("host");
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
         let out = formatter
             .format_by_id_for_test("main", &args)
@@ -1903,21 +1949,6 @@ mod tests {
 
     #[test]
     fn case_str_strref_mismatch_falls_through_to_string_compare() {
-        /// Host that returns StrRef(3) which is "beta", not matching "alpha"(2).
-        #[derive(Default)]
-        struct StrRefMissHost;
-
-        impl Host for StrRefMissHost {
-            fn call(
-                &mut self,
-                _fn_id: u16,
-                _args: &[Value],
-                _opts: &[(u32, Value)],
-            ) -> Result<Value, HostCallError> {
-                Ok(Value::StrRef(3))
-            }
-        }
-
         // Same layout as above but host returns StrRef(3)="beta",
         // CASE_STR checks for "alpha"(2) — ID mismatch, falls to default.
         let code = TestOps::new()
@@ -1936,7 +1967,11 @@ mod tests {
             .halt()
             .build();
         let catalog = catalog_for_test(&["main", "x", "alpha", "beta"], "HITMISS", &code);
-        let mut formatter = Formatter::new(&catalog, StrRefMissHost);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_fn_id, _args, _opts| Ok(Value::StrRef(3))),
+        )
+        .expect("host");
         let args = vec![(arg_id(&catalog, "x"), Value::Int(1))];
         let out = formatter
             .format_by_id_for_test("main", &args)

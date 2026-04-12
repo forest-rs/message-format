@@ -84,8 +84,8 @@ fn format_to_markup_events_through_compiler() {
     let bytes = message_format::compiler::compile_str(source).expect("compile");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let locale = "en".parse::<Locale>().expect("locale");
-    let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host");
-    let mut formatter = Formatter::new(&catalog, host);
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let args = vec![(
         catalog.string_id("name").expect("arg id"),
         Value::Str("World".into()),
@@ -132,8 +132,8 @@ fn format_to_self_closing_markup_through_compiler() {
     let bytes = message_format::compiler::compile_str(source).expect("compile");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let locale = "en".parse::<Locale>().expect("locale");
-    let host = BuiltinHost::from_catalog(&catalog, &locale).expect("host");
-    let mut formatter = Formatter::new(&catalog, host);
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let mut sink = Events::default();
     let errors = runtime_helpers::format_to_by_id(
         &mut formatter,

@@ -11,8 +11,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use icu_locale_core::Locale;
 use message_format_compiler::compile_str;
 use message_format_runtime::{
-    Args, BuiltinHost, Catalog, FormatError, FormatSink, Formatter, Host, HostCallError,
-    MessageArgs, MessageHandle, NoopHost, Value,
+    Args, BuiltinHost, Catalog, FormatError, FormatSink, Formatter, Host, HostFn, MessageArgs,
+    MessageHandle, NoopHost, Value,
     catalog::{FuncEntry, MessageEntry, build_catalog, build_catalog_with_funcs},
     vm,
 };
@@ -556,44 +556,6 @@ fn build_icu_datetime_catalog() -> Catalog {
 }
 
 #[derive(Default)]
-struct PassthroughHost;
-
-impl Host for PassthroughHost {
-    fn call(
-        &mut self,
-        _fn_id: u16,
-        args: &[Value],
-        _opts: &[(u32, Value)],
-    ) -> Result<Value, HostCallError> {
-        Ok(args.first().cloned().unwrap_or(Value::Null))
-    }
-}
-
-#[derive(Default)]
-struct FormattingHost;
-
-impl Host for FormattingHost {
-    fn call(
-        &mut self,
-        _fn_id: u16,
-        args: &[Value],
-        opts: &[(u32, Value)],
-    ) -> Result<Value, HostCallError> {
-        let mut out = String::new();
-        if let Some(first) = args.first() {
-            out.push_str(&format!("{first:?}"));
-        }
-        for (key, value) in opts {
-            out.push('|');
-            out.push_str(&key.to_string());
-            out.push('=');
-            out.push_str(&format!("{value:?}"));
-        }
-        Ok(Value::Str(out))
-    }
-}
-
-#[derive(Default)]
 struct CountingSink {
     events: usize,
     bytes: usize,
@@ -656,7 +618,7 @@ fn bench_formatting(c: &mut Criterion) {
     let short_args = message_args(&plain_catalog, &[("name", Value::Str("Ada".to_string()))]);
     group.throughput(Throughput::Elements(1));
     group.bench_function("plain_short_arg", |b| {
-        let mut formatter = Formatter::new(&plain_catalog, NoopHost);
+        let mut formatter = Formatter::new(&plain_catalog, NoopHost).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&short_args))
@@ -672,7 +634,7 @@ fn bench_formatting(c: &mut Criterion) {
             BenchmarkId::new("plain_varying_arg_len", len),
             &args,
             |b, a| {
-                let mut formatter = Formatter::new(&plain_catalog, NoopHost);
+                let mut formatter = Formatter::new(&plain_catalog, NoopHost).expect("formatter");
                 b.iter(|| {
                     let out = formatter
                         .format_by_id_for_bench("main", black_box(a))
@@ -688,7 +650,7 @@ fn bench_formatting(c: &mut Criterion) {
         &[("kind", Value::Str("formal".to_string()))],
     );
     group.bench_function("select_formal", |b| {
-        let mut formatter = Formatter::new(&select_catalog, NoopHost);
+        let mut formatter = Formatter::new(&select_catalog, NoopHost).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&formal_args))
@@ -702,7 +664,7 @@ fn bench_formatting(c: &mut Criterion) {
         &[("kind", Value::Str("other".to_string()))],
     );
     group.bench_function("select_default", |b| {
-        let mut formatter = Formatter::new(&select_catalog, NoopHost);
+        let mut formatter = Formatter::new(&select_catalog, NoopHost).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&default_args))
@@ -718,7 +680,11 @@ fn bench_formatting(c: &mut Criterion) {
     let call_args_no_opts = message_args(&call_catalog_no_opts, &[("name", Value::Int(42))]);
     let call_args_with_opts = message_args(&call_catalog_with_opts, &[("name", Value::Int(42))]);
     call_group.bench_function("call_no_opts_passthrough", |b| {
-        let mut formatter = Formatter::new(&call_catalog_no_opts, PassthroughHost);
+        let mut formatter = Formatter::new(
+            &call_catalog_no_opts,
+            HostFn(|_fn_id, args, _opts| Ok(args.first().cloned().unwrap_or(Value::Null))),
+        )
+        .expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&call_args_no_opts))
@@ -727,7 +693,11 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     call_group.bench_function("call_with_opts_passthrough", |b| {
-        let mut formatter = Formatter::new(&call_catalog_with_opts, PassthroughHost);
+        let mut formatter = Formatter::new(
+            &call_catalog_with_opts,
+            HostFn(|_fn_id, args, _opts| Ok(args.first().cloned().unwrap_or(Value::Null))),
+        )
+        .expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&call_args_with_opts))
@@ -736,7 +706,23 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     call_group.bench_function("call_with_opts_formatting_host", |b| {
-        let mut formatter = Formatter::new(&call_catalog_with_opts, FormattingHost);
+        let mut formatter = Formatter::new(
+            &call_catalog_with_opts,
+            HostFn(|_fn_id, args, opts| {
+                let mut out = String::new();
+                if let Some(first) = args.first() {
+                    out.push_str(&format!("{first:?}"));
+                }
+                for (key, value) in opts {
+                    out.push('|');
+                    out.push_str(&key.to_string());
+                    out.push('=');
+                    out.push_str(&format!("{value:?}"));
+                }
+                Ok(Value::Str(out))
+            }),
+        )
+        .expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&call_args_with_opts))
@@ -749,7 +735,7 @@ fn bench_formatting(c: &mut Criterion) {
     let mut lookup_group = c.benchmark_group("runtime_lookup_paths");
     lookup_group.throughput(Throughput::Elements(1));
     lookup_group.bench_function("format_by_id", |b| {
-        let mut formatter = Formatter::new(&plain_catalog, NoopHost);
+        let mut formatter = Formatter::new(&plain_catalog, NoopHost).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&short_args))
@@ -758,7 +744,7 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     lookup_group.bench_function("format_resolved_handle", |b| {
-        let mut formatter = Formatter::new(&plain_catalog, NoopHost);
+        let mut formatter = Formatter::new(&plain_catalog, NoopHost).expect("formatter");
         let message = formatter.resolve("main").expect("resolved message");
         b.iter(|| {
             let out = formatter
@@ -779,8 +765,8 @@ fn bench_formatting(c: &mut Criterion) {
     );
     let en_us = locale("en-US");
     builtin_group.bench_function("builtin_number_no_opts", |b| {
-        let host = BuiltinHost::from_catalog(&builtin_catalog_no_opts, &en_us).expect("host");
-        let mut formatter = Formatter::new(&builtin_catalog_no_opts, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&builtin_catalog_no_opts, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&builtin_args_no_opts))
@@ -789,8 +775,8 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     builtin_group.bench_function("builtin_number_with_opts", |b| {
-        let host = BuiltinHost::from_catalog(&builtin_catalog_with_opts, &en_us).expect("host");
-        let mut formatter = Formatter::new(&builtin_catalog_with_opts, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&builtin_catalog_with_opts, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&builtin_args_with_opts))
@@ -823,8 +809,8 @@ fn bench_formatting(c: &mut Criterion) {
             BenchmarkId::new("number_percent", locale_name),
             locale,
             |b, locale| {
-                let host = BuiltinHost::from_catalog(&icu_percent_catalog, locale).expect("host");
-                let mut formatter = Formatter::new(&icu_percent_catalog, host);
+                let host = BuiltinHost::new(locale).expect("host");
+                let mut formatter = Formatter::new(&icu_percent_catalog, host).expect("formatter");
                 b.iter(|| {
                     let out = formatter
                         .format_by_id_for_bench("main", black_box(&icu_percent_args))
@@ -837,8 +823,8 @@ fn bench_formatting(c: &mut Criterion) {
             BenchmarkId::new("date_short", locale_name),
             locale,
             |b, locale| {
-                let host = BuiltinHost::from_catalog(&icu_date_catalog, locale).expect("host");
-                let mut formatter = Formatter::new(&icu_date_catalog, host);
+                let host = BuiltinHost::new(locale).expect("host");
+                let mut formatter = Formatter::new(&icu_date_catalog, host).expect("formatter");
                 b.iter(|| {
                     let out = formatter
                         .format_by_id_for_bench("main", black_box(&icu_date_args))
@@ -849,8 +835,8 @@ fn bench_formatting(c: &mut Criterion) {
         );
     }
     icu_group.bench_function("currency_usd_en-US", |b| {
-        let host = BuiltinHost::from_catalog(&icu_currency_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&icu_currency_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&icu_currency_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&icu_currency_args))
@@ -859,8 +845,8 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     icu_group.bench_function("time_short_en-US", |b| {
-        let host = BuiltinHost::from_catalog(&icu_time_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&icu_time_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&icu_time_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&icu_time_args))
@@ -869,8 +855,8 @@ fn bench_formatting(c: &mut Criterion) {
         });
     });
     icu_group.bench_function("datetime_default_en-US", |b| {
-        let host = BuiltinHost::from_catalog(&icu_datetime_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&icu_datetime_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&icu_datetime_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&icu_datetime_args))
@@ -883,7 +869,7 @@ fn bench_formatting(c: &mut Criterion) {
     let mut select_modes = c.benchmark_group("runtime_select_modes");
     select_modes.throughput(Throughput::Elements(1));
     select_modes.bench_function("plain_string_select_formal", |b| {
-        let mut formatter = Formatter::new(&select_catalog, NoopHost);
+        let mut formatter = Formatter::new(&select_catalog, NoopHost).expect("formatter");
         let message = formatter.resolve("main").expect("resolved message");
         b.iter(|| {
             let out = formatter
@@ -895,8 +881,8 @@ fn bench_formatting(c: &mut Criterion) {
     let plural_catalog = build_plural_select_catalog();
     let plural_one = message_args(&plural_catalog, &[("count", Value::Int(1))]);
     select_modes.bench_function("builtin_plural_select_one", |b| {
-        let host = BuiltinHost::from_catalog(&plural_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&plural_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&plural_catalog, host).expect("formatter");
         let message = formatter.resolve("main").expect("resolved message");
         b.iter(|| {
             let out = formatter
@@ -916,7 +902,8 @@ fn bench_formatting(c: &mut Criterion) {
             BenchmarkId::new("many_segments_arg_len", len),
             &args,
             |b, a| {
-                let mut formatter = Formatter::new(&many_segments_catalog, NoopHost);
+                let mut formatter =
+                    Formatter::new(&many_segments_catalog, NoopHost).expect("formatter");
                 b.iter(|| {
                     let out = formatter
                         .format_by_id_for_bench("main", black_box(a))
@@ -935,7 +922,7 @@ fn bench_formatting(c: &mut Criterion) {
         &[("name", Value::Str("World".to_string()))],
     );
     sink_group.bench_function("format_to_markup_open_close", |b| {
-        let mut formatter = Formatter::new(&markup_catalog, NoopHost);
+        let mut formatter = Formatter::new(&markup_catalog, NoopHost).expect("formatter");
         let mut sink = CountingSink::default();
         b.iter(|| {
             sink.reset();
@@ -947,7 +934,8 @@ fn bench_formatting(c: &mut Criterion) {
     });
 
     sink_group.bench_function("format_to_markup_option_literal", |b| {
-        let mut formatter = Formatter::new(&markup_option_literal_catalog, NoopHost);
+        let mut formatter =
+            Formatter::new(&markup_option_literal_catalog, NoopHost).expect("formatter");
         let mut sink = CountingSink::default();
         let empty_args: Vec<(u32, Value)> = Vec::new();
         b.iter(|| {
@@ -964,7 +952,8 @@ fn bench_formatting(c: &mut Criterion) {
         Value::Str("https://test.com".to_string()),
     )];
     sink_group.bench_function("format_to_markup_option_variable", |b| {
-        let mut formatter = Formatter::new(&markup_option_variable_catalog, NoopHost);
+        let mut formatter =
+            Formatter::new(&markup_option_variable_catalog, NoopHost).expect("formatter");
         let mut sink = CountingSink::default();
         b.iter(|| {
             sink.reset();
@@ -1234,8 +1223,8 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     // Plural: hit "one" case (first case)
     let args_one = vec![(arg_id(&plural_catalog, "count"), Value::Int(1))];
     group.bench_function("plural_one", |b| {
-        let host = BuiltinHost::from_catalog(&plural_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&plural_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&plural_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&args_one))
@@ -1247,8 +1236,8 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     // Plural: hit default "other" case
     let args_many = vec![(arg_id(&plural_catalog, "count"), Value::Int(5))];
     group.bench_function("plural_other", |b| {
-        let host = BuiltinHost::from_catalog(&plural_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&plural_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&plural_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&args_many))
@@ -1260,8 +1249,8 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     // Ordinal: hit "one" case (1st — first case)
     let args_1st = vec![(arg_id(&ordinal_catalog, "pos"), Value::Int(1))];
     group.bench_function("ordinal_one", |b| {
-        let host = BuiltinHost::from_catalog(&ordinal_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&ordinal_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&ordinal_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&args_1st))
@@ -1273,8 +1262,8 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     // Ordinal: hit "few" case (3rd — third case)
     let args_3rd = vec![(arg_id(&ordinal_catalog, "pos"), Value::Int(3))];
     group.bench_function("ordinal_few", |b| {
-        let host = BuiltinHost::from_catalog(&ordinal_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&ordinal_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&ordinal_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&args_3rd))
@@ -1286,8 +1275,8 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     // Ordinal: hit default "other" case (5th — falls through all cases)
     let args_5th = vec![(arg_id(&ordinal_catalog, "pos"), Value::Int(5))];
     group.bench_function("ordinal_other", |b| {
-        let host = BuiltinHost::from_catalog(&ordinal_catalog, &en_us).expect("host");
-        let mut formatter = Formatter::new(&ordinal_catalog, host);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = Formatter::new(&ordinal_catalog, host).expect("formatter");
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&args_5th))
