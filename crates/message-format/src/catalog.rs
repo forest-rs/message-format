@@ -4,7 +4,6 @@
 #[cfg(feature = "compile")]
 use alloc::{boxed::Box, format, string::String};
 
-#[cfg(not(feature = "icu4x"))]
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -64,12 +63,13 @@ impl MessageCatalog {
     ///
     /// Uses CLDR-aware locale fallback to find the best available host locale.
     /// For message-level fallback across multiple catalogs, use
-    /// [`CatalogBundle::formatter_for_locale`] instead.
+    /// [`CatalogBundle::formatter`] instead.
     pub fn formatter_for_locale(
         &self,
         locale: &Locale,
     ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
-        MessageFormatter::new(core::iter::once(&self.catalog), locale_candidates(locale))
+        let candidates = locale_candidates(locale);
+        MessageFormatter::new(core::iter::once(&self.catalog), &candidates)
     }
 }
 
@@ -229,68 +229,94 @@ impl LocalizedCatalog {
     }
 }
 
-/// Collection of locale-scoped catalogs with fallback-aware formatter construction.
-#[derive(Debug, Clone, Default)]
+/// Immutable collection of catalogs pre-sorted in locale fallback order.
+///
+/// Accepts a set of [`LocalizedCatalog`]s and a target locale at construction,
+/// immediately filtering and ordering catalogs by the CLDR fallback chain.
+/// Messages are resolved by searching catalogs in order, so a message missing
+/// from a more-specific catalog can still be found in a less-specific one.
+#[derive(Debug, Clone)]
 pub struct CatalogBundle {
-    catalogs: Vec<LocalizedCatalog>,
+    catalogs: Vec<runtime::Catalog>,
+    /// Formatting-locale candidates, independent of catalog locales
+    candidates: Vec<Locale>,
 }
 
 impl CatalogBundle {
-    /// Create an empty bundle.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert one localized catalog.
-    pub fn insert(&mut self, locale: Locale, catalog: MessageCatalog) {
-        if let Some(existing) = self
-            .catalogs
-            .iter_mut()
-            .find(|entry| entry.locale == locale)
-        {
-            existing.catalog = catalog;
-            return;
-        }
-        self.catalogs.push(LocalizedCatalog::new(locale, catalog));
-    }
-
-    /// Insert one pre-paired localized catalog.
-    pub fn insert_localized(&mut self, localized: LocalizedCatalog) {
-        self.insert(localized.locale, localized.catalog);
-    }
-
-    /// Create a multi-catalog formatter with message-level fallback.
+    /// Create a bundle targeting `locale` from the given catalogs.
     ///
-    /// Collects all catalogs whose locale appears in the CLDR fallback chain
-    /// for the requested locale, ordered from most specific to least. Messages
-    /// are resolved by searching these catalogs in order, so a message missing
-    /// from a more-specific catalog can still be found in a less-specific one.
-    ///
-    /// The host locale (used for number/date formatting) is derived from the
-    /// requested `locale` via its own CLDR fallback, independent of which
-    /// catalog locales matched.
-    pub fn formatter_for_locale(
-        &self,
+    /// Computes the CLDR fallback chain for the requested locale and retains
+    /// only catalogs whose locale appears in that chain, ordered from most
+    /// specific to least. Returns an error if no catalog matches any
+    /// candidate in the fallback chain.
+    pub fn new(
+        catalogs: impl IntoIterator<Item = LocalizedCatalog>,
         locale: &Locale,
-    ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
+    ) -> Result<Self, runtime::FormatError> {
         let candidates = locale_candidates(locale);
-        let catalogs: Vec<&runtime::Catalog> = candidates
-            .iter()
-            .filter_map(|candidate| {
-                self.catalogs
-                    .iter()
-                    .find(|entry| entry.locale == *candidate)
-                    .map(|entry| entry.catalog.as_runtime_catalog())
-            })
-            .collect();
-
+        let mut slots: Vec<Option<runtime::Catalog>> = vec![None; candidates.len()];
+        for lc in catalogs {
+            if let Some(pos) = candidates.iter().position(|c| *c == lc.locale) {
+                slots[pos] = Some(lc.catalog.catalog);
+            }
+        }
+        let catalogs: Vec<runtime::Catalog> = slots.into_iter().flatten().collect();
         if catalogs.is_empty() {
             return Err(runtime::FormatError::Trap(
                 runtime::Trap::MissingLocaleCatalog,
             ));
         }
-
-        MessageFormatter::new(catalogs, candidates)
+        Ok(Self {
+            catalogs,
+            candidates,
+        })
     }
+
+    /// Create a bundle by looking up catalogs for each locale in the fallback
+    /// chain.
+    ///
+    /// Calls `fetch` once per candidate locale, from most specific to least.
+    /// The callback returns `Ok(Some(catalog))` when a catalog is available,
+    /// `Ok(None)` when none exists for that locale, or `Err(e)` to abort.
+    /// Returns [`LookupError::MissingLocaleCatalog`] if no candidate produced
+    /// a catalog.
+    pub fn from_lookup<E>(
+        locale: &Locale,
+        mut fetch: impl FnMut(&Locale) -> Result<Option<MessageCatalog>, E>,
+    ) -> Result<Self, LookupError<E>> {
+        let candidates = locale_candidates(locale);
+        let mut catalogs = Vec::new();
+        for candidate in &candidates {
+            match fetch(candidate) {
+                Ok(Some(catalog)) => catalogs.push(catalog.catalog),
+                Ok(None) => {}
+                Err(e) => return Err(LookupError::Fetch(e)),
+            }
+        }
+        if catalogs.is_empty() {
+            return Err(LookupError::MissingLocaleCatalog);
+        }
+        Ok(Self {
+            catalogs,
+            candidates,
+        })
+    }
+
+    /// Create a multi-catalog formatter with message-level fallback.
+    ///
+    /// Catalogs are searched in fallback order (most specific to least).
+    /// The host locale for number/date formatting is derived from the
+    /// target locale's CLDR fallback chain.
+    pub fn formatter(&self) -> Result<MessageFormatter<'_>, runtime::FormatError> {
+        MessageFormatter::new(self.catalogs.iter(), &self.candidates)
+    }
+}
+
+/// Error returned by [`CatalogBundle::from_lookup`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupError<E> {
+    /// The user-provided callback returned an error.
+    Fetch(E),
+    /// No catalog matched any candidate in the fallback chain.
+    MissingLocaleCatalog,
 }
