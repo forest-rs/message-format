@@ -1389,40 +1389,46 @@ pub(crate) fn parse_pattern(source: &str) -> PatternNode<'_> {
 }
 
 /// Validate declaration heads in complex-message source.
+///
+/// Per the MF2 ABNF, `.` is a valid `text-char` but **not** a valid
+/// `simple-start-char` — so a leading `.` (after optional whitespace / bidi
+/// isolates) is what disambiguates a complex-message declaration prelude
+/// from a simple-message. Anywhere else, `.` is just text.
+///
+/// This validator delegates to `parse_document`: if the residual body starts
+/// with `.`, we require the following ASCII-alphabetic run to name a known
+/// declaration keyword (`input` / `local` / `match`). Empty alpha run
+/// (`.`, `. foo`, `.1`, `.{`, …) and unknown alpha run (`.bogus`, `.inupt`,
+/// …) both fail here.
 pub(crate) fn validate_known_declaration_heads(
     source: &str,
     ctx: crate::syntax::span::SourceContext,
 ) -> Result<(), CompileError> {
-    let bytes = source.as_bytes();
-    for idx in 0..bytes.len() {
-        if bytes[idx] != b'.' {
-            continue;
-        }
-        if idx > 0 {
-            let prev = source[..idx].chars().next_back().unwrap_or_default();
-            if !(is_mf2_whitespace(prev) || is_bidi_control(prev)) {
-                continue;
-            }
-        }
-        let mut end = idx + 1;
-        while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
-            end += 1;
-        }
-        if end == idx + 1 {
-            continue;
-        }
-        let head = &source[idx + 1..end];
-        if head != "input" && head != "local" && head != "match" {
-            let (line, col) = ctx.location(source, idx);
-            return Err(CompileError::invalid_expr_detail(
-                line,
-                col,
-                ".input, .local, or .match",
-                crate::syntax::span::quoted_snippet(&source[idx..end]),
-            ));
-        }
+    let doc = parse_document(source);
+    let Some(body) = &doc.body else {
+        return Ok(());
+    };
+    let body_start = body.span.start;
+    let body_src = &source[body_start..];
+    if !body_src.starts_with('.') {
+        return Ok(());
     }
-    Ok(())
+    let bytes = body_src.as_bytes();
+    let mut end = 1;
+    while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+        end += 1;
+    }
+    let head = &body_src[1..end];
+    if end > 1 && (head == "input" || head == "local" || head == "match") {
+        return Ok(());
+    }
+    let (line, col) = ctx.location(source, body_start);
+    Err(CompileError::invalid_expr_detail(
+        line,
+        col,
+        ".input, .local, or .match",
+        crate::syntax::span::quoted_snippet(&body_src[..end]),
+    ))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1725,6 +1731,87 @@ mod tests {
             },
         )
         .expect("valid declaration head");
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_accepts_dot_in_simple_message_text() {
+        validate_known_declaration_heads(
+            "Hello .world",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect("dot-prefixed word is valid text in a simple message");
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_accepts_dot_after_newline() {
+        validate_known_declaration_heads(
+            "Hello\n.foo",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect("dot after a newline is still text inside a simple message");
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_accepts_dot_in_quoted_pattern_body() {
+        validate_known_declaration_heads(
+            ".input {$x :string}\n{{Greetings .foo}}",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect("dot-prefixed word inside a quoted pattern is valid text");
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_rejects_mid_prelude_typo() {
+        let err = validate_known_declaration_heads(
+            ".input {$x} .inupt {$y}",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect_err("typo'd mid-prelude declaration must still be rejected");
+        match err {
+            crate::compile::CompileError::InvalidExpr {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(".input, .local, or .match"));
+                assert!(found.is_some());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_rejects_leading_dot_without_alpha() {
+        validate_known_declaration_heads(
+            ". foo",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect_err("leading `.` not followed by an alpha keyword is invalid");
+    }
+
+    #[test]
+    fn validate_known_declaration_heads_still_rejects_leading_typo_with_whitespace() {
+        validate_known_declaration_heads(
+            "  .inupt {$x}",
+            crate::syntax::span::SourceContext::Line {
+                line: 1,
+                column_offset: 0,
+            },
+        )
+        .expect_err("leading typo after whitespace must still be rejected");
     }
 
     #[test]
