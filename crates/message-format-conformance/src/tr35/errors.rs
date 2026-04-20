@@ -72,6 +72,15 @@ fn duplicate_option_name() {
     );
 }
 
+/// A `.match` variant key without a following `{{...}}` pattern is an MF2 syntax error.
+#[test]
+fn match_dangling_key_without_pattern_is_syntax_error() {
+    assert_compile_err(
+        ".match $x\none {{One}}\n* {{Other}} .bogus",
+        is_syntax_error,
+    );
+}
+
 /// E-24 — Duplicate variant keys are a compile error.
 #[test]
 fn duplicate_variant_key() {

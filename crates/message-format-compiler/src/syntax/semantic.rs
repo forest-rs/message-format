@@ -492,24 +492,10 @@ pub(crate) fn parse_match_declaration_prelude_from_document<'a>(
         variants,
     }) = &declaration.payload
     else {
-        let match_head_end = declaration.span.start + ".match".len();
-        if let Some(ch) = source[match_head_end..].chars().next()
-            && !(crate::syntax::charset::is_mf2_whitespace(ch) || is_bidi_control(ch))
-        {
-            let (line, column) = ctx.location(source, match_head_end);
-            return Err(CompileError::invalid_expr_detail(
-                line,
-                column,
-                "whitespace after '.match'",
-                format!("{ch:?}"),
-            ));
-        }
-        let (line, column) = ctx.location(source, declaration.span.start);
-        return Err(CompileError::invalid_expr_detail(
-            line,
-            column,
-            "at least one selector variable",
-            "none",
+        return Err(compile_error_from_match_parse_error(
+            source,
+            ctx,
+            declaration,
         ));
     };
 
@@ -904,6 +890,98 @@ fn is_function_name(value: &str) -> bool {
     })
 }
 
+fn compile_error_from_match_parse_error(
+    source: &str,
+    ctx: SourceContext,
+    decl: &DeclarationNode<'_>,
+) -> CompileError {
+    use crate::syntax::ast::MatchParseError as E;
+    let err = decl
+        .match_error
+        .as_ref()
+        .expect("match declaration without payload must carry a match_error");
+    match err {
+        E::MissingWhitespaceAfterMatch { after_match } => {
+            let found = source[*after_match..]
+                .chars()
+                .next()
+                .map(|c| format!("{c:?}"))
+                .unwrap_or_else(|| "end of input".into());
+            let (line, column) = ctx.location(source, *after_match);
+            CompileError::invalid_expr_detail(line, column, "whitespace after '.match'", found)
+        }
+        E::MissingSelector { pos } => {
+            let (line, column) = ctx.location(source, *pos);
+            CompileError::invalid_expr_detail(
+                line,
+                column,
+                "at least one selector variable",
+                "none",
+            )
+        }
+        E::MissingWhitespaceAfterSelector { pos } => {
+            let (line, column) = ctx.location(source, *pos);
+            CompileError::invalid_expr_detail(line, column, "whitespace before variant key", "none")
+        }
+        E::MalformedKey { span } => {
+            let found = if span.is_empty() {
+                source
+                    .get(span.start..)
+                    .and_then(|s| s.chars().next())
+                    .map(|c| format!("{c:?}"))
+                    .unwrap_or_else(|| "end of input".to_string())
+            } else {
+                let text = source.get(span.clone()).unwrap_or("").trim();
+                if text.is_empty() {
+                    "end of input".to_string()
+                } else {
+                    quoted_snippet(text)
+                }
+            };
+            let (line, column) = ctx.location(source, span.start);
+            CompileError::invalid_variant_key_detail(line, column, "'*' or a key literal", found)
+        }
+        E::MissingVariantPattern {
+            last_key_span,
+            expected_at,
+        } => {
+            let key = source.get(last_key_span.clone()).unwrap_or("").trim();
+            let tail = source[*expected_at..].trim_start();
+            let found = if tail.is_empty() {
+                format!("key {key:?}, end of input")
+            } else {
+                format!("key {key:?}, found {}", quoted_snippet(tail))
+            };
+            let (line, column) = ctx.location(source, *expected_at);
+            CompileError::invalid_expr_detail(
+                line,
+                column,
+                "quoted pattern '{{...}}' after match key",
+                found,
+            )
+        }
+        E::UnterminatedVariantPattern {
+            last_key_span,
+            pattern_start,
+        } => {
+            let key = source.get(last_key_span.clone()).unwrap_or("").trim();
+            let tail = source.get(*pattern_start..).unwrap_or("");
+            let found = format!("key {key:?}, unclosed pattern {}", quoted_snippet(tail));
+            let (line, column) = ctx.location(source, *pattern_start);
+            CompileError::invalid_expr_detail(
+                line,
+                column,
+                "closing '}}' for variant pattern",
+                found,
+            )
+        }
+        E::NoVariants { pos } => {
+            let (line, column) = ctx.location(source, *pos);
+            CompileError::invalid_expr_detail(line, column, "at least one variant", "none")
+        }
+    }
+}
+
 fn declaration_payload_error(
     source: &str,
     declaration: &DeclarationNode<'_>,
@@ -1068,6 +1146,127 @@ mod tests {
                 assert_eq!(column, 7);
                 assert_eq!(expected, Some("whitespace after '.match'"));
                 assert!(found.as_deref().is_some_and(|f| f.contains('ᚠ')));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dangling_match_key_reports_missing_pattern() {
+        let src = ".match $n one {{One}} * {{Other}} .bogus";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some("quoted pattern '{{...}}' after match key"));
+                assert!(found.as_deref().is_some_and(|f| f.contains(".bogus")));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_variant_pattern_reports_unclosed_diagnostic() {
+        let src = ".match $n one {{unterminated";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some("closing '}}' for variant pattern"));
+                let found = found.expect("found");
+                assert!(found.contains("one"), "expected key text in {found:?}");
+                assert!(
+                    found.contains("unclosed pattern"),
+                    "expected unclosed pattern label in {found:?}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_missing_selector_reports_selector_diagnostic() {
+        let src = ".match one {{One}} * {{Other}}";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr { expected, .. } => {
+                assert_eq!(expected, Some("at least one selector variable"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_bidi_only_after_head_reports_missing_selector() {
+        let src = ".match\u{200E}$x";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr { expected, .. } => {
+                assert_eq!(expected, Some("at least one selector variable"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_missing_whitespace_after_selector() {
+        let src = ".match $n";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr { expected, .. } => {
+                assert_eq!(expected, Some("whitespace before variant key"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_with_no_variants_reports_variant_diagnostic() {
+        let src = ".match $n \n";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidExpr { expected, .. } => {
+                assert_eq!(expected, Some("at least one variant"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_malformed_key_reports_key_diagnostic_consuming() {
+        let src = ".match $n |unterminated";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidVariantKey {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some("'*' or a key literal"));
+                assert!(
+                    found
+                        .as_deref()
+                        .is_some_and(|f| f.contains("|unterminated")),
+                    "expected malformed key snippet in found"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_malformed_key_reports_key_diagnostic_non_consuming() {
+        let src = ".match $n {";
+        let err = parse_match_declaration_prelude(src, line_ctx(1)).expect_err("must fail");
+        match err {
+            crate::compile::CompileError::InvalidVariantKey {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some("'*' or a key literal"));
+                assert!(
+                    found.as_deref().is_some_and(|f| f.contains('{')),
+                    "expected '{{' in found"
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }
