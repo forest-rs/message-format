@@ -74,6 +74,15 @@ fn simple_message_leading_dot_is_error() {
     assert_compile_err(".notakeyword foo", is_syntax_error);
 }
 
+/// S-6 — A leading `.` not followed by a keyword is still invalid, even when
+/// the alphabetic run is empty. Covers `.`, `. foo`, etc. that the ABNF
+/// excludes from `simple-start-char` but don't start a known declaration.
+#[test]
+fn simple_message_leading_dot_without_alpha_is_error() {
+    assert_compile_err(". foo", is_syntax_error);
+    assert_compile_err(".", is_syntax_error);
+}
+
 /// S-7 — A complex message begins with `.` keyword or `{{`.
 #[test]
 fn complex_message_starts_with_double_brace() {
@@ -118,6 +127,50 @@ fn empty_pattern_is_valid() {
 #[test]
 fn arbitrary_unicode_in_text() {
     assert_format("こんにちは 🌍", &[], "こんにちは 🌍");
+}
+
+/// S-4/S-16 — A `.word` sequence inside a simple-message pattern is text,
+/// because `.` is a valid `text-char` — only the *first* non-whitespace `.`
+/// disambiguates a declaration prelude from a simple message.
+#[test]
+fn simple_message_contains_dot_word_as_text() {
+    assert_format("Hello .world", &[], "Hello .world");
+}
+
+/// S-4/S-16 — Version-style dotted numbers followed by a `.word` token are
+/// preserved as literal text (the validator must not treat `.notes` as a
+/// declaration head just because it sits on a word boundary).
+#[test]
+fn simple_message_contains_dot_word_after_version_number() {
+    assert_format("version 1.2.3 .notes", &[], "version 1.2.3 .notes");
+}
+
+/// S-16 — A `.word` sequence inside a quoted pattern body is text.
+#[test]
+fn complex_message_quoted_pattern_contains_dot_word() {
+    assert_format("{{Greetings .foo}}", &[], "Greetings .foo");
+}
+
+/// S-16 — A `.word` sequence inside the quoted pattern that follows a
+/// declaration prelude is text.
+#[test]
+fn complex_message_declaration_body_contains_dot_word() {
+    assert_format(
+        ".input { $x :string }\n{{Value .x is { $x }}}",
+        &[("x", Value::Str("ok".into()))],
+        "Value .x is ok",
+    );
+}
+
+/// S-16 — A `.word` sequence inside a matcher variant's quoted pattern body
+/// is text.
+#[test]
+fn complex_message_match_variant_body_contains_dot_word() {
+    assert_format(
+        ".input { $n :string }\n.match $n\none {{Hello .world}}\n* {{Other}}",
+        &[("n", Value::Str("one".into()))],
+        "Hello .world",
+    );
 }
 
 // ---------------------------------------------------------------------------
