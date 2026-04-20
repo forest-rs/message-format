@@ -3,8 +3,6 @@
 
 //! Literal and text decoding helpers used by parser/semantic/lowering stages.
 
-use std::borrow::Cow;
-
 use crate::compile::CompileError;
 use crate::syntax::ident::is_ignorable_char;
 use crate::syntax::span::{char_column, quoted_snippet};
@@ -65,35 +63,6 @@ pub(crate) fn decode_text_fragment(value: &str, line: usize) -> Result<String, C
         return Err(CompileError::invalid_expr(line));
     }
     Ok(out)
-}
-
-/// Escape plain text for embedding in an MF2 pattern.
-///
-/// Takes an arbitrary plain string and returns valid MF2 `text` source by
-/// escaping `\` as `\\`, `{` as `\{`, and `}` as `\}`. The pipe character `|`
-/// is a valid `text-char` and is not escaped.
-///
-/// Returns [`Cow::Borrowed`] when no escaping is needed, avoiding allocation on
-/// the common path.
-pub fn escape_text(value: &str) -> Cow<'_, str> {
-    let extra = value
-        .bytes()
-        .filter(|&b| matches!(b, b'\\' | b'{' | b'}'))
-        .count();
-    if extra == 0 {
-        return Cow::Borrowed(value);
-    }
-
-    let mut out = String::with_capacity(value.len() + extra);
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '{' => out.push_str("\\{"),
-            '}' => out.push_str("\\}"),
-            _ => out.push(ch),
-        }
-    }
-    Cow::Owned(out)
 }
 
 /// Validate braces in a raw pattern body before lowering expression spans.
@@ -287,66 +256,4 @@ fn is_valid_number_literal(value: &str) -> bool {
     }
 
     idx == len
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escape_text_plain_passthrough() {
-        assert_eq!(escape_text("hello world"), "hello world");
-    }
-
-    #[test]
-    fn escape_text_backslash() {
-        assert_eq!(escape_text(r"a\b"), r"a\\b");
-    }
-
-    #[test]
-    fn escape_text_open_brace() {
-        assert_eq!(escape_text("a{b"), r"a\{b");
-    }
-
-    #[test]
-    fn escape_text_close_brace() {
-        assert_eq!(escape_text("a}b"), r"a\}b");
-    }
-
-    #[test]
-    fn escape_text_combined() {
-        assert_eq!(escape_text(r"a\{b}c"), r"a\\\{b\}c");
-    }
-
-    #[test]
-    fn escape_text_pipe_not_escaped() {
-        assert_eq!(escape_text("a|b"), "a|b");
-    }
-
-    #[test]
-    fn escape_text_empty() {
-        assert_eq!(escape_text(""), "");
-    }
-
-    #[test]
-    fn escape_text_unicode_passthrough() {
-        assert_eq!(escape_text("héllo 世界 🎉"), "héllo 世界 🎉");
-    }
-
-    #[test]
-    fn escape_text_round_trip() {
-        let inputs = &[
-            "hello",
-            r"back\slash",
-            "open{brace",
-            "close}brace",
-            "a|pipe",
-            "",
-        ];
-        for &input in inputs {
-            let escaped = escape_text(input);
-            let decoded = decode_text_fragment(&escaped, 0).expect("decode must succeed");
-            assert_eq!(decoded, input, "round-trip failed for {input:?}");
-        }
-    }
 }
