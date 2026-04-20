@@ -17,7 +17,6 @@ use crate::semantic::{
     SourceSpan,
 };
 use crate::syntax::ident::{canonicalize_identifier, is_identifier, strip_bidi_controls};
-pub use crate::syntax::literal::escape_text;
 use crate::syntax::literal::{
     decode_text_fragment, ensure_well_formed_quoted_pattern_body, parse_literal_text,
     parse_number_literal, validate_balanced_braces,

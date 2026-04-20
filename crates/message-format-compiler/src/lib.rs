@@ -127,8 +127,9 @@ pub use compile::{
     BuildError, BuildErrorContext, CatalogBuilder, CompileError, CompileInput, CompileOptions,
     CompileReport, CompiledCatalog, DiagnosticContext, DiagnosticSeverity, MessageSource,
     SourceMap, compile, compile_inputs, compile_inputs_with_manifest, compile_resources,
-    compile_resources_with_manifest, compile_str, compile_with_manifest, escape_text,
+    compile_resources_with_manifest, compile_str, compile_with_manifest,
 };
+pub use emit::escape_text;
 pub use manifest::{
     FunctionManifest, FunctionOperandKind, FunctionOptionSchema, FunctionOptionValueKind,
     FunctionSchema, FunctionSelectorKeyKind, ManifestParseError,
@@ -137,6 +138,7 @@ pub use resource::{MessageResource, ResourceInput, ResourceSpan};
 pub use semantic::{DetachedSourceSpan, SourceId, SourceInfo, SourceKind, SourceSpan};
 
 mod compile;
+mod emit;
 mod manifest;
 mod resource;
 
@@ -147,3 +149,6 @@ pub mod semantic;
 pub mod ir;
 
 mod syntax;
+
+#[cfg(test)]
+mod test_support;

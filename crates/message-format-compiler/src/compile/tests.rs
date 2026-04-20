@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use message_format_runtime::schema;
-use message_format_runtime::{Catalog, FormatError, Formatter, Host, HostFn, NoopHost, Value};
+use message_format_runtime::{Catalog, Formatter, HostFn, NoopHost, Value};
 
 use crate::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionOptionValueKind, FunctionSchema,
@@ -10,50 +10,10 @@ use crate::manifest::{
 };
 use crate::resource::{MessageResource, ResourceInput, ResourceSpan};
 use crate::semantic::{DetachedSourceSpan, OperandLiteralKind, SelectorExpr};
+use crate::test_support::FormatterTestExt;
 
 use super::frontend::{lower_expression_node_to_part, parse_messages};
 use super::*;
-
-#[derive(Default)]
-struct OutputStringSink {
-    out: String,
-}
-
-impl message_format_runtime::FormatSink for OutputStringSink {
-    fn literal(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
-    fn expression(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
-    fn markup_open(&mut self, _name: &str, _options: &[message_format_runtime::FormatOption<'_>]) {}
-
-    fn markup_close(&mut self, _name: &str, _options: &[message_format_runtime::FormatOption<'_>]) {
-    }
-}
-
-trait FormatterTestExt<H: Host> {
-    fn format_by_id_for_test(
-        &mut self,
-        message_id: &str,
-        args: &dyn message_format_runtime::Args,
-    ) -> Result<String, FormatError>;
-}
-
-impl<H: Host> FormatterTestExt<H> for Formatter<'_, H> {
-    fn format_by_id_for_test(
-        &mut self,
-        message_id: &str,
-        args: &dyn message_format_runtime::Args,
-    ) -> Result<String, FormatError> {
-        let message = self.resolve(message_id)?;
-        let mut sink = OutputStringSink::default();
-        let _diagnostics = self.format_to(message, args, &mut sink)?;
-        Ok(sink.out)
-    }
-}
 
 fn expect_compiled(report: CompileReport) -> CompiledCatalog {
     assert!(!report.has_errors(), "{}", report.render());
