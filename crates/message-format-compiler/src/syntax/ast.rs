@@ -18,6 +18,49 @@ pub(crate) struct DeclarationNode<'a> {
     pub(crate) kind: DeclarationKind,
     pub(crate) span: Range<usize>,
     pub(crate) payload: Option<DeclarationPayloadNode<'a>>,
+    /// Structured failure reason for `.match` payload parsing. Only
+    /// populated when `kind == Match && payload.is_none()`; `None` for
+    /// all other cases.
+    pub(crate) match_error: Option<MatchParseError>,
+}
+
+/// Structured failure reason for `.match` payload parsing.
+///
+/// `parse_match_payload` owns which of six distinct failure paths it
+/// took; encoding that choice here lets `semantic.rs` produce a precise
+/// diagnostic without re-scanning the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MatchParseError {
+    /// No whitespace between `.match` and the first selector.
+    MissingWhitespaceAfterMatch { after_match: usize },
+    /// Whitespace was present, but no `$variable` selector followed.
+    MissingSelector { pos: usize },
+    /// A selector was parsed but no whitespace separated it from the
+    /// variant keys.
+    MissingWhitespaceAfterSelector { pos: usize },
+    /// Key-loop saw a token it could not recognise as `*` / quoted /
+    /// unquoted key. `span` is the range the key-parse consumed before
+    /// failing. `span` may be empty for non-consuming failures
+    /// (e.g. a bare `{` at key position) — in that case the translator
+    /// peeks the first char at `span.start` to name the offending token.
+    MalformedKey { span: Range<usize> },
+    /// One or more keys were parsed, but the parser did not see an
+    /// opening `{{` where the variant pattern should have started.
+    /// `expected_at` is the position the `{{` was expected at.
+    MissingVariantPattern {
+        last_key_span: Range<usize>,
+        expected_at: usize,
+    },
+    /// Keys parsed, an opening `{{` was consumed, but the matching
+    /// `}}` was never found. `pattern_start` is the byte offset of the
+    /// opening `{{`, captured *before* the call.
+    UnterminatedVariantPattern {
+        last_key_span: Range<usize>,
+        pattern_start: usize,
+    },
+    /// Selectors parsed, but zero complete variants were built (first
+    /// variant's key loop broke before a key was read).
+    NoVariants { pos: usize },
 }
 
 /// Declaration head kind.

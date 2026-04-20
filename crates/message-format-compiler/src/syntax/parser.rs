@@ -8,8 +8,8 @@ use crate::syntax::ast::{
     AttributeNode, CallExpressionNode, CallOperandNode, DeclarationKind, DeclarationNode,
     DeclarationPayloadNode, ExpressionDiagnosticHint, ExpressionKindNode, ExpressionNode,
     ExpressionPayloadNode, FunctionSpecNode, LiteralExpressionNode, MarkupKind, MarkupNode,
-    MatchVariantNode, OptionNode, OptionValue, PatternNode, PatternSegmentNode, SyntaxDocument,
-    VarExpressionNode, VariantKeyNode,
+    MatchParseError, MatchVariantNode, OptionNode, OptionValue, PatternNode, PatternSegmentNode,
+    SyntaxDocument, VarExpressionNode, VariantKeyNode,
 };
 use crate::syntax::charset::{is_mf2_whitespace, is_name_char, is_name_start, is_quoted_char};
 use crate::syntax::ident::is_bidi_control;
@@ -1092,10 +1092,39 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_match_payload(&mut self) -> (usize, Option<DeclarationPayloadNode<'a>>) {
+    fn parse_match_payload(
+        &mut self,
+    ) -> (usize, Result<DeclarationPayloadNode<'a>, MatchParseError>) {
         // Must have whitespace after `.match`
         if !self.skip_whitespace() {
-            return (self.pos, None);
+            // Disambiguate: peek the char at `self.pos` (skip_whitespace
+            // backtracks any bidi it tentatively consumed on failure).
+            // - None or a bidi control → MissingSelector (matches the
+            //   old semantic heuristic which treated bidi as ignorable
+            //   and fell through to the selector diagnostic).
+            // - Anything else → MissingWhitespaceAfterMatch (preserves
+            //   the byte-for-byte diagnostic from semantic.rs).
+            let after_match = self.pos;
+            match self.peek() {
+                None => {
+                    return (
+                        self.pos,
+                        Err(MatchParseError::MissingSelector { pos: after_match }),
+                    );
+                }
+                Some(ch) if is_bidi_control(ch) => {
+                    return (
+                        self.pos,
+                        Err(MatchParseError::MissingSelector { pos: after_match }),
+                    );
+                }
+                Some(_) => {
+                    return (
+                        self.pos,
+                        Err(MatchParseError::MissingWhitespaceAfterMatch { after_match }),
+                    );
+                }
+            }
         }
 
         // Parse selectors: `1*([s] selector)` where selector = variable
@@ -1130,17 +1159,24 @@ impl<'a> Parser<'a> {
         }
 
         if selectors.is_empty() {
-            return (self.pos, None);
+            return (
+                self.pos,
+                Err(MatchParseError::MissingSelector { pos: self.pos }),
+            );
         }
 
         // Require whitespace between last selector and variant keys
         // (ABNF: selectors and variants are separated by `s`)
         if !had_trailing_ws {
-            return (self.pos, None);
+            return (
+                self.pos,
+                Err(MatchParseError::MissingWhitespaceAfterSelector { pos: self.pos }),
+            );
         }
 
         // Parse variants: greedy key parsing until `{{`
         let mut variants = Vec::new();
+        let mut last_key_span: core::ops::Range<usize> = 0..0;
         loop {
             self.skip_optional_whitespace();
             if self.at_end() {
@@ -1167,9 +1203,16 @@ impl<'a> Parser<'a> {
                 if self.at_end() || self.remaining().starts_with("{{") {
                     break;
                 }
+                let key_start = self.pos;
                 let Some((key, next)) = self.parse_match_key() else {
-                    return (self.pos, None);
+                    return (
+                        self.pos,
+                        Err(MatchParseError::MalformedKey {
+                            span: key_start..self.pos,
+                        }),
+                    );
                 };
+                last_key_span = key.span.clone();
                 keys.push(key);
                 self.pos = next;
             }
@@ -1180,8 +1223,20 @@ impl<'a> Parser<'a> {
 
             // Parse variant pattern `{{...}}`
             self.skip_optional_whitespace();
+            let pattern_start = self.pos;
             let Some((pattern_span, next)) = self.parse_variant_pattern_span() else {
-                return (self.pos, None);
+                let err = if self.pos == pattern_start {
+                    MatchParseError::MissingVariantPattern {
+                        last_key_span: last_key_span.clone(),
+                        expected_at: pattern_start,
+                    }
+                } else {
+                    MatchParseError::UnterminatedVariantPattern {
+                        last_key_span: last_key_span.clone(),
+                        pattern_start,
+                    }
+                };
+                return (self.pos, Err(err));
             };
             let pattern = self.build_pattern_node(pattern_span.start, pattern_span.end);
             variants.push(MatchVariantNode { keys, pattern });
@@ -1189,12 +1244,12 @@ impl<'a> Parser<'a> {
         }
 
         if variants.is_empty() {
-            return (self.pos, None);
+            return (self.pos, Err(MatchParseError::NoVariants { pos: self.pos }));
         }
 
         (
             self.pos,
-            Some(DeclarationPayloadNode::Match {
+            Ok(DeclarationPayloadNode::Match {
                 selectors,
                 variants,
             }),
@@ -1331,6 +1386,7 @@ pub(crate) fn parse_document(source: &str) -> SyntaxDocument<'_> {
                         kind,
                         span: start..parser.pos,
                         payload: Some(payload),
+                        match_error: None,
                     });
                 } else {
                     // Malformed — record declaration without payload
@@ -1338,6 +1394,7 @@ pub(crate) fn parse_document(source: &str) -> SyntaxDocument<'_> {
                         kind,
                         span: start..parser.pos,
                         payload: None,
+                        match_error: None,
                     });
                     // Try to recover by skipping to next declaration
                     break;
@@ -1349,22 +1406,29 @@ pub(crate) fn parse_document(source: &str) -> SyntaxDocument<'_> {
                         kind,
                         span: start..parser.pos,
                         payload: Some(payload),
+                        match_error: None,
                     });
                 } else {
                     declarations.push(DeclarationNode {
                         kind,
                         span: start..parser.pos,
                         payload: None,
+                        match_error: None,
                     });
                     break;
                 }
             }
             DeclarationKind::Match => {
-                let (end, payload) = parser.parse_match_payload();
+                let (end, payload_result) = parser.parse_match_payload();
+                let (payload, match_error) = match payload_result {
+                    Ok(p) => (Some(p), None),
+                    Err(e) => (None, Some(e)),
+                };
                 declarations.push(DeclarationNode {
                     kind,
                     span: start..end,
                     payload,
+                    match_error,
                 });
                 // Match consumes everything
                 parser.pos = end;
