@@ -15,7 +15,10 @@
 
 use alloc::vec::Vec;
 
-use crate::{catalog::read_i32, error::CatalogError};
+use crate::{
+    catalog::{read_i32, read_i32_unchecked},
+    error::CatalogError,
+};
 
 /// Decoded message entry in the `MSGS` chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +161,38 @@ pub(crate) fn decode_opcode_and_next_pc(
     Ok((pc_usize, opcode, next_pc))
 }
 
+/// Decode one instruction according to the shared executable schema.
+///
+/// SAFETY: Assumes that `code` has already been validated (see [`decode`]).
+pub(crate) unsafe fn decode_unchecked(code: &[u8], pc: u32) -> Decoded {
+    let (pc_usize, opcode, next_pc) = unsafe { decode_opcode_and_next_pc_unchecked(code, pc) };
+
+    let rel32 = match opcode {
+        OP_JMP | OP_JMP_IF_FALSE | OP_CASE_DEFAULT => {
+            Some(unsafe { read_i32_unchecked(code, pc_usize + 1) })
+        }
+        OP_CASE_STR => Some(unsafe { read_i32_unchecked(code, pc_usize + 5) }),
+        _ => None,
+    };
+
+    Decoded {
+        opcode,
+        pc,
+        next_pc,
+        rel32,
+    }
+}
+
+pub(crate) unsafe fn decode_opcode_and_next_pc_unchecked(code: &[u8], pc: u32) -> (usize, u8, u32) {
+    let pc_usize = pc as usize;
+    let opcode = *unsafe { code.get_unchecked(pc_usize) };
+    let len = unsafe { opcode_len(opcode).unwrap_unchecked() };
+    #[expect(clippy::cast_possible_truncation, reason = "unchecked")]
+    let len_u32 = len as u32;
+    let next_pc = pc + len_u32;
+    (pc_usize, opcode, next_pc)
+}
+
 fn opcode_len(opcode: u8) -> Option<usize> {
     Some(match opcode {
         OP_HALT => 1,
@@ -180,6 +215,32 @@ fn opcode_len(opcode: u8) -> Option<usize> {
         OP_SELECT_ARG => 5,
         OP_MARKUP_OPEN => 6,
         OP_MARKUP_CLOSE => 6,
+        _ => return None,
+    })
+}
+
+pub(crate) fn opcode_name(opcode: u8) -> Option<&'static str> {
+    Some(match opcode {
+        OP_HALT => "HALT",
+        OP_JMP => "JMP",
+        OP_JMP_IF_FALSE => "JMP_IF_FALSE",
+        OP_PUSH_CONST => "PUSH_CONST",
+        OP_LOAD_ARG => "LOAD_ARG",
+        OP_OUT_LIT => "OUT_LIT",
+        OP_OUT_SLICE => "OUT_SLICE",
+        OP_OUT_VAL => "OUT_VAL",
+        OP_OUT_ARG => "OUT_ARG",
+        OP_SELECT_BEGIN => "SELECT_BEGIN",
+        OP_CASE_STR => "CASE_STR",
+        OP_CASE_DEFAULT => "CASE_DEFAULT",
+        OP_SELECT_END => "SELECT_END",
+        OP_CALL_FUNC => "CALL_FUNC",
+        OP_EXPR_FALLBACK => "EXPR_FALLBACK",
+        OP_CALL_SELECT => "CALL_SELECT",
+        OP_OUT_EXPR => "OUT_EXPR",
+        OP_SELECT_ARG => "SELECT_ARG",
+        OP_MARKUP_OPEN => "MARKUP_OPEN",
+        OP_MARKUP_CLOSE => "MARKUP_CLOSE",
         _ => return None,
     })
 }

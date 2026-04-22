@@ -121,6 +121,11 @@ pub enum CatalogError {
         /// Entrypoint lacking a reachable halt.
         entry_pc: u32,
     },
+    /// A message entry could not be statically proven to have a reachable halt.
+    AmbiguouslyTerminatedEntry {
+        /// Entrypoint lacking a reachable halt.
+        entry_pc: u32,
+    },
 }
 
 /// Errors returned while formatting a message.
@@ -340,10 +345,11 @@ impl fmt::Display for CatalogError {
                 )
             }
             Self::InvalidSelectSequence { pc, opcode } => {
-                write!(
-                    f,
-                    "invalid select opcode 0x{opcode:02x} sequencing at pc {pc}"
-                )
+                write!(f, "invalid select opcode 0x{opcode:02x}")?;
+                if let Some(name) = crate::schema::opcode_name(*opcode) {
+                    write!(f, " ({name})")?;
+                }
+                write!(f, " sequencing at pc {pc}")
             }
             Self::InvalidExprFallbackSequence { pc } => {
                 write!(
@@ -353,6 +359,12 @@ impl fmt::Display for CatalogError {
             }
             Self::UnterminatedEntry { entry_pc } => {
                 write!(f, "message entry at pc {entry_pc} has no reachable halt")
+            }
+            Self::AmbiguouslyTerminatedEntry { entry_pc } => {
+                write!(
+                    f,
+                    "message entry at pc {entry_pc} has no provably-reachable halt"
+                )
             }
         }
     }
