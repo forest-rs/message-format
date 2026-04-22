@@ -345,10 +345,11 @@ impl fmt::Display for CatalogError {
                 )
             }
             Self::InvalidSelectSequence { pc, opcode } => {
-                write!(
-                    f,
-                    "invalid select opcode 0x{opcode:02x} sequencing at pc {pc}"
-                )
+                write!(f, "invalid select opcode 0x{opcode:02x}")?;
+                if let Some(name) = crate::schema::opcode_name(*opcode) {
+                    write!(f, " ({name})")?;
+                }
+                write!(f, " sequencing at pc {pc}")
             }
             Self::InvalidExprFallbackSequence { pc } => {
                 write!(

@@ -235,6 +235,32 @@ fn opcode_len(opcode: u8) -> Option<usize> {
     })
 }
 
+pub(crate) fn opcode_name(opcode: u8) -> Option<&'static str> {
+    Some(match opcode {
+        OP_HALT => "HALT",
+        OP_JMP => "JMP",
+        OP_JMP_IF_FALSE => "JMP_IF_FALSE",
+        OP_PUSH_CONST => "PUSH_CONST",
+        OP_LOAD_ARG => "LOAD_ARG",
+        OP_OUT_LIT => "OUT_LIT",
+        OP_OUT_SLICE => "OUT_SLICE",
+        OP_OUT_VAL => "OUT_VAL",
+        OP_OUT_ARG => "OUT_ARG",
+        OP_SELECT_BEGIN => "SELECT_BEGIN",
+        OP_CASE_STR => "CASE_STR",
+        OP_CASE_DEFAULT => "CASE_DEFAULT",
+        OP_SELECT_END => "SELECT_END",
+        OP_CALL_FUNC => "CALL_FUNC",
+        OP_EXPR_FALLBACK => "EXPR_FALLBACK",
+        OP_CALL_SELECT => "CALL_SELECT",
+        OP_OUT_EXPR => "OUT_EXPR",
+        OP_SELECT_ARG => "SELECT_ARG",
+        OP_MARKUP_OPEN => "MARKUP_OPEN",
+        OP_MARKUP_CLOSE => "MARKUP_CLOSE",
+        _ => return None,
+    })
+}
+
 /// Fluent bytecode builder for tests.
 ///
 /// Eliminates manual byte arithmetic — especially for jump offsets — by
