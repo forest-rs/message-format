@@ -39,7 +39,6 @@ pub struct Catalog {
     messages: Vec<MessageEntry>,
     funcs: Vec<FuncEntry>,
     code_bytes: Range<usize>,
-    instruction_pcs: Vec<u32>,
 }
 
 impl Catalog {
@@ -155,8 +154,7 @@ impl Catalog {
         let literal_len = lits_range
             .as_ref()
             .map_or(0, |range| range.end.saturating_sub(range.start));
-        let instruction_pcs =
-            verify_code(code, &messages, strings.len(), literal_len, funcs.len())?;
+        verify_code(code, &messages, strings.len(), literal_len, funcs.len())?;
 
         let bytes = bytes.to_vec();
         let catalog = Self {
@@ -167,7 +165,6 @@ impl Catalog {
             messages,
             funcs,
             code_bytes,
-            instruction_pcs,
         };
         catalog.verify_strings_utf8()?;
         Ok(catalog)
@@ -238,12 +235,6 @@ impl Catalog {
     #[must_use]
     pub fn code(&self) -> &[u8] {
         &self.bytes[self.code_bytes.clone()]
-    }
-
-    /// True if a program counter starts at an instruction boundary.
-    #[must_use]
-    pub fn is_instruction_boundary(&self, pc: u32) -> bool {
-        self.instruction_pcs.binary_search(&pc).is_ok()
     }
 
     fn verify_strings_utf8(&self) -> Result<(), CatalogError> {
@@ -494,7 +485,7 @@ fn verify_code(
     string_count: usize,
     literal_len: usize,
     func_count: usize,
-) -> Result<Vec<u32>, CatalogError> {
+) -> Result<(), CatalogError> {
     let mut pcs = Vec::new();
     let mut pc = 0_u32;
     while (pc as usize) < code.len() {
@@ -555,7 +546,7 @@ fn verify_code(
     verify_stack_safety(code, &pcs, messages)?;
     verify_control_state(code, &pcs, messages)?;
 
-    Ok(pcs)
+    Ok(())
 }
 
 fn validate_instruction_operands(
@@ -1110,7 +1101,6 @@ mod tests {
         assert_eq!(catalog.message_pc("hello"), Some(0));
         assert_eq!(catalog.string(0).expect("string 0"), "hello");
         assert_eq!(catalog.literal(0, 5).expect("lit"), "Hello");
-        assert!(catalog.is_instruction_boundary(0));
     }
 
     #[test]
