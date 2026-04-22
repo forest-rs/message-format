@@ -23,6 +23,12 @@ readme = "README.md"
 keywords = ["i18n", "icu", "localization", "message-format"]
 categories = ["internationalization", "text-processing"]
 
+# We use all the normal release settings, but with debug symbols enabled.
+[profile.profiling]
+inherits = "release"
+debug = true
+lto = "thin"
+
 [workspace.dependencies]
 message-format = { path = "crates/message-format", version = "0.1.0" }
 message-format-compiler = { path = "crates/message-format-compiler", version = "0.1.0" }

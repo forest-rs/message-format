@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name = "compiler"
 harness = false
+
+[[bench]]
+name = "loading"
+harness = false
