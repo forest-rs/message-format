@@ -1653,18 +1653,32 @@ mod tests {
     }
 
     #[test]
-    fn fuel_exhaustion_traps() {
+    #[should_panic = "valid catalog: AmbiguouslyTerminatedEntry { entry_pc: 0 }"]
+    fn infinite_loop_fails_validator() {
         // Infinite loop: LOAD_ARG for missing arg pushes Null (falsey),
-        // so JMP_IF_FALSE always jumps back. HALT is reachable for the verifier.
+        // so JMP_IF_FALSE always jumps back.
         let code = TestOps::new()
             .label("top")
             .load_arg(1)
             .jmp_if_false("top")
             .halt()
             .build();
-        let catalog = catalog_for_test(&["main", "missing"], "", &code);
+        catalog_for_test(&["main", "missing"], "", &code);
+    }
+
+    #[test]
+    fn fuel_exhaustion_traps() {
+        let code = TestOps::new()
+            .load_arg(1)
+            .load_arg(1)
+            .load_arg(1)
+            .load_arg(1)
+            .load_arg(1)
+            .halt()
+            .build();
+        let catalog = catalog_for_test(&["main", "name"], "", &code);
         let mut formatter = formatter_noop(&catalog);
-        formatter.set_fuel(Some(100));
+        formatter.set_fuel(Some(5));
         let err = formatter
             .format_by_id_for_test("main", &[])
             .expect_err("must trap");

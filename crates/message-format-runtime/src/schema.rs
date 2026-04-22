@@ -15,7 +15,10 @@
 
 use alloc::vec::Vec;
 
-use crate::{catalog::read_i32, error::CatalogError};
+use crate::{
+    catalog::{read_i32, read_i32_unchecked},
+    error::CatalogError,
+};
 
 /// Decoded message entry in the `MSGS` chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +159,54 @@ pub(crate) fn decode_opcode_and_next_pc(
         return Err(CatalogError::TruncatedInstruction { pc });
     }
     Ok((pc_usize, opcode, next_pc))
+}
+
+/// Decode one instruction according to the shared executable schema.
+///
+/// # Safety
+/// Assumptions shared with [`decode_opcode_and_next_pc`]:
+/// - `usize::try_from(pc).is_ok()`
+/// - `pc < code.len()`
+/// - valid opcode ([`opcode_len`] returns `Some`)
+/// - `pc + opcode_len(opcode)` does not overflow `u32`
+///
+/// Also assumes:
+/// - `pc + opcode_len(opcode) < code.len()`
+pub(crate) unsafe fn decode_unchecked(code: &[u8], pc: u32) -> Decoded {
+    let (pc_usize, opcode, next_pc) = unsafe { decode_opcode_and_next_pc_unchecked(code, pc) };
+
+    let rel32 = match opcode {
+        OP_JMP | OP_JMP_IF_FALSE | OP_CASE_DEFAULT => {
+            Some(unsafe { read_i32_unchecked(code, pc_usize + 1) })
+        }
+        OP_CASE_STR => Some(unsafe { read_i32_unchecked(code, pc_usize + 5) }),
+        _ => None,
+    };
+
+    Decoded {
+        opcode,
+        pc,
+        next_pc,
+        rel32,
+    }
+}
+
+/// Unchecked version of [`decode_opcode_and_next_pc`].
+///
+/// # Safety
+/// Assumes:
+/// - `usize::try_from(pc).is_ok()`
+/// - `pc < code.len()`
+/// - valid opcode ([`opcode_len`] returns `Some`)
+/// - `pc + opcode_len(opcode)` does not overflow `u32`
+pub(crate) unsafe fn decode_opcode_and_next_pc_unchecked(code: &[u8], pc: u32) -> (usize, u8, u32) {
+    let pc_usize = pc as usize;
+    let opcode = *unsafe { code.get_unchecked(pc_usize) };
+    let len = unsafe { opcode_len(opcode).unwrap_unchecked() };
+    #[expect(clippy::cast_possible_truncation, reason = "unchecked")]
+    let len_u32 = len as u32;
+    let next_pc = pc + len_u32;
+    (pc_usize, opcode, next_pc)
 }
 
 fn opcode_len(opcode: u8) -> Option<usize> {
