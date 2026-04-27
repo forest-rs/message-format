@@ -12,6 +12,7 @@ categories.workspace = true
 description = "no_std runtime for compiled message-format catalogs."
 
 [dependencies]
+bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
 fixed_decimal = { default-features = false, optional = true, version = "0.7.1" }
 icu_calendar = { default-features = false, features = [
     "compiled_data",

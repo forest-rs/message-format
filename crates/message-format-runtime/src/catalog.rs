@@ -139,14 +139,6 @@ impl Catalog {
         let code_bytes =
             (code_range.start + code_body_rel.start)..(code_range.start + code_body_rel.end);
 
-        for message in &messages {
-            if message.entry_pc as usize >= code_bytes.len() {
-                return Err(CatalogError::BadPc {
-                    pc: message.entry_pc,
-                });
-            }
-        }
-
         validate_message_table(bytes, &strings, &strings_bytes, &messages)?;
         validate_func_table(&strings, &funcs)?;
 
@@ -486,77 +478,25 @@ fn verify_code(
     literal_len: usize,
     func_count: usize,
 ) -> Result<(), CatalogError> {
-    use alloc::collections::binary_heap::BinaryHeap;
-    use core::cmp::Reverse;
+    use bitvec::prelude::*;
 
-    #[derive(PartialEq, Eq, PartialOrd, Ord)]
-    struct JumpItem {
-        to_pc: u32,
-        from_pc: u32,
-    }
+    /// On 16-bit systems, usize is smaller than u32
+    const TINY_USIZE: bool = size_of::<usize>() < size_of::<u32>();
 
-    fn pop_jumps(heap: &mut BinaryHeap<Reverse<JumpItem>>, pc: u32) -> Result<(), CatalogError> {
-        while let Some(ji) = heap.peek() {
-            match ji.0.to_pc.cmp(&pc) {
-                Ordering::Less => {
-                    return Err(CatalogError::BadJump {
-                        from_pc: ji.0.from_pc,
-                        to_pc: ji.0.to_pc as i64,
-                    });
-                }
-                Ordering::Equal => {
-                    heap.pop();
-                }
-                Ordering::Greater => {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    let mut pcs = Vec::new();
-    let mut heap = BinaryHeap::<Reverse<JumpItem>>::new();
-    let mut heap2 = BinaryHeap::<Reverse<JumpItem>>::new();
+    let mut valid_pcs = bitvec![0; code.len()];
     let mut expr_fallback_pending = false;
     let mut pc = 0_u32;
     while (pc as usize) < code.len() {
-        pop_jumps(&mut heap, pc)?;
+        // SAFETY: valid_pcs is the same length as code, while loop itself is a bounds check
+        unsafe {
+            *valid_pcs.get_unchecked_mut(pc as usize) = true;
+        }
 
-        pcs.push(pc);
         let decoded = vm::decode(code, pc)?;
         if decoded.next_pc as usize > code.len() {
             return Err(CatalogError::TruncatedInstruction { pc });
         }
         validate_instruction_operands(code, decoded, string_count, literal_len, func_count)?;
-
-        if let Some(target) = decoded.jump_target() {
-            if target < 0 {
-                return Err(CatalogError::BadJump {
-                    from_pc: pc,
-                    to_pc: target,
-                });
-            }
-            let target_u32 = u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                from_pc: pc,
-                to_pc: target,
-            })?;
-            if target_u32 as usize >= code.len() {
-                return Err(CatalogError::BadJump {
-                    from_pc: pc,
-                    to_pc: target,
-                });
-            }
-            let ji = Reverse(JumpItem {
-                to_pc: target_u32,
-                from_pc: pc,
-            });
-            if ji.0.to_pc > pc {
-                heap.push(ji);
-            } else {
-                heap2.push(ji);
-            }
-        }
 
         match decoded.opcode {
             vm::OP_EXPR_FALLBACK if !expr_fallback_pending => expr_fallback_pending = true,
@@ -576,31 +516,36 @@ fn verify_code(
     if expr_fallback_pending {
         return Err(CatalogError::InvalidExprFallbackSequence { pc });
     }
-    if let Some(ji) = heap.pop() {
-        return Err(CatalogError::BadJump {
-            from_pc: ji.0.from_pc,
-            to_pc: ji.0.to_pc as i64,
-        });
-    }
-    if !heap2.is_empty() {
-        // Second pass to handle backwards jumps
-        for pc in &pcs {
-            pop_jumps(&mut heap2, *pc)?;
-            if heap2.is_empty() {
-                break;
+
+    pc = 0;
+    while (pc as usize) < code.len() {
+        let decoded = unsafe { vm::decode_unchecked(code, pc) };
+        if let Some(target) = decoded.jump_target() {
+            let Ok(target_usize) = usize::try_from(target) else {
+                return Err(CatalogError::BadJump {
+                    from_pc: pc,
+                    to_pc: target,
+                });
+            };
+            if valid_pcs.get(target_usize).as_deref() != Some(&true) {
+                return Err(CatalogError::BadJump {
+                    from_pc: pc,
+                    to_pc: target,
+                });
             }
         }
-        if let Some(ji) = heap2.pop() {
-            return Err(CatalogError::BadJump {
-                from_pc: ji.0.from_pc,
-                to_pc: ji.0.to_pc as i64,
-            });
-        }
+        pc = decoded.next_pc;
     }
 
+    // Third pass runs abstract execution
     let mut aev = AbstractExecutionVerifier::default();
     for message in messages {
-        if pcs.binary_search(&message.entry_pc).is_err() {
+        if TINY_USIZE && usize::try_from(message.entry_pc).is_err() {
+            return Err(CatalogError::BadPc {
+                pc: message.entry_pc,
+            });
+        }
+        if valid_pcs.get(message.entry_pc as usize).as_deref() != Some(&true) {
             return Err(CatalogError::BadPc {
                 pc: message.entry_pc,
             });
