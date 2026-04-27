@@ -3,7 +3,7 @@
 
 //! Catalog model and decoding APIs.
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::binary_heap::BinaryHeap, vec, vec::Vec};
 use core::{cmp::Ordering, ops::Range, str};
 
 pub use crate::schema::{FuncEntry, MessageEntry};
@@ -39,7 +39,6 @@ pub struct Catalog {
     messages: Vec<MessageEntry>,
     funcs: Vec<FuncEntry>,
     code_bytes: Range<usize>,
-    instruction_pcs: Vec<u32>,
 }
 
 impl Catalog {
@@ -140,14 +139,6 @@ impl Catalog {
         let code_bytes =
             (code_range.start + code_body_rel.start)..(code_range.start + code_body_rel.end);
 
-        for message in &messages {
-            if message.entry_pc as usize >= code_bytes.len() {
-                return Err(CatalogError::BadPc {
-                    pc: message.entry_pc,
-                });
-            }
-        }
-
         validate_message_table(bytes, &strings, &strings_bytes, &messages)?;
         validate_func_table(&strings, &funcs)?;
 
@@ -155,8 +146,7 @@ impl Catalog {
         let literal_len = lits_range
             .as_ref()
             .map_or(0, |range| range.end.saturating_sub(range.start));
-        let instruction_pcs =
-            verify_code(code, &messages, strings.len(), literal_len, funcs.len())?;
+        verify_code(code, &messages, strings.len(), literal_len, funcs.len())?;
 
         let bytes = bytes.to_vec();
         let catalog = Self {
@@ -167,7 +157,6 @@ impl Catalog {
             messages,
             funcs,
             code_bytes,
-            instruction_pcs,
         };
         catalog.verify_strings_utf8()?;
         Ok(catalog)
@@ -238,12 +227,6 @@ impl Catalog {
     #[must_use]
     pub fn code(&self) -> &[u8] {
         &self.bytes[self.code_bytes.clone()]
-    }
-
-    /// True if a program counter starts at an instruction boundary.
-    #[must_use]
-    pub fn is_instruction_boundary(&self, pc: u32) -> bool {
-        self.instruction_pcs.binary_search(&pc).is_ok()
     }
 
     fn verify_strings_utf8(&self) -> Result<(), CatalogError> {
@@ -448,7 +431,7 @@ fn validate_message_table(
     strings_bytes: &Range<usize>,
     messages: &[MessageEntry],
 ) -> Result<(), CatalogError> {
-    let mut previous = None::<&str>;
+    let mut previous = None;
     for (index, message) in messages.iter().enumerate() {
         let name =
             Catalog::string_slice_from_parts(bytes, strings, strings_bytes, message.name_str_id)
@@ -456,7 +439,8 @@ fn validate_message_table(
                     index,
                     id: message.name_str_id,
                 })?;
-        let name = str::from_utf8(name).map_err(|_| CatalogError::InvalidUtf8)?;
+        // Check order over &[u8]; utf8 is checked by `verify_strings_utf8`,
+        // and utf8 is specified such that byte ordering is the same as utf8 ordering
         if previous.is_some_and(|prev| prev >= name) {
             return Err(CatalogError::InvalidMessageOrder { index });
         }
@@ -494,68 +478,83 @@ fn verify_code(
     string_count: usize,
     literal_len: usize,
     func_count: usize,
-) -> Result<Vec<u32>, CatalogError> {
-    let mut pcs = Vec::new();
+) -> Result<(), CatalogError> {
+    use bitvec::prelude::*;
+
+    /// On 16-bit systems, usize is smaller than u32
+    const TINY_USIZE: bool = size_of::<usize>() < size_of::<u32>();
+
+    let mut valid_pcs = bitvec![0; code.len()];
+    let mut expr_fallback_pending = false;
     let mut pc = 0_u32;
     while (pc as usize) < code.len() {
-        pcs.push(pc);
+        // SAFETY: valid_pcs is the same length as code, while loop itself is a bounds check
+        unsafe {
+            *valid_pcs.get_unchecked_mut(pc as usize) = true;
+        }
+
         let decoded = vm::decode(code, pc)?;
         if decoded.next_pc as usize > code.len() {
             return Err(CatalogError::TruncatedInstruction { pc });
         }
         validate_instruction_operands(code, decoded, string_count, literal_len, func_count)?;
+
+        match decoded.opcode {
+            vm::OP_EXPR_FALLBACK if !expr_fallback_pending => expr_fallback_pending = true,
+            vm::OP_CALL_FUNC | vm::OP_CALL_SELECT => expr_fallback_pending = false,
+            _ => {
+                if expr_fallback_pending {
+                    return Err(CatalogError::InvalidExprFallbackSequence { pc });
+                }
+            }
+        };
+
         pc = decoded.next_pc;
     }
     if pc as usize != code.len() {
         return Err(CatalogError::TruncatedInstruction { pc });
     }
+    if expr_fallback_pending {
+        return Err(CatalogError::InvalidExprFallbackSequence { pc });
+    }
 
-    for start in &pcs {
-        let decoded = vm::decode(code, *start)?;
+    pc = 0;
+    while (pc as usize) < code.len() {
+        let decoded = unsafe { vm::decode_unchecked(code, pc) };
         if let Some(target) = decoded.jump_target() {
-            if target < 0 {
+            let Ok(target_usize) = usize::try_from(target) else {
                 return Err(CatalogError::BadJump {
-                    from_pc: *start,
+                    from_pc: pc,
                     to_pc: target,
                 });
-            }
-            let target_u32 = u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                from_pc: *start,
-                to_pc: target,
-            })?;
-            if target_u32 as usize >= code.len() {
+            };
+            if valid_pcs.get(target_usize).as_deref() != Some(&true) {
                 return Err(CatalogError::BadJump {
-                    from_pc: *start,
-                    to_pc: target,
-                });
-            }
-            if pcs.binary_search(&target_u32).is_err() {
-                return Err(CatalogError::BadJump {
-                    from_pc: *start,
+                    from_pc: pc,
                     to_pc: target,
                 });
             }
         }
+        pc = decoded.next_pc;
     }
 
-    let mut halts_scratch = HaltsScratch::new(pcs.len());
+    // Third pass runs abstract execution
+    let mut aev = AbstractExecutionVerifier::default();
     for message in messages {
-        if pcs.binary_search(&message.entry_pc).is_err() {
+        if TINY_USIZE && usize::try_from(message.entry_pc).is_err() {
             return Err(CatalogError::BadPc {
                 pc: message.entry_pc,
             });
         }
-        if !halts_reachable(code, &pcs, message.entry_pc, &mut halts_scratch)? {
-            return Err(CatalogError::UnterminatedEntry {
-                entry_pc: message.entry_pc,
+        if valid_pcs.get(message.entry_pc as usize).as_deref() != Some(&true) {
+            return Err(CatalogError::BadPc {
+                pc: message.entry_pc,
             });
         }
+        aev.verify(code, message.entry_pc)?;
     }
 
-    verify_stack_safety(code, &pcs, messages)?;
-    verify_control_state(code, &pcs, messages)?;
-
-    Ok(pcs)
+    Ok(())
 }
 
 fn validate_instruction_operands(
@@ -620,146 +619,9 @@ fn validate_literal_ref(
     Ok(())
 }
 
-fn verify_stack_safety(
-    code: &[u8],
-    pcs: &[u32],
-    messages: &[MessageEntry],
-) -> Result<(), CatalogError> {
-    let mut min_depths = vec![None::<u32>; pcs.len()];
-    let mut work = Vec::new();
-    for message in messages {
-        if let Ok(idx) = pcs.binary_search(&message.entry_pc)
-            && min_depths[idx].is_none()
-        {
-            min_depths[idx] = Some(0);
-            work.push(message.entry_pc);
-        }
-    }
-
-    while let Some(pc) = work.pop() {
-        let idx = pcs
-            .binary_search(&pc)
-            .map_err(|_| CatalogError::BadPc { pc })?;
-        let depth = min_depths[idx].ok_or(CatalogError::BadPc { pc })?;
-        let decoded = vm::decode(code, pc)?;
-        let (pops, pushes) = stack_effect(code, decoded)?;
-        if depth < pops {
-            return Err(CatalogError::BadPc { pc });
-        }
-        let out_depth = depth - pops + pushes;
-        for succ in successor_pcs(decoded, code.len())?.into_iter().flatten() {
-            let succ_idx = pcs
-                .binary_search(&succ)
-                .map_err(|_| CatalogError::BadPc { pc: succ })?;
-            let old = min_depths[succ_idx];
-            if old.is_none_or(|it| out_depth < it) {
-                min_depths[succ_idx] = Some(out_depth);
-                work.push(succ);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ControlState {
-    select_depth: u8,
-    expr_fallback_pending: bool,
-}
-
-fn verify_control_state(
-    code: &[u8],
-    pcs: &[u32],
-    messages: &[MessageEntry],
-) -> Result<(), CatalogError> {
-    let mut work = Vec::new();
-    let mut visited = vec![Vec::<ControlState>::new(); pcs.len()];
-    for message in messages {
-        if let Ok(idx) = pcs.binary_search(&message.entry_pc) {
-            let state = ControlState {
-                select_depth: 0,
-                expr_fallback_pending: false,
-            };
-            if !visited[idx].contains(&state) {
-                visited[idx].push(state);
-                work.push((message.entry_pc, state));
-            }
-        }
-    }
-
-    while let Some((pc, state)) = work.pop() {
-        let decoded = vm::decode(code, pc)?;
-        let next_state = advance_control_state(decoded, state)?;
-        for succ in successor_pcs(decoded, code.len())?.into_iter().flatten() {
-            let succ_idx = pcs
-                .binary_search(&succ)
-                .map_err(|_| CatalogError::BadPc { pc: succ })?;
-            if !visited[succ_idx].contains(&next_state) {
-                visited[succ_idx].push(next_state);
-                work.push((succ, next_state));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn advance_control_state(
-    decoded: vm::Decoded,
-    mut state: ControlState,
-) -> Result<ControlState, CatalogError> {
-    if state.expr_fallback_pending
-        && decoded.opcode != vm::OP_CALL_FUNC
-        && decoded.opcode != vm::OP_CALL_SELECT
-    {
-        return Err(CatalogError::InvalidExprFallbackSequence { pc: decoded.pc });
-    }
-
-    match decoded.opcode {
-        vm::OP_SELECT_ARG | vm::OP_SELECT_BEGIN => {
-            state.select_depth =
-                state
-                    .select_depth
-                    .checked_add(1)
-                    .ok_or(CatalogError::InvalidSelectSequence {
-                        pc: decoded.pc,
-                        opcode: decoded.opcode,
-                    })?;
-        }
-        vm::OP_CASE_STR | vm::OP_CASE_DEFAULT => {
-            if state.select_depth == 0 {
-                return Err(CatalogError::InvalidSelectSequence {
-                    pc: decoded.pc,
-                    opcode: decoded.opcode,
-                });
-            }
-        }
-        vm::OP_SELECT_END => {
-            if state.select_depth == 0 {
-                return Err(CatalogError::InvalidSelectSequence {
-                    pc: decoded.pc,
-                    opcode: decoded.opcode,
-                });
-            }
-            state.select_depth -= 1;
-        }
-        vm::OP_EXPR_FALLBACK => {
-            state.expr_fallback_pending = true;
-            return Ok(state);
-        }
-        vm::OP_CALL_FUNC | vm::OP_CALL_SELECT => {
-            state.expr_fallback_pending = false;
-        }
-        _ => {}
-    }
-
-    Ok(state)
-}
-
-fn stack_effect(code: &[u8], decoded: vm::Decoded) -> Result<(u32, u32), CatalogError> {
+fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
     let base = decoded.pc as usize;
-    let effect = match decoded.opcode {
+    match decoded.opcode {
         vm::OP_JMP_IF_FALSE | vm::OP_OUT_VAL | vm::OP_SELECT_BEGIN => (1, 0),
         vm::OP_PUSH_CONST | vm::OP_LOAD_ARG => (0, 1),
         vm::OP_OUT_ARG | vm::OP_SELECT_ARG => (0, 0),
@@ -775,55 +637,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> Result<(u32, u32), Catalog
             (pops, 0)
         }
         _ => (0, 0),
-    };
-    Ok(effect)
-}
-
-fn successor_pcs(decoded: vm::Decoded, code_len: usize) -> Result<[Option<u32>; 2], CatalogError> {
-    // VM bytecode only has linear, jump-only, or conditional flow, so verifier
-    // successor sets are bounded at two edges. Keep this fixed-size to avoid a
-    // heap allocation for every decoded instruction during verification.
-    let mut out = [None, None];
-    match decoded.flow_kind() {
-        vm::FlowKind::Stop => {}
-        vm::FlowKind::Linear => {
-            if (decoded.next_pc as usize) < code_len {
-                out[0] = Some(decoded.next_pc);
-            }
-        }
-        vm::FlowKind::JumpOnly => {
-            if let Some(target) = decoded.jump_target() {
-                if target < 0 {
-                    return Err(CatalogError::BadJump {
-                        from_pc: decoded.pc,
-                        to_pc: target,
-                    });
-                }
-                out[0] = Some(u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                    from_pc: decoded.pc,
-                    to_pc: target,
-                })?);
-            }
-        }
-        vm::FlowKind::Conditional => {
-            if (decoded.next_pc as usize) < code_len {
-                out[0] = Some(decoded.next_pc);
-            }
-            if let Some(target) = decoded.jump_target() {
-                if target < 0 {
-                    return Err(CatalogError::BadJump {
-                        from_pc: decoded.pc,
-                        to_pc: target,
-                    });
-                }
-                out[1] = Some(u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                    from_pc: decoded.pc,
-                    to_pc: target,
-                })?);
-            }
-        }
     }
-    Ok(out)
 }
 
 fn has_overlapping_chunks(chunks: &[ChunkRef]) -> bool {
@@ -842,101 +656,170 @@ fn has_overlapping_chunks(chunks: &[ChunkRef]) -> bool {
     false
 }
 
-/// Reusable scratch for `halts_reachable`'s per-message DFS.
-///
-/// The visited buffer is a generational epoch table: each message bumps `epoch`
-/// and marks `visited[idx] = epoch`. A slot is "visited for the current pass"
-/// iff `visited[idx] == epoch`. This avoids re-zeroing `visited.len()` bytes
-/// between messages — the dominant cost for catalogs with many small messages.
-struct HaltsScratch {
-    visited: Vec<u32>,
-    stack: Vec<u32>,
-    epoch: u32,
+#[derive(Default)]
+struct AbstractExecutionVerifier {
+    /// Have to use [`core::cmp::Reverse`] to make a min-heap instead of a max-heap.
+    heap: BinaryHeap<core::cmp::Reverse<AbstractExecutionState>>,
 }
 
-impl HaltsScratch {
-    fn new(pc_count: usize) -> Self {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AbstractExecutionState {
+    /// Starts at 0 and only incremented for backwards jumps.
+    ///
+    /// Thus, `pc` remains in ascending order within a given cycle.
+    cycle: u16,
+    pc: u32,
+    /// Minimum stack depth
+    min_stack_depth: u32,
+    /// Select depth
+    select_depth: u8,
+}
+
+impl AbstractExecutionState {
+    fn from_pc(pc: u32) -> Self {
         Self {
-            visited: vec![0; pc_count],
-            stack: Vec::new(),
-            epoch: 0,
+            cycle: 0,
+            pc,
+            min_stack_depth: 0,
+            select_depth: 0,
         }
-    }
-
-    /// Begin a new DFS pass. Bumps the epoch; on `u32` wrap, re-zeroes the
-    /// buffer so a stale slot can never collide with the new epoch value.
-    fn begin_pass(&mut self) -> u32 {
-        if let Some(next) = self.epoch.checked_add(1) {
-            self.epoch = next;
-        } else {
-            self.visited.fill(0);
-            self.epoch = 1;
-        }
-        self.stack.clear();
-        self.epoch
     }
 }
 
-fn halts_reachable(
-    code: &[u8],
-    pcs: &[u32],
-    entry_pc: u32,
-    scratch: &mut HaltsScratch,
-) -> Result<bool, CatalogError> {
-    let epoch = scratch.begin_pass();
-    scratch.stack.push(entry_pc);
+impl AbstractExecutionVerifier {
+    fn verify(&mut self, code: &[u8], entry_pc: u32) -> Result<(), CatalogError> {
+        use core::cmp::Reverse;
 
-    while let Some(pc) = scratch.stack.pop() {
-        let idx = match pcs.binary_search(&pc) {
-            Ok(index) => index,
-            Err(_) => {
-                return Err(CatalogError::BadPc { pc });
-            }
-        };
-        if scratch.visited[idx] == epoch {
-            continue;
-        }
-        scratch.visited[idx] = epoch;
+        self.heap.clear();
+        self.heap
+            .push(Reverse(AbstractExecutionState::from_pc(entry_pc)));
+        let heap = &mut self.heap;
 
-        let decoded = vm::decode(code, pc)?;
-        if decoded.opcode == vm::OP_HALT {
-            return Ok(true);
-        }
-
-        match decoded.flow_kind() {
-            vm::FlowKind::Stop => {}
-            vm::FlowKind::Linear => {
-                if (decoded.next_pc as usize) < code.len() {
-                    scratch.stack.push(decoded.next_pc);
+        'outer: while let Some(Reverse(AbstractExecutionState {
+            mut cycle,
+            mut pc,
+            mut min_stack_depth,
+            mut select_depth,
+        })) = heap.pop()
+        {
+            let mut heap_peek = heap.peek().cloned();
+            loop {
+                // Reduce the amount of repeated work
+                while let Some(Reverse(peeked)) = heap_peek
+                    && peeked.pc == pc
+                    && peeked.cycle <= cycle
+                    && peeked.select_depth == select_depth
+                {
+                    min_stack_depth = min_stack_depth.min(peeked.min_stack_depth);
+                    heap.pop();
+                    heap_peek = heap.peek().cloned();
                 }
-            }
-            vm::FlowKind::JumpOnly => {
-                if let Some(target) = decoded.jump_target() {
-                    scratch.stack.push(u32::try_from(target).map_err(|_| {
-                        CatalogError::BadJump {
-                            from_pc: pc,
-                            to_pc: target,
+
+                let decoded = unsafe { vm::decode_unchecked(code, pc) };
+
+                update_select_depth(&mut select_depth, decoded)?;
+
+                let (pops, pushes) = stack_effect(code, decoded);
+                if (pops, pushes) != (0, 0) {
+                    if min_stack_depth < pops {
+                        return Err(CatalogError::BadPc { pc });
+                    }
+                    min_stack_depth = min_stack_depth - pops + pushes;
+                }
+                match decoded.flow_kind() {
+                    vm::FlowKind::Stop => {
+                        if select_depth != 0 {
+                            return Err(CatalogError::InvalidSelectSequence {
+                                pc,
+                                opcode: decoded.opcode,
+                            });
                         }
-                    })?);
-                }
-            }
-            vm::FlowKind::Conditional => {
-                if (decoded.next_pc as usize) < code.len() {
-                    scratch.stack.push(decoded.next_pc);
-                }
-                if let Some(target) = decoded.jump_target() {
-                    scratch.stack.push(u32::try_from(target).map_err(|_| {
-                        CatalogError::BadJump {
-                            from_pc: pc,
-                            to_pc: target,
+                        continue 'outer;
+                    }
+                    vm::FlowKind::Linear => {
+                        if (decoded.next_pc as usize) < code.len() {
+                            pc = decoded.next_pc;
+                        } else {
+                            return Err(CatalogError::UnterminatedEntry { entry_pc });
                         }
-                    })?);
+                    }
+                    vm::FlowKind::JumpOnly => {
+                        if let Some(target) = decoded.jump_target() {
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                reason = "already validated by verify_code first pass"
+                            )]
+                            let target = target as u32;
+                            if target <= pc {
+                                cycle = cycle
+                                    .checked_add(1)
+                                    .ok_or(CatalogError::AmbiguouslyTerminatedEntry { entry_pc })?;
+                            }
+                            pc = target;
+                        }
+                    }
+                    vm::FlowKind::Conditional => {
+                        if let Some(target) = decoded.jump_target() {
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                reason = "already validated by verify_code first pass"
+                            )]
+                            let target = target as u32;
+                            if target <= pc {
+                                cycle = cycle
+                                    .checked_add(1)
+                                    .ok_or(CatalogError::AmbiguouslyTerminatedEntry { entry_pc })?;
+                            }
+                            heap.push(Reverse(AbstractExecutionState {
+                                cycle,
+                                pc: target,
+                                min_stack_depth,
+                                select_depth,
+                            }));
+                        }
+                        if (decoded.next_pc as usize) < code.len() {
+                            pc = decoded.next_pc;
+                        } else {
+                            return Err(CatalogError::UnterminatedEntry { entry_pc });
+                        }
+                    }
                 }
             }
         }
+
+        Ok(())
     }
+}
 
-    Ok(false)
+fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<(), CatalogError> {
+    match decoded.opcode {
+        vm::OP_SELECT_ARG | vm::OP_SELECT_BEGIN => {
+            *select_depth =
+                select_depth
+                    .checked_add(1)
+                    .ok_or(CatalogError::InvalidSelectSequence {
+                        pc: decoded.pc,
+                        opcode: decoded.opcode,
+                    })?;
+        }
+        vm::OP_CASE_STR | vm::OP_CASE_DEFAULT if *select_depth == 0 => {
+            return Err(CatalogError::InvalidSelectSequence {
+                pc: decoded.pc,
+                opcode: decoded.opcode,
+            });
+        }
+        vm::OP_SELECT_END => {
+            *select_depth =
+                select_depth
+                    .checked_sub(1)
+                    .ok_or(CatalogError::InvalidSelectSequence {
+                        pc: decoded.pc,
+                        opcode: decoded.opcode,
+                    })?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn read_u16(bytes: &[u8], pos: usize) -> Result<u16, CatalogError> {
@@ -958,6 +841,11 @@ pub(crate) fn read_i32(bytes: &[u8], pos: usize) -> Result<i32, CatalogError> {
         .get(pos..pos + 4)
         .ok_or(CatalogError::ChunkOutOfBounds)?;
     Ok(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+pub(crate) unsafe fn read_i32_unchecked(bytes: &[u8], pos: usize) -> i32 {
+    let raw = unsafe { bytes.get_unchecked(pos..pos + 4) };
+    i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])
 }
 
 /// Build a deterministic minimal catalog for internal tests or bootstrap paths.
@@ -1088,7 +976,7 @@ mod tests {
 
     use super::*;
     use crate::schema::TestOps;
-    use crate::vm::{OP_CASE_STR, OP_HALT};
+    use crate::vm::{OP_CASE_STR, OP_HALT, OP_JMP};
 
     fn chunk_entry_offset(index: usize) -> usize {
         HEADER_LEN + (index * CHUNK_ENTRY_LEN)
@@ -1110,7 +998,6 @@ mod tests {
         assert_eq!(catalog.message_pc("hello"), Some(0));
         assert_eq!(catalog.string(0).expect("string 0"), "hello");
         assert_eq!(catalog.literal(0, 5).expect("lit"), "Hello");
-        assert!(catalog.is_instruction_boundary(0));
     }
 
     #[test]
@@ -1423,6 +1310,32 @@ mod tests {
             CatalogError::InvalidSelectSequence {
                 pc: 0,
                 opcode: OP_CASE_STR
+            }
+        );
+    }
+
+    #[test]
+    fn unterminated_select_is_rejected() {
+        let code = TestOps::new()
+            .select_arg(1)
+            .case_str_rel(1, 0)
+            .halt()
+            .build();
+        let bytes = build_catalog(
+            &["main", "one"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("must fail");
+        assert_eq!(
+            err,
+            CatalogError::InvalidSelectSequence {
+                pc: 14,
+                opcode: OP_HALT,
             }
         );
     }
@@ -1744,36 +1657,6 @@ mod tests {
         assert_eq!(catalog.message_pc("msg_c"), Some(6));
     }
 
-    /// Direct test of `HaltsScratch` epoch sequencing: each `begin_pass`
-    /// observes a fresh epoch, and on `u32` wrap the visited buffer is
-    /// re-zeroed so a stale slot can never coincide with the new epoch.
-    #[test]
-    fn halts_scratch_epoch_sequencing_and_wrap() {
-        let mut scratch = HaltsScratch::new(4);
-        // First few passes produce strictly increasing epoch values.
-        let e1 = scratch.begin_pass();
-        let e2 = scratch.begin_pass();
-        let e3 = scratch.begin_pass();
-        assert_eq!(e1, 1);
-        assert_eq!(e2, 2);
-        assert_eq!(e3, 3);
-        // Stack is reset on each pass.
-        assert!(scratch.stack.is_empty());
-
-        // Plant a stale mark from a prior pass, simulating real DFS work.
-        scratch.visited[2] = e3;
-        // Force the epoch to the brink of overflow.
-        scratch.epoch = u32::MAX;
-        let after_wrap = scratch.begin_pass();
-        assert_eq!(after_wrap, 1, "epoch must reset to 1 after u32 saturation");
-        // The wrap path must zero the buffer so the stale mark cannot collide
-        // with any future epoch value.
-        assert!(
-            scratch.visited.iter().all(|&v| v == 0),
-            "visited buffer must be re-zeroed on wrap"
-        );
-    }
-
     fn mutate_bytes(bytes: &mut Vec<u8>, seed: &mut u64) {
         if bytes.is_empty() {
             return;
@@ -1816,5 +1699,101 @@ mod tests {
         *seed ^= *seed >> 7;
         *seed ^= *seed << 17;
         *seed
+    }
+
+    #[test]
+    fn many_acyclic_backward_jumps_are_accepted() {
+        const BACKJUMPS: usize = (1 << 16) - 1;
+        const JMP_LEN: usize = 5;
+
+        let blocks_len = BACKJUMPS * JMP_LEN;
+        let dispatchers_len = BACKJUMPS * JMP_LEN;
+        let halt_pc = u32::try_from(blocks_len + dispatchers_len).expect("halt_pc fits in u32");
+
+        let mut code = Vec::with_capacity(blocks_len + dispatchers_len + 1);
+
+        for i in 0..BACKJUMPS {
+            code.push(OP_JMP);
+            let next_pc = i64::try_from(i * JMP_LEN + JMP_LEN).expect("pc fits in i64");
+            let target = if i + 1 == BACKJUMPS {
+                i64::from(halt_pc)
+            } else {
+                i64::try_from(blocks_len + (i + 1) * JMP_LEN).expect("target fits in i64")
+            };
+            let rel = i32::try_from(target - next_pc).expect("jump offset fits in i32");
+            code.extend_from_slice(&rel.to_le_bytes());
+        }
+
+        for i in 0..BACKJUMPS {
+            code.push(OP_JMP);
+            let pc = blocks_len + i * JMP_LEN;
+            let next_pc = i64::try_from(pc + JMP_LEN).expect("pc fits in i64");
+            let target = i64::try_from(i * JMP_LEN).expect("target fits in i64");
+            let rel = i32::try_from(target - next_pc).expect("jump offset fits in i32");
+            code.extend_from_slice(&rel.to_le_bytes());
+        }
+
+        code.push(OP_HALT);
+
+        let bytes = build_catalog(
+            &["main"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: u32::try_from(blocks_len).expect("entry_pc fits in u32"),
+            }],
+            &code,
+        );
+
+        let catalog = Catalog::from_bytes(&bytes).expect("valid catalog");
+        assert_eq!(catalog.code(), code.as_slice());
+    }
+
+    #[test]
+    fn shared_backward_jump_epilogue_is_accepted() {
+        let code = TestOps::new()
+            .push_const(1)
+            .jmp_if_false("fallthrough")
+            .jmp("epilogue")
+            .label("halt")
+            .halt()
+            .label("fallthrough")
+            .jmp("epilogue")
+            .label("epilogue")
+            .jmp("halt")
+            .build();
+
+        let bytes = build_catalog(
+            &["main", "x"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+
+        let catalog = Catalog::from_bytes(&bytes).expect("valid catalog");
+        assert_eq!(catalog.code(), code.as_slice());
+    }
+
+    #[test]
+    fn unconditional_loop_is_rejected() {
+        let code = TestOps::new().label("top").jmp("top").build();
+        let bytes = build_catalog(
+            &["main"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+
+        let err = Catalog::from_bytes(&bytes).expect_err("must fail");
+        assert!(matches!(
+            err,
+            CatalogError::AmbiguouslyTerminatedEntry { entry_pc: 0 }
+        ));
     }
 }

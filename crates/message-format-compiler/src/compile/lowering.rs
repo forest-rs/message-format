@@ -213,9 +213,9 @@ fn lower_select(
     let default_start = u32::try_from(code.len())
         .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
     lower_parts(&select.default, string_map, func_map, literals, code)?;
-    code.push(schema::OP_SELECT_END);
     let end_pc = u32::try_from(code.len())
         .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
+    code.push(schema::OP_SELECT_END);
 
     for (rel_pos, arm_idx) in dispatch_patches {
         patch_rel32(code, rel_pos, arm_starts[arm_idx])?;
