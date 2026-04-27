@@ -538,13 +538,14 @@ fn verify_code(
         }
     }
 
+    let mut halts_scratch = HaltsScratch::new(pcs.len());
     for message in messages {
         if pcs.binary_search(&message.entry_pc).is_err() {
             return Err(CatalogError::BadPc {
                 pc: message.entry_pc,
             });
         }
-        if !halts_reachable(code, &pcs, message.entry_pc)? {
+        if !halts_reachable(code, &pcs, message.entry_pc, &mut halts_scratch)? {
             return Err(CatalogError::UnterminatedEntry {
                 entry_pc: message.entry_pc,
             });
@@ -841,21 +842,61 @@ fn has_overlapping_chunks(chunks: &[ChunkRef]) -> bool {
     false
 }
 
-fn halts_reachable(code: &[u8], pcs: &[u32], entry_pc: u32) -> Result<bool, CatalogError> {
-    let mut stack = vec![entry_pc];
-    let mut visited = vec![false; pcs.len()];
+/// Reusable scratch for `halts_reachable`'s per-message DFS.
+///
+/// The visited buffer is a generational epoch table: each message bumps `epoch`
+/// and marks `visited[idx] = epoch`. A slot is "visited for the current pass"
+/// iff `visited[idx] == epoch`. This avoids re-zeroing `visited.len()` bytes
+/// between messages — the dominant cost for catalogs with many small messages.
+struct HaltsScratch {
+    visited: Vec<u32>,
+    stack: Vec<u32>,
+    epoch: u32,
+}
 
-    while let Some(pc) = stack.pop() {
+impl HaltsScratch {
+    fn new(pc_count: usize) -> Self {
+        Self {
+            visited: vec![0; pc_count],
+            stack: Vec::new(),
+            epoch: 0,
+        }
+    }
+
+    /// Begin a new DFS pass. Bumps the epoch; on `u32` wrap, re-zeroes the
+    /// buffer so a stale slot can never collide with the new epoch value.
+    fn begin_pass(&mut self) -> u32 {
+        if let Some(next) = self.epoch.checked_add(1) {
+            self.epoch = next;
+        } else {
+            self.visited.fill(0);
+            self.epoch = 1;
+        }
+        self.stack.clear();
+        self.epoch
+    }
+}
+
+fn halts_reachable(
+    code: &[u8],
+    pcs: &[u32],
+    entry_pc: u32,
+    scratch: &mut HaltsScratch,
+) -> Result<bool, CatalogError> {
+    let epoch = scratch.begin_pass();
+    scratch.stack.push(entry_pc);
+
+    while let Some(pc) = scratch.stack.pop() {
         let idx = match pcs.binary_search(&pc) {
             Ok(index) => index,
             Err(_) => {
                 return Err(CatalogError::BadPc { pc });
             }
         };
-        if visited[idx] {
+        if scratch.visited[idx] == epoch {
             continue;
         }
-        visited[idx] = true;
+        scratch.visited[idx] = epoch;
 
         let decoded = vm::decode(code, pc)?;
         if decoded.opcode == vm::OP_HALT {
@@ -866,25 +907,29 @@ fn halts_reachable(code: &[u8], pcs: &[u32], entry_pc: u32) -> Result<bool, Cata
             vm::FlowKind::Stop => {}
             vm::FlowKind::Linear => {
                 if (decoded.next_pc as usize) < code.len() {
-                    stack.push(decoded.next_pc);
+                    scratch.stack.push(decoded.next_pc);
                 }
             }
             vm::FlowKind::JumpOnly => {
                 if let Some(target) = decoded.jump_target() {
-                    stack.push(u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                        from_pc: pc,
-                        to_pc: target,
+                    scratch.stack.push(u32::try_from(target).map_err(|_| {
+                        CatalogError::BadJump {
+                            from_pc: pc,
+                            to_pc: target,
+                        }
                     })?);
                 }
             }
             vm::FlowKind::Conditional => {
                 if (decoded.next_pc as usize) < code.len() {
-                    stack.push(decoded.next_pc);
+                    scratch.stack.push(decoded.next_pc);
                 }
                 if let Some(target) = decoded.jump_target() {
-                    stack.push(u32::try_from(target).map_err(|_| CatalogError::BadJump {
-                        from_pc: pc,
-                        to_pc: target,
+                    scratch.stack.push(u32::try_from(target).map_err(|_| {
+                        CatalogError::BadJump {
+                            from_pc: pc,
+                            to_pc: target,
+                        }
                     })?);
                 }
             }
@@ -1656,6 +1701,77 @@ mod tests {
             }
             let _ = Catalog::from_bytes(&garbage);
         }
+    }
+
+    /// Three messages share the `HALT` at pc 0. If `HaltsScratch` failed to
+    /// reset its visited buffer between messages, `msg_b` and `msg_c`'s DFS
+    /// would see pc 0 as already-visited (from `main`) and report `UnterminatedEntry`.
+    #[test]
+    fn halts_reachable_buffer_is_reset_between_messages() {
+        // pc 0:  OP_HALT          (entry: "main")
+        // pc 1:  OP_JMP rel=-6    (entry: "msg_b")  next_pc=6,  target=0
+        // pc 6:  OP_JMP rel=-11   (entry: "msg_c")  next_pc=11, target=0
+        // pc 11: OP_HALT          (trailing sentinel so the code ends in HALT)
+        let code = TestOps::new()
+            .halt()
+            .jmp_rel(-6)
+            .jmp_rel(-11)
+            .halt()
+            .build();
+
+        let bytes = build_catalog(
+            &["main", "msg_b", "msg_c"],
+            "",
+            &[
+                MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                },
+                MessageEntry {
+                    name_str_id: 1,
+                    entry_pc: 1,
+                },
+                MessageEntry {
+                    name_str_id: 2,
+                    entry_pc: 6,
+                },
+            ],
+            &code,
+        );
+        let catalog = Catalog::from_bytes(&bytes).expect("all three messages must verify");
+        assert_eq!(catalog.message_pc("main"), Some(0));
+        assert_eq!(catalog.message_pc("msg_b"), Some(1));
+        assert_eq!(catalog.message_pc("msg_c"), Some(6));
+    }
+
+    /// Direct test of `HaltsScratch` epoch sequencing: each `begin_pass`
+    /// observes a fresh epoch, and on `u32` wrap the visited buffer is
+    /// re-zeroed so a stale slot can never coincide with the new epoch.
+    #[test]
+    fn halts_scratch_epoch_sequencing_and_wrap() {
+        let mut scratch = HaltsScratch::new(4);
+        // First few passes produce strictly increasing epoch values.
+        let e1 = scratch.begin_pass();
+        let e2 = scratch.begin_pass();
+        let e3 = scratch.begin_pass();
+        assert_eq!(e1, 1);
+        assert_eq!(e2, 2);
+        assert_eq!(e3, 3);
+        // Stack is reset on each pass.
+        assert!(scratch.stack.is_empty());
+
+        // Plant a stale mark from a prior pass, simulating real DFS work.
+        scratch.visited[2] = e3;
+        // Force the epoch to the brink of overflow.
+        scratch.epoch = u32::MAX;
+        let after_wrap = scratch.begin_pass();
+        assert_eq!(after_wrap, 1, "epoch must reset to 1 after u32 saturation");
+        // The wrap path must zero the buffer so the stale mark cannot collide
+        // with any future epoch value.
+        assert!(
+            scratch.visited.iter().all(|&v| v == 0),
+            "visited buffer must be re-zeroed on wrap"
+        );
     }
 
     fn mutate_bytes(bytes: &mut Vec<u8>, seed: &mut u64) {
