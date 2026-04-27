@@ -431,7 +431,7 @@ fn validate_message_table(
     strings_bytes: &Range<usize>,
     messages: &[MessageEntry],
 ) -> Result<(), CatalogError> {
-    let mut previous = None::<&str>;
+    let mut previous = None;
     for (index, message) in messages.iter().enumerate() {
         let name =
             Catalog::string_slice_from_parts(bytes, strings, strings_bytes, message.name_str_id)
@@ -439,7 +439,8 @@ fn validate_message_table(
                     index,
                     id: message.name_str_id,
                 })?;
-        let name = str::from_utf8(name).map_err(|_| CatalogError::InvalidUtf8)?;
+        // Check order over &[u8]; utf8 is checked by `verify_strings_utf8`,
+        // and utf8 is specified such that byte ordering is the same as utf8 ordering
         if previous.is_some_and(|prev| prev >= name) {
             return Err(CatalogError::InvalidMessageOrder { index });
         }
