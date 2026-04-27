@@ -210,6 +210,16 @@ fn build_select_catalog() -> Catalog {
 
 fn build_call_catalog_no_opts() -> Catalog {
     let strings = ["main", "name"];
+    let funcs = [
+        FuncEntry {
+            name_str_id: 0,
+            static_options: vec![],
+        },
+        FuncEntry {
+            name_str_id: 1,
+            static_options: vec![],
+        },
+    ];
     let code = vec![
         vm::OP_LOAD_ARG,
         1,
@@ -224,7 +234,7 @@ fn build_call_catalog_no_opts() -> Catalog {
         vm::OP_OUT_VAL,
         vm::OP_HALT,
     ];
-    let bytes = build_catalog(
+    let bytes = build_catalog_with_funcs(
         &strings,
         "",
         &[MessageEntry {
@@ -232,12 +242,23 @@ fn build_call_catalog_no_opts() -> Catalog {
             entry_pc: 0,
         }],
         &code,
+        &funcs,
     );
     Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
 }
 
 fn build_call_catalog_with_opts() -> Catalog {
     let strings = ["main", "name", "style", "short", "currency", "USD"];
+    let funcs = [
+        FuncEntry {
+            name_str_id: 0,
+            static_options: vec![],
+        },
+        FuncEntry {
+            name_str_id: 1,
+            static_options: vec![],
+        },
+    ];
     let code = vec![
         vm::OP_LOAD_ARG,
         1,
@@ -272,7 +293,7 @@ fn build_call_catalog_with_opts() -> Catalog {
         vm::OP_OUT_VAL,
         vm::OP_HALT,
     ];
-    let bytes = build_catalog(
+    let bytes = build_catalog_with_funcs(
         &strings,
         "",
         &[MessageEntry {
@@ -280,6 +301,7 @@ fn build_call_catalog_with_opts() -> Catalog {
             entry_pc: 0,
         }],
         &code,
+        &funcs,
     );
     Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
 }
