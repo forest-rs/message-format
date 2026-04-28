@@ -181,11 +181,11 @@ impl Server {
     fn on_did_save(&mut self, params: DidSaveTextDocumentParams) {
         // Re-analyze on save in case the client sent included text.
         let uri = params.text_document.uri;
-        if let Some(text) = params.text {
-            if let Some(doc) = self.documents.get(&uri) {
-                let version = doc.version;
-                self.documents.change(&uri, version, text);
-            }
+        if let Some(text) = params.text
+            && let Some(doc) = self.documents.get(&uri)
+        {
+            let version = doc.version;
+            self.documents.change(&uri, version, text);
         }
         self.reanalyze_and_publish(&uri);
     }
@@ -237,10 +237,10 @@ fn cast_notification<N: lsp_types::notification::Notification>(
 
 fn workspace_root_path(params: &InitializeParams) -> Option<PathBuf> {
     // Prefer workspace_folders (current spec).
-    if let Some(ref folders) = params.workspace_folders {
-        if let Some(folder) = folders.first() {
-            return folder.uri.to_file_path().ok();
-        }
+    if let Some(ref folders) = params.workspace_folders
+        && let Some(folder) = folders.first()
+    {
+        return folder.uri.to_file_path().ok();
     }
     // Fall back to deprecated fields for older clients.
     #[allow(deprecated, reason = "fallback for older clients")]

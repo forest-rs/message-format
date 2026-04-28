@@ -190,13 +190,13 @@ impl BuildError {
     fn render_without_message_context(&self) -> String {
         if let Some(context) = self.context.as_deref() {
             let detail = self.error.render_brief();
-            if let Some(origin) = &context.message_origin {
-                if let (Some(line), Some(column)) = (origin.line, origin.column) {
-                    return format!(
-                        "{}:{}:{}: message {:?}: {}",
-                        context.source.name, line, column, context.message_id, detail
-                    );
-                }
+            if let Some(origin) = &context.message_origin
+                && let (Some(line), Some(column)) = (origin.line, origin.column)
+            {
+                return format!(
+                    "{}:{}:{}: message {:?}: {}",
+                    context.source.name, line, column, context.message_id, detail
+                );
             }
             format!(
                 "{}: message {:?}: {}",
@@ -238,13 +238,13 @@ impl BuildError {
             .map_or_else(|| self.error.to_string(), |ctx| ctx.title.to_string());
         let message = context.message_id.as_str();
 
-        if let Some(origin) = &context.message_origin {
-            if let (Some(line), Some(column)) = (origin.line, origin.column) {
-                return format!(
-                    "{}:{}:{}: {} in message {:?}",
-                    context.source.name, line, column, title, message
-                );
-            }
+        if let Some(origin) = &context.message_origin
+            && let (Some(line), Some(column)) = (origin.line, origin.column)
+        {
+            return format!(
+                "{}:{}:{}: {} in message {:?}",
+                context.source.name, line, column, title, message
+            );
         }
 
         format!(

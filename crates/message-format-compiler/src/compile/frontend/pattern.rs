@@ -58,16 +58,16 @@ pub(super) fn lower_pattern_node_to_parts(
                     },
                 )?;
                 // Self-closing markup: emit open + close in sequence.
-                if is_self_close_markup(expr) {
-                    if let Part::MarkupOpen { ref name, .. } = part {
-                        let close_name = name.clone();
-                        parts.push(part);
-                        parts.push(Part::MarkupClose {
-                            name: close_name,
-                            options: Vec::new(),
-                        });
-                        continue;
-                    }
+                if is_self_close_markup(expr)
+                    && let Part::MarkupOpen { ref name, .. } = part
+                {
+                    let close_name = name.clone();
+                    parts.push(part);
+                    parts.push(Part::MarkupClose {
+                        name: close_name,
+                        options: Vec::new(),
+                    });
+                    continue;
                 }
                 parts.push(part);
             }

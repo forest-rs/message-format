@@ -181,10 +181,10 @@ fn detect_json_profile(source: &str) -> JsonProfile {
     let Some(obj) = value.as_object() else {
         return JsonProfile::Flat;
     };
-    if let Some((_, first_value)) = obj.iter().next() {
-        if first_value.is_object() {
-            return JsonProfile::Chrome;
-        }
+    if let Some((_, first_value)) = obj.iter().next()
+        && first_value.is_object()
+    {
+        return JsonProfile::Chrome;
     }
     JsonProfile::Flat
 }
