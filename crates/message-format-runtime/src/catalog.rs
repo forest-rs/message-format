@@ -21,12 +21,6 @@ const TAG_MSGS: [u8; 4] = *b"MSGS";
 const TAG_CODE: [u8; 4] = *b"CODE";
 const TAG_FUNC: [u8; 4] = *b"FUNC";
 
-#[derive(Debug, Clone)]
-struct ChunkRef {
-    tag: [u8; 4],
-    range: Range<usize>,
-}
-
 type StringsIndex = Vec<(u32, u32)>;
 
 /// Runtime representation of a loaded and verified catalog.
@@ -69,25 +63,25 @@ impl Catalog {
         let chunk_table_end = chunk_table_offset
             .checked_add(chunk_table_len)
             .ok_or(CatalogError::ChunkOutOfBounds)?;
-        if chunk_table_end > bytes.len() {
+        let (chunk_table, []) = bytes
+            .get(chunk_table_offset..chunk_table_end)
+            .ok_or(CatalogError::ChunkOutOfBounds)?
+            .as_chunks::<CHUNK_ENTRY_LEN>()
+        else {
             return Err(CatalogError::ChunkOutOfBounds);
-        }
+        };
 
         let mut chunks = Vec::with_capacity(chunk_count);
-        let mut seen_strs = 0_u8;
-        let mut seen_msgs = 0_u8;
-        let mut seen_code = 0_u8;
-        let mut seen_func = 0_u8;
-        let mut table_pos = chunk_table_offset;
-        for _ in 0..chunk_count {
-            let mut tag = [0_u8; 4];
-            tag.copy_from_slice(
-                bytes
-                    .get(table_pos..table_pos + 4)
-                    .ok_or(CatalogError::ChunkOutOfBounds)?,
-            );
-            let offset = read_u32(bytes, table_pos + 4)? as usize;
-            let length = read_u32(bytes, table_pos + 8)? as usize;
+        let mut strs_range = None;
+        let mut msgs_range = None;
+        let mut code_range = None;
+        let mut lits_range = None;
+        let mut func_range = None;
+
+        for entry in chunk_table {
+            let tag: [u8; 4] = entry[0..4].try_into().unwrap();
+            let offset = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
+            let length = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
             let end = offset
                 .checked_add(length)
                 .ok_or(CatalogError::ChunkOutOfBounds)?;
@@ -97,33 +91,36 @@ impl Catalog {
             if offset < chunk_table_end {
                 return Err(CatalogError::ChunkOutOfBounds);
             }
-            if tag == TAG_STRS {
-                seen_strs = seen_strs.saturating_add(1);
-            } else if tag == TAG_MSGS {
-                seen_msgs = seen_msgs.saturating_add(1);
-            } else if tag == TAG_CODE {
-                seen_code = seen_code.saturating_add(1);
-            } else if tag == TAG_FUNC {
-                seen_func = seen_func.saturating_add(1);
+            let range = offset..end;
+
+            fn set_range(
+                slot: &mut Option<Range<usize>>,
+                range: &Range<usize>,
+            ) -> Result<(), CatalogError> {
+                if slot.replace(range.clone()).is_some() {
+                    Err(CatalogError::ChunkOutOfBounds)
+                } else {
+                    Ok(())
+                }
             }
-            chunks.push(ChunkRef {
-                tag,
-                range: offset..end,
-            });
-            table_pos += CHUNK_ENTRY_LEN;
+            match tag {
+                TAG_STRS => set_range(&mut strs_range, &range)?,
+                TAG_MSGS => set_range(&mut msgs_range, &range)?,
+                TAG_CODE => set_range(&mut code_range, &range)?,
+                TAG_LITS => set_range(&mut lits_range, &range)?,
+                TAG_FUNC => set_range(&mut func_range, &range)?,
+                _ => {}
+            };
+
+            chunks.push(range);
         }
-        if seen_strs > 1 || seen_msgs > 1 || seen_code > 1 || seen_func > 1 {
-            return Err(CatalogError::ChunkOutOfBounds);
-        }
-        if has_overlapping_chunks(&chunks) {
+        if has_overlapping_chunks(chunks) {
             return Err(CatalogError::ChunkOutOfBounds);
         }
 
-        let strs_range = find_chunk(&chunks, TAG_STRS).ok_or(CatalogError::MissingChunk("STRS"))?;
-        let msgs_range = find_chunk(&chunks, TAG_MSGS).ok_or(CatalogError::MissingChunk("MSGS"))?;
-        let code_range = find_chunk(&chunks, TAG_CODE).ok_or(CatalogError::MissingChunk("CODE"))?;
-        let lits_range = find_chunk(&chunks, TAG_LITS);
-        let func_range = find_chunk(&chunks, TAG_FUNC);
+        let strs_range = strs_range.ok_or(CatalogError::MissingChunk("STRS"))?;
+        let msgs_range = msgs_range.ok_or(CatalogError::MissingChunk("MSGS"))?;
+        let code_range = code_range.ok_or(CatalogError::MissingChunk("CODE"))?;
 
         let (strings, strings_bytes_rel) = decode_strings(bytes, &strs_range)?;
         let strings_bytes = (strs_range.start + strings_bytes_rel.start)
@@ -294,13 +291,6 @@ impl Catalog {
             .get(start..end)
             .ok_or(CatalogError::ChunkOutOfBounds)
     }
-}
-
-fn find_chunk(chunks: &[ChunkRef], tag: [u8; 4]) -> Option<Range<usize>> {
-    chunks
-        .iter()
-        .find(|chunk| chunk.tag == tag)
-        .map(|chunk| chunk.range.clone())
 }
 
 fn decode_strings(
@@ -640,11 +630,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
     }
 }
 
-fn has_overlapping_chunks(chunks: &[ChunkRef]) -> bool {
-    let mut ranges = chunks
-        .iter()
-        .map(|chunk| chunk.range.clone())
-        .collect::<Vec<_>>();
+fn has_overlapping_chunks(mut ranges: Vec<Range<usize>>) -> bool {
     ranges.sort_by_key(|range| range.start);
     for pair in ranges.windows(2) {
         let left = &pair[0];
