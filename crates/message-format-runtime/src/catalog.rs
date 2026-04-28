@@ -308,22 +308,24 @@ fn decode_strings(
     let bytes_start = 4_usize
         .checked_add(index_len)
         .ok_or(CatalogError::ChunkOutOfBounds)?;
-    if bytes_start > body.len() {
-        return Err(CatalogError::ChunkOutOfBounds);
-    }
 
+    let (index, []) = body
+        .get(4..bytes_start)
+        .ok_or(CatalogError::ChunkOutOfBounds)?
+        .as_chunks::<8>()
+    else {
+        return Err(CatalogError::ChunkOutOfBounds)?;
+    };
     let mut result = vec![(0_u32, 0_u32); count];
-    for (i, item) in result.iter_mut().enumerate() {
-        let off_pos = 4 + i * 8;
-        let off = read_u32(body, off_pos)?;
-        let len = read_u32(body, off_pos + 4)?;
-        let end = (off as usize)
-            .checked_add(len as usize)
+    for (entry, (off, len)) in index.iter().zip(&mut result) {
+        *off = u32::from_le_bytes(entry[0..4].try_into().unwrap());
+        *len = u32::from_le_bytes(entry[4..8].try_into().unwrap());
+        let end = (*off as usize)
+            .checked_add(*len as usize)
             .ok_or(CatalogError::ChunkOutOfBounds)?;
         if end > body.len() - bytes_start {
             return Err(CatalogError::ChunkOutOfBounds);
         }
-        *item = (off, len);
     }
 
     Ok((result, bytes_start..body.len()))
@@ -340,19 +342,22 @@ fn decode_messages(bytes: &[u8], range: &Range<usize>) -> Result<Vec<MessageEntr
     let total = 4_usize
         .checked_add(count.checked_mul(8).ok_or(CatalogError::ChunkOutOfBounds)?)
         .ok_or(CatalogError::ChunkOutOfBounds)?;
-    if total > body.len() {
-        return Err(CatalogError::ChunkOutOfBounds);
-    }
 
-    let mut messages = Vec::with_capacity(count);
-    for i in 0..count {
-        let pos = 4 + i * 8;
-        messages.push(MessageEntry {
-            name_str_id: read_u32(body, pos)?,
-            entry_pc: read_u32(body, pos + 4)?,
-        });
-    }
-    Ok(messages)
+    let (index, []) = body
+        .get(4..total)
+        .ok_or(CatalogError::ChunkOutOfBounds)?
+        .as_chunks::<8>()
+    else {
+        return Err(CatalogError::ChunkOutOfBounds)?;
+    };
+
+    Ok(index
+        .iter()
+        .map(|entry| MessageEntry {
+            name_str_id: u32::from_le_bytes(entry[0..4].try_into().unwrap()),
+            entry_pc: u32::from_le_bytes(entry[4..8].try_into().unwrap()),
+        })
+        .collect())
 }
 
 fn decode_funcs(bytes: &[u8], range: &Range<usize>) -> Result<Vec<FuncEntry>, CatalogError> {
