@@ -727,13 +727,11 @@ fn advance_control_state(
                         opcode: decoded.opcode,
                     })?;
         }
-        vm::OP_CASE_STR | vm::OP_CASE_DEFAULT => {
-            if state.select_depth == 0 {
-                return Err(CatalogError::InvalidSelectSequence {
-                    pc: decoded.pc,
-                    opcode: decoded.opcode,
-                });
-            }
+        vm::OP_CASE_STR | vm::OP_CASE_DEFAULT if state.select_depth == 0 => {
+            return Err(CatalogError::InvalidSelectSequence {
+                pc: decoded.pc,
+                opcode: decoded.opcode,
+            });
         }
         vm::OP_SELECT_END => {
             if state.select_depth == 0 {
