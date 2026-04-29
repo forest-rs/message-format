@@ -18,8 +18,12 @@ hashbrown = { default-features = false, features = [
 ], version = "0.17.0" }
 icu_normalizer = { default-features = false, features = ["compiled_data"], version = "2.1.1" }
 message-format-runtime = { workspace = true }
+profiling = { optional = true, workspace = true }
 serde = { features = ["derive"], version = "1.0" }
 toml = "0.9"
+
+[features]
+profiling = ["dep:profiling", "message-format-runtime/profiling"]
 
 [lints]
 workspace = true

@@ -86,6 +86,8 @@ impl<'a> MessageFormatter<'a> {
         &self,
         message_id: &str,
     ) -> Result<runtime::MultiMessageHandle, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         self.inner.resolve(message_id)
     }
 
@@ -100,6 +102,8 @@ impl<'a> MessageFormatter<'a> {
         message: runtime::MultiMessageHandle,
         args: &MessageArgs,
     ) -> Result<String, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let mut out = String::new();
         self.format_into(message, args, &mut out)?;
         Ok(out)
@@ -133,6 +137,8 @@ impl<'a> MessageFormatter<'a> {
         message_id: &str,
         args: &MessageArgs,
     ) -> Result<String, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let message = self.resolve(message_id)?;
         self.format(message, args)
     }

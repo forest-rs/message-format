@@ -35,6 +35,7 @@ message-format-compiler = { path = "crates/message-format-compiler", version = "
 message-format-resource-json = { path = "crates/message-format-resource-json", version = "0.1.0" }
 message-format-resource-toml = { path = "crates/message-format-resource-toml", version = "0.1.0" }
 message-format-runtime = { path = "crates/message-format-runtime", version = "0.1.0" }
+profiling = { version = "1.0", default-features = false }
 
 [workspace.lints]
 # LINEBENDER LINT SET - Cargo.toml - v8

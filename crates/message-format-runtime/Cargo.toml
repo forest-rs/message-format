@@ -27,6 +27,7 @@ icu_locale_core = { default-features = false, optional = true, version = "2.1.1"
 icu_plurals = { default-features = false, features = [
     "compiled_data",
 ], optional = true, version = "2.1.1" }
+profiling = { optional = true, workspace = true }
 
 [features]
 default = []
@@ -39,6 +40,7 @@ icu4x = [
     "dep:icu_calendar",
     "dep:icu_datetime",
 ]
+profiling = ["dep:profiling"]
 
 [package.metadata.docs.rs]
 all-features = true

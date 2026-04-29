@@ -29,6 +29,8 @@ pub fn parse_resource_toml(
     name: impl Into<String>,
     source: &str,
 ) -> Result<ResourceInput, ResourceTomlError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let parsed = DeTable::parse(source).map_err(|err| ResourceTomlError::from_toml(source, err))?;
     let root = parsed.into_inner();
     let messages = root

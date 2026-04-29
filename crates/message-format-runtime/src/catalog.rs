@@ -38,6 +38,8 @@ pub struct Catalog {
 impl Catalog {
     /// Decode and verify a catalog payload.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CatalogError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         if bytes.len() < HEADER_LEN {
             return Err(CatalogError::ChunkOutOfBounds);
         }
