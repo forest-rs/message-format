@@ -25,8 +25,9 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use message_format_compiler::{
-    BuildError, CompileOptions, CompileReport, DiagnosticSeverity, FunctionManifest, ResourceInput,
-    SourceKind, compile_resources, compile_resources_with_manifest,
+    BuildError, CompileOptions, CompileReport, DiagnosticSeverity, FunctionManifest,
+    LiteralDeduplication, LiteralStats, ResourceInput, SourceKind, compile_resources,
+    compile_resources_with_manifest,
 };
 use message_format_resource_json::{JsonProfile, parse_json_resource};
 use message_format_resource_toml::parse_resource_toml;
@@ -55,6 +56,8 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<RunOutcome, String> {
             source_map_output,
             functions_manifest,
             check_only,
+            literal_deduplication,
+            literal_stats,
         } => {
             compile_command(
                 &inputs,
@@ -63,6 +66,8 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<RunOutcome, String> {
                 source_map_output.as_deref(),
                 functions_manifest.as_deref(),
                 check_only,
+                literal_deduplication,
+                literal_stats,
             )?;
             Ok(RunOutcome::Done)
         }
@@ -79,6 +84,8 @@ enum Command {
         source_map_output: Option<PathBuf>,
         functions_manifest: Option<PathBuf>,
         check_only: bool,
+        literal_deduplication: LiteralDeduplication,
+        literal_stats: bool,
     },
 }
 
@@ -113,6 +120,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
     let mut source_map_output = None;
     let mut functions_manifest = None;
     let mut check_only = false;
+    let mut literal_deduplication = LiteralDeduplication::Enabled;
+    let mut literal_stats = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -143,6 +152,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
             "--check" => {
                 check_only = true;
             }
+            "--no-lits-dedup" => {
+                literal_deduplication = LiteralDeduplication::Disabled;
+            }
+            "--measure-lits-dedup" => {
+                literal_deduplication = LiteralDeduplication::MeasureOnly;
+            }
+            "--literal-stats" => {
+                literal_stats = true;
+            }
             "-h" | "--help" => {
                 return Ok(Command::Help(usage()));
             }
@@ -169,6 +187,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         source_map_output,
         functions_manifest,
         check_only,
+        literal_deduplication,
+        literal_stats,
     })
 }
 
@@ -179,6 +199,8 @@ fn compile_command(
     source_map_output: Option<&Path>,
     functions_manifest: Option<&Path>,
     check_only: bool,
+    literal_deduplication: LiteralDeduplication,
+    literal_stats: bool,
 ) -> Result<(), String> {
     let manifest = if let Some(path) = functions_manifest {
         Some(load_function_manifest(path)?)
@@ -187,13 +209,21 @@ fn compile_command(
     };
 
     let compiled = match input_format {
-        InputFormat::ResourceToml => compile_toml_resource_inputs(input_paths, manifest.as_ref()),
-        InputFormat::JsonFlat => {
-            compile_json_resource_inputs(input_paths, manifest.as_ref(), JsonProfile::Flat)
+        InputFormat::ResourceToml => {
+            compile_toml_resource_inputs(input_paths, manifest.as_ref(), literal_deduplication)
         }
-        InputFormat::JsonChrome => {
-            compile_json_resource_inputs(input_paths, manifest.as_ref(), JsonProfile::Chrome)
-        }
+        InputFormat::JsonFlat => compile_json_resource_inputs(
+            input_paths,
+            manifest.as_ref(),
+            JsonProfile::Flat,
+            literal_deduplication,
+        ),
+        InputFormat::JsonChrome => compile_json_resource_inputs(
+            input_paths,
+            manifest.as_ref(),
+            JsonProfile::Chrome,
+            literal_deduplication,
+        ),
     };
     if compiled.has_errors() {
         return Err(render_compile_report(compiled));
@@ -201,6 +231,10 @@ fn compile_command(
     let compiled = compiled
         .compiled
         .ok_or_else(|| String::from("compile report completed without catalog or errors"))?;
+
+    if literal_stats {
+        eprintln!("{}", render_literal_stats(compiled.literal_stats));
+    }
 
     if check_only {
         return Ok(());
@@ -231,8 +265,15 @@ fn compile_command(
 fn compile_toml_resource_inputs(
     input_paths: &[PathBuf],
     manifest: Option<&FunctionManifest>,
+    literal_deduplication: LiteralDeduplication,
 ) -> CompileReport {
-    compile_resource_inputs(input_paths, manifest, parse_resource_toml, "resource-toml")
+    compile_resource_inputs(
+        input_paths,
+        manifest,
+        parse_resource_toml,
+        "resource-toml",
+        literal_deduplication,
+    )
 }
 
 fn render_compile_report(report: CompileReport) -> String {
@@ -254,6 +295,7 @@ fn compile_json_resource_inputs(
     input_paths: &[PathBuf],
     manifest: Option<&FunctionManifest>,
     profile: JsonProfile,
+    literal_deduplication: LiteralDeduplication,
 ) -> CompileReport {
     let label = match profile {
         JsonProfile::Flat => "json-flat",
@@ -264,6 +306,7 @@ fn compile_json_resource_inputs(
         manifest,
         |name, source| parse_json_resource(name, source, profile),
         label,
+        literal_deduplication,
     )
 }
 
@@ -272,6 +315,7 @@ fn compile_resource_inputs<E>(
     manifest: Option<&FunctionManifest>,
     parse: impl Fn(String, &str) -> Result<ResourceInput, E>,
     label: &str,
+    literal_deduplication: LiteralDeduplication,
 ) -> CompileReport
 where
     E: std::fmt::Display,
@@ -305,10 +349,14 @@ where
         }
     }
 
+    let options = CompileOptions {
+        literal_deduplication,
+        ..CompileOptions::default()
+    };
     let mut report = if let Some(manifest) = manifest {
-        compile_resources_with_manifest(inputs, CompileOptions::default(), manifest)
+        compile_resources_with_manifest(inputs, options, manifest)
     } else {
-        compile_resources(inputs, CompileOptions::default())
+        compile_resources(inputs, options)
     };
     if !diagnostics.is_empty() {
         report.compiled = None;
@@ -322,6 +370,21 @@ fn load_function_manifest(path: &Path) -> Result<FunctionManifest, String> {
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     FunctionManifest::parse(&source)
         .map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+fn render_literal_stats(stats: LiteralStats) -> String {
+    format!(
+        "literal-stats mode={:?} slices={} unique={} duplicates={} input_bytes={} unique_bytes={} duplicate_bytes={} emitted_bytes={} saved_bytes={}",
+        stats.deduplication,
+        stats.literal_slices,
+        stats.unique_literals,
+        stats.duplicate_literals,
+        stats.input_literal_bytes,
+        stats.unique_literal_bytes,
+        stats.duplicate_literal_bytes,
+        stats.emitted_literal_bytes,
+        stats.saved_literal_bytes,
+    )
 }
 
 fn render_source_map_json(source_map: &message_format_compiler::SourceMap) -> String {
@@ -409,13 +472,13 @@ fn json_escape(value: &str) -> String {
 
 fn usage() -> String {
     String::from(
-        "usage:\n  message-format-cli compile [--check] --input-format resource-toml|json-flat|json-chrome [-o OUTPUT] [--source-map PATH] [--functions PATH] INPUT...",
+        "usage:\n  message-format-cli compile [--check] [--literal-stats] [--no-lits-dedup|--measure-lits-dedup] --input-format resource-toml|json-flat|json-chrome [-o OUTPUT] [--source-map PATH] [--functions PATH] INPUT...",
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, InputFormat, parse_args, run};
+    use super::{Command, InputFormat, LiteralDeduplication, parse_args, run};
     use std::path::{Path, PathBuf};
     use std::{
         fs,
@@ -466,6 +529,35 @@ mod tests {
                 source_map_output: Some(PathBuf::from("out.map.json")),
                 functions_manifest: Some(PathBuf::from("functions.toml")),
                 check_only: true,
+                literal_deduplication: LiteralDeduplication::Enabled,
+                literal_stats: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compile_command_with_literal_dedup_options() {
+        let command = parse_args([
+            String::from("compile"),
+            String::from("--literal-stats"),
+            String::from("--measure-lits-dedup"),
+            String::from("--input-format"),
+            String::from("resource-toml"),
+            String::from("messages.toml"),
+        ])
+        .expect("parsed");
+
+        assert_eq!(
+            command,
+            Command::Compile {
+                inputs: vec![PathBuf::from("messages.toml")],
+                input_format: InputFormat::ResourceToml,
+                output: None,
+                source_map_output: None,
+                functions_manifest: None,
+                check_only: false,
+                literal_deduplication: LiteralDeduplication::MeasureOnly,
+                literal_stats: true,
             }
         );
     }
@@ -489,6 +581,8 @@ mod tests {
                 source_map_output: None,
                 functions_manifest: None,
                 check_only: false,
+                literal_deduplication: LiteralDeduplication::Enabled,
+                literal_stats: false,
             }
         );
     }
@@ -512,6 +606,8 @@ mod tests {
                 source_map_output: None,
                 functions_manifest: None,
                 check_only: false,
+                literal_deduplication: LiteralDeduplication::Enabled,
+                literal_stats: false,
             }
         );
     }

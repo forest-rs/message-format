@@ -1,8 +1,12 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
+use hashbrown::{HashMap, hash_map::RawEntryMut};
 use message_format_runtime::schema;
 
 use crate::semantic::{
@@ -11,7 +15,121 @@ use crate::semantic::{
 };
 
 use super::interning::{FunctionCatalogKey, function_catalog_key};
-use super::{CompileError, escape_fallback_literal, function_dynamic_options};
+use super::{
+    CompileError, LiteralDeduplication, LiteralStats, escape_fallback_literal,
+    function_dynamic_options,
+};
+
+#[derive(Debug)]
+pub(super) struct LiteralPool {
+    mode: LiteralDeduplication,
+    bytes: String,
+    offsets: HashMap<LiteralSpan, ()>,
+    stats: LiteralStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LiteralSpan {
+    off: u32,
+    len: u32,
+}
+
+impl LiteralPool {
+    pub(super) fn new(mode: LiteralDeduplication) -> Self {
+        Self {
+            mode,
+            bytes: String::new(),
+            offsets: HashMap::new(),
+            stats: LiteralStats {
+                deduplication: mode,
+                ..LiteralStats::default()
+            },
+        }
+    }
+
+    pub(super) fn intern(&mut self, value: &str) -> Result<(u32, u32), CompileError> {
+        let len =
+            u32::try_from(value.len()).map_err(|_| CompileError::size_overflow("literal data"))?;
+        self.stats.literal_slices += 1;
+        self.stats.input_literal_bytes += value.len();
+
+        if value.is_empty() {
+            return Ok((0, len));
+        }
+
+        if self.mode == LiteralDeduplication::Disabled {
+            return self.append(value, len);
+        }
+
+        let hash = literal_hash(value);
+        match self
+            .offsets
+            .raw_entry_mut()
+            .from_hash(hash, |span| span_matches(self.bytes.as_str(), *span, value))
+        {
+            RawEntryMut::Occupied(entry) => {
+                self.stats.duplicate_literals += 1;
+                self.stats.duplicate_literal_bytes += value.len();
+                if self.mode == LiteralDeduplication::Enabled {
+                    self.stats.saved_literal_bytes += value.len();
+                    return Ok((entry.key().off, len));
+                }
+            }
+            RawEntryMut::Vacant(entry) => {
+                let (offset, len) = append_literal(&mut self.bytes, &mut self.stats, value, len)?;
+                entry.insert_with_hasher(hash, LiteralSpan { off: offset, len }, (), |span| {
+                    literal_hash(
+                        span_text(self.bytes.as_str(), *span)
+                            .expect("literal span must reference appended bytes"),
+                    )
+                });
+                self.stats.unique_literals += 1;
+                self.stats.unique_literal_bytes += value.len();
+                return Ok((offset, len));
+            }
+        }
+
+        self.append(value, len)
+    }
+
+    fn append(&mut self, value: &str, len: u32) -> Result<(u32, u32), CompileError> {
+        append_literal(&mut self.bytes, &mut self.stats, value, len)
+    }
+
+    pub(super) fn into_parts(self) -> (String, LiteralStats) {
+        (self.bytes, self.stats)
+    }
+}
+
+fn span_matches(bytes: &str, span: LiteralSpan, value: &str) -> bool {
+    span_text(bytes, span) == Some(value)
+}
+
+fn span_text(bytes: &str, span: LiteralSpan) -> Option<&str> {
+    let start = span.off as usize;
+    let len = span.len as usize;
+    let end = start.checked_add(len)?;
+    bytes.get(start..end)
+}
+
+fn append_literal(
+    bytes: &mut String,
+    stats: &mut LiteralStats,
+    value: &str,
+    len: u32,
+) -> Result<(u32, u32), CompileError> {
+    let offset =
+        u32::try_from(bytes.len()).map_err(|_| CompileError::size_overflow("literal data"))?;
+    bytes.push_str(value);
+    stats.emitted_literal_bytes += value.len();
+    Ok((offset, len))
+}
+
+fn literal_hash(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Compute the fallback string for a call part.
 fn compute_fallback(part: &Part) -> String {
@@ -46,27 +164,19 @@ pub(super) fn lower_parts(
     parts: &[Part],
     string_map: &BTreeMap<String, u32>,
     func_map: &BTreeMap<FunctionCatalogKey, u16>,
-    literals: &mut String,
+    literals: &mut LiteralPool,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
     for part in parts {
         match part {
             Part::Text(value) => {
-                let off = u32::try_from(literals.len())
-                    .map_err(|_| CompileError::size_overflow("literal data"))?;
-                literals.push_str(value);
-                let len = u32::try_from(value.len())
-                    .map_err(|_| CompileError::size_overflow("literal data"))?;
+                let (off, len) = literals.intern(value)?;
                 code.push(schema::OP_OUT_SLICE);
                 code.extend_from_slice(&off.to_le_bytes());
                 code.extend_from_slice(&len.to_le_bytes());
             }
             Part::Literal(value) => {
-                let off = u32::try_from(literals.len())
-                    .map_err(|_| CompileError::size_overflow("literal data"))?;
-                literals.push_str(value);
-                let len = u32::try_from(value.len())
-                    .map_err(|_| CompileError::size_overflow("literal data"))?;
+                let (off, len) = literals.intern(value)?;
                 code.push(schema::OP_OUT_EXPR);
                 code.extend_from_slice(&off.to_le_bytes());
                 code.extend_from_slice(&len.to_le_bytes());
@@ -176,7 +286,7 @@ fn lower_select(
     select: &SelectExpr,
     string_map: &BTreeMap<String, u32>,
     func_map: &BTreeMap<FunctionCatalogKey, u16>,
-    literals: &mut String,
+    literals: &mut LiteralPool,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
     emit_selector_start(&select.selector, string_map, func_map, code)?;

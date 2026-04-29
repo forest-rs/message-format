@@ -12,6 +12,10 @@ categories.workspace = true
 description = "Compiler from MF2 text to message-format catalog bytecode."
 
 [dependencies]
+hashbrown = { default-features = false, features = [
+    "default-hasher",
+    "raw-entry",
+], version = "0.17.0" }
 icu_normalizer = { default-features = false, features = ["compiled_data"], version = "2.1.1" }
 message-format-runtime = { workspace = true }
 serde = { features = ["derive"], version = "1.0" }

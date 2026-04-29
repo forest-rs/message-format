@@ -33,10 +33,22 @@ use frontend::parse_single_message_with_source;
 use interning::{
     collect_functions, collect_strings, escape_fallback_literal, function_dynamic_options,
 };
-use lowering::lower_parts;
+use lowering::{LiteralPool, lower_parts};
+
+/// Literal-pool optimization mode for compiler-emitted `LITS` bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiteralDeduplication {
+    /// Reuse identical non-empty literal fragments in the emitted catalog.
+    #[default]
+    Enabled,
+    /// Append every literal fragment directly and skip duplicate tracking.
+    Disabled,
+    /// Append every literal fragment directly while measuring duplicate opportunities.
+    MeasureOnly,
+}
 
 /// Compile-time behavior options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompileOptions {
     /// Whether bare placeholder expressions are implicitly treated as `:string`.
     ///
@@ -50,6 +62,24 @@ pub struct CompileOptions {
     ///
     /// Default: `false`.
     pub default_bidi_isolation: bool,
+    /// Whether repeated literal text fragments are deduplicated in `LITS`.
+    ///
+    /// `Enabled` shares identical text and literal-expression fragments.
+    /// `Disabled` preserves the original append-only layout and skips duplicate
+    /// tracking. `MeasureOnly` preserves the original append-only layout while
+    /// measuring duplicate opportunities.
+    ///
+    /// Default: [`LiteralDeduplication::Enabled`].
+    pub literal_deduplication: LiteralDeduplication,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            default_bidi_isolation: false,
+            literal_deduplication: LiteralDeduplication::Enabled,
+        }
+    }
 }
 
 /// Explicitly keyed MF2 message input for multi-source compilation.
@@ -85,6 +115,33 @@ pub struct SourceMap {
     pub messages: Vec<MessageSource>,
 }
 
+/// Compiler statistics for literal text emitted into the catalog `LITS` chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiteralStats {
+    /// Literal deduplication mode used for this compilation.
+    pub deduplication: LiteralDeduplication,
+    /// Number of literal text/expression slices encountered during lowering.
+    pub literal_slices: usize,
+    /// Number of distinct non-empty literal strings encountered when duplicate
+    /// tracking was enabled.
+    pub unique_literals: usize,
+    /// Number of literal slices that matched an earlier non-empty literal when
+    /// duplicate tracking was enabled.
+    pub duplicate_literals: usize,
+    /// Total bytes represented by all lowered literal slices before sharing.
+    pub input_literal_bytes: usize,
+    /// Bytes represented by distinct non-empty literal strings when duplicate
+    /// tracking was enabled.
+    pub unique_literal_bytes: usize,
+    /// Bytes represented by duplicate literal slices when duplicate tracking
+    /// was enabled.
+    pub duplicate_literal_bytes: usize,
+    /// Actual bytes emitted into the catalog `LITS` chunk.
+    pub emitted_literal_bytes: usize,
+    /// Bytes avoided in `LITS` by reusing earlier literal slices.
+    pub saved_literal_bytes: usize,
+}
+
 /// Compiled catalog plus optional provenance sidecar data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledCatalog {
@@ -92,6 +149,8 @@ pub struct CompiledCatalog {
     pub bytes: Vec<u8>,
     /// Source provenance collected during compilation.
     pub source_map: SourceMap,
+    /// Literal-pool size and reuse statistics from compilation.
+    pub literal_stats: LiteralStats,
 }
 
 /// Build-time error that can attach one logical input source to a compiler error.
@@ -510,13 +569,14 @@ pub fn compile_str(source: &str) -> Result<Vec<u8>, CompileError> {
 ///
 /// let options = CompileOptions {
 ///     default_bidi_isolation: true,
+///     ..CompileOptions::default()
 /// };
 /// let bytes = compile("{ $name }", options).unwrap();
 /// assert!(!bytes.is_empty());
 /// ```
 pub fn compile(source: &str, options: CompileOptions) -> Result<Vec<u8>, CompileError> {
     let message = parse_single_message_with_source(source, options, Some(SourceId(0)))?;
-    compile_parsed_messages(vec![message], None)
+    compile_parsed_messages(vec![message], None, options)
 }
 
 /// Compile source text using a function manifest for custom compile-time validation.
@@ -529,7 +589,7 @@ pub fn compile_with_manifest(
     manifest: &FunctionManifest,
 ) -> Result<Vec<u8>, CompileError> {
     let message = parse_single_message_with_source(source, options, Some(SourceId(0)))?;
-    compile_parsed_messages(vec![message], Some(manifest))
+    compile_parsed_messages(vec![message], Some(manifest), options)
 }
 
 /// Compile multiple explicitly keyed MF2 message inputs into one catalog with provenance.
@@ -641,7 +701,7 @@ fn compile_builder_report(
     mut diagnostics: Vec<BuildError>,
 ) -> CompileReport {
     let CatalogBuilder {
-        options: _,
+        options,
         function_manifest,
         sources,
         messages,
@@ -655,11 +715,12 @@ fn compile_builder_report(
     ));
 
     if diagnostics.is_empty() {
-        match encode_messages(&messages) {
-            Ok(bytes) => CompileReport::success(
+        match encode_messages(&messages, options) {
+            Ok(encoded) => CompileReport::success(
                 CompiledCatalog {
-                    bytes,
+                    bytes: encoded.bytes,
                     source_map: build_source_map(messages, sources),
+                    literal_stats: encoded.literal_stats,
                 },
                 diagnostics,
             ),
@@ -677,9 +738,10 @@ fn compile_builder_report(
 fn compile_parsed_messages(
     messages: Vec<Message>,
     function_manifest: Option<&FunctionManifest>,
+    options: CompileOptions,
 ) -> Result<Vec<u8>, CompileError> {
     validate_messages(&messages, function_manifest)?;
-    encode_messages(&messages)
+    encode_messages(&messages, options).map(|encoded| encoded.bytes)
 }
 
 fn validate_messages(
@@ -718,7 +780,15 @@ fn collect_build_errors(
     diagnostics
 }
 
-fn encode_messages(messages: &[Message]) -> Result<Vec<u8>, CompileError> {
+struct EncodedMessages {
+    bytes: Vec<u8>,
+    literal_stats: LiteralStats,
+}
+
+fn encode_messages(
+    messages: &[Message],
+    options: CompileOptions,
+) -> Result<EncodedMessages, CompileError> {
     let mut all_strings = BTreeSet::new();
     collect_strings(messages, &mut all_strings);
 
@@ -761,7 +831,7 @@ fn encode_messages(messages: &[Message]) -> Result<Vec<u8>, CompileError> {
         })
         .collect();
 
-    let mut literals = String::new();
+    let mut literals = LiteralPool::new(options.literal_deduplication);
     let mut code = Vec::new();
     let mut entries = Vec::new();
 
@@ -787,7 +857,12 @@ fn encode_messages(messages: &[Message]) -> Result<Vec<u8>, CompileError> {
     }
     sort_messages(&mut entries);
 
-    encode_catalog(&strings, &literals, &entries, &code, &func_entries)
+    let (literals, literal_stats) = literals.into_parts();
+    let bytes = encode_catalog(&strings, &literals, &entries, &code, &func_entries)?;
+    Ok(EncodedMessages {
+        bytes,
+        literal_stats,
+    })
 }
 
 fn ensure_unique_message_ids(messages: &[Message]) -> Result<(), CompileError> {
