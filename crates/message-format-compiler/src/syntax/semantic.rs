@@ -292,7 +292,7 @@ pub(crate) fn validate_declaration_scope(
                 line,
                 col,
                 "unique declaration",
-                format!("${} already declared", var),
+                format!("${var} already declared"),
             ));
         }
         declared.insert(var.clone());
@@ -324,7 +324,7 @@ pub(crate) fn validate_declaration_scope(
                 line,
                 col,
                 "unique declaration",
-                format!("${} already declared", name),
+                format!("${name} already declared"),
             ));
         }
 
@@ -334,7 +334,7 @@ pub(crate) fn validate_declaration_scope(
                     line,
                     col,
                     "no self-reference in .local",
-                    format!("${} references itself", name),
+                    format!("${name} references itself"),
                 ));
             }
             if all_locals.contains(&reference) && !available.contains(&reference) {
@@ -342,7 +342,7 @@ pub(crate) fn validate_declaration_scope(
                     line,
                     col,
                     "declared variable reference",
-                    format!("${} not yet available", reference),
+                    format!("${reference} not yet available"),
                 ));
             }
         }
@@ -383,8 +383,7 @@ pub(crate) fn validate_no_implicit_redeclaration(
                         col,
                         "no prior implicit reference",
                         format!(
-                            "${} is implicitly declared by prior use and cannot be re-declared with .input",
-                            var
+                            "${var} is implicitly declared by prior use and cannot be re-declared with .input"
                         ),
                     ));
                 }

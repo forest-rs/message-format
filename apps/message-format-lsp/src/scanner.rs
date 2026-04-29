@@ -91,10 +91,10 @@ pub(crate) fn scan_declarations(source: &str) -> Vec<Declaration> {
             if let Some(decl) = parse_input_declaration(rest, line_start, line, source) {
                 decls.push(decl);
             }
-        } else if let Some(rest) = trimmed.strip_prefix(".local") {
-            if let Some(decl) = parse_local_declaration(rest, line_start, line, source) {
-                decls.push(decl);
-            }
+        } else if let Some(rest) = trimmed.strip_prefix(".local")
+            && let Some(decl) = parse_local_declaration(rest, line_start, line, source)
+        {
+            decls.push(decl);
         }
     }
 
@@ -108,16 +108,17 @@ pub(crate) fn scan_message_symbols(source: &str) -> Vec<MessageSymbol> {
 
     for (line_num, (line_start, line)) in line_byte_ranges(source).enumerate() {
         let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if let Some((id, _)) = trimmed.split_once('=') {
-                let id = id.trim();
-                if !id.is_empty() {
-                    symbols.push(MessageSymbol {
-                        id: id.to_string(),
-                        line: u32::try_from(line_num).unwrap_or(u32::MAX),
-                        span: line_start..line_start + line.len(),
-                    });
-                }
+        if !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && let Some((id, _)) = trimmed.split_once('=')
+        {
+            let id = id.trim();
+            if !id.is_empty() {
+                symbols.push(MessageSymbol {
+                    id: id.to_string(),
+                    line: u32::try_from(line_num).unwrap_or(u32::MAX),
+                    span: line_start..line_start + line.len(),
+                });
             }
         }
     }

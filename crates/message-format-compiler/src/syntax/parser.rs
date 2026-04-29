@@ -346,11 +346,13 @@ impl<'a> Parser<'a> {
             return None;
         }
         // Ensure the next char is not a name-char (to avoid matching prefix of an identifier)
-        if let Some(next) = self.peek() {
-            if is_name_char(next) && next != '-' && next != '.' {
-                self.pos = start;
-                return None;
-            }
+        if let Some(next) = self.peek()
+            && is_name_char(next)
+            && next != '-'
+            && next != '.'
+        {
+            self.pos = start;
+            return None;
         }
         Some(&self.src[start..self.pos])
     }
@@ -400,11 +402,11 @@ impl<'a> Parser<'a> {
             if !self.skip_whitespace() {
                 break;
             }
-            if self.peek() == Some('@') {
-                if let Some(attr) = self.parse_attribute() {
-                    attributes.push(attr);
-                    continue;
-                }
+            if self.peek() == Some('@')
+                && let Some(attr) = self.parse_attribute()
+            {
+                attributes.push(attr);
+                continue;
             }
             if let Some(opt) = self.try_parse_option() {
                 // Also build flat representation for backward compat
@@ -516,11 +518,11 @@ impl<'a> Parser<'a> {
             if !self.skip_whitespace() {
                 break;
             }
-            if self.peek() == Some('@') {
-                if let Some(attr) = self.parse_attribute() {
-                    attributes.push(attr);
-                    continue;
-                }
+            if self.peek() == Some('@')
+                && let Some(attr) = self.parse_attribute()
+            {
+                attributes.push(attr);
+                continue;
             }
             if let Some(opt) = self.try_parse_option() {
                 options.push(opt);
@@ -556,44 +558,43 @@ impl<'a> Parser<'a> {
         let inner_start = self.pos;
 
         // Check for markup: `#identifier` or `/identifier`
-        if matches!(self.peek(), Some('#' | '/')) {
-            if let Some(markup_payload) = self.parse_markup() {
-                self.skip_optional_whitespace();
-                let inner_end = self.pos;
-                // Expect `}`
-                self.eat('}');
-                return ExpressionNode {
-                    raw_span: outer_start..self.pos,
-                    span: inner_start..inner_end,
-                    kind: ExpressionKindNode::Literal,
+        if matches!(self.peek(), Some('#' | '/'))
+            && let Some(markup_payload) = self.parse_markup()
+        {
+            self.skip_optional_whitespace();
+            let inner_end = self.pos;
+            // Expect `}`
+            self.eat('}');
+            return ExpressionNode {
+                raw_span: outer_start..self.pos,
+                span: inner_start..inner_end,
+                kind: ExpressionKindNode::Literal,
 
-                    payload: Some(markup_payload),
-                    diag_hint: None,
-                };
-            }
+                payload: Some(markup_payload),
+                diag_hint: None,
+            };
         }
 
         // Check for reserved/private-use annotation sigils (not bare `+`)
-        if let Some(ch) = self.peek() {
-            if RESERVED_SIGILS.contains(&ch)
+        if let Some(ch) = self.peek()
+            && (RESERVED_SIGILS.contains(&ch)
                 || (ch == '+'
                     && self
                         .peek_nth(1)
-                        .is_some_and(|c| c != '}' && !is_ignorable_char(c)))
-            {
-                // Skip past the reserved annotation body
-                self.skip_to_expression_end();
-                let inner_end = self.pos;
-                self.eat('}');
-                return ExpressionNode {
-                    raw_span: outer_start..self.pos,
-                    span: inner_start..inner_end,
-                    kind: ExpressionKindNode::Literal,
+                        .is_some_and(|c| c != '}' && !is_ignorable_char(c))))
+        {
+            // Skip past the reserved annotation body
+            self.skip_to_expression_end();
+            let inner_end = self.pos;
+            self.eat('}');
+            return ExpressionNode {
+                raw_span: outer_start..self.pos,
+                span: inner_start..inner_end,
+                kind: ExpressionKindNode::Literal,
 
-                    payload: None,
-                    diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
-                };
-            }
+                payload: None,
+                diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
+            };
         }
 
         // Try variable
@@ -699,25 +700,24 @@ impl<'a> Parser<'a> {
                 }
 
                 // Check for reserved/private-use annotation after variable
-                if let Some(ch) = self.peek() {
-                    if is_reserved_or_private_use_start_char(ch)
+                if let Some(ch) = self.peek()
+                    && (is_reserved_or_private_use_start_char(ch)
                         || (ch == '+'
                             && self
                                 .peek_nth(1)
-                                .is_some_and(|c| c != '}' && !is_ignorable_char(c)))
-                    {
-                        self.skip_to_expression_end();
-                        let inner_end = self.pos;
-                        self.eat('}');
-                        return ExpressionNode {
-                            raw_span: outer_start..self.pos,
-                            span: inner_start..inner_end,
-                            kind: ExpressionKindNode::Literal,
+                                .is_some_and(|c| c != '}' && !is_ignorable_char(c))))
+                {
+                    self.skip_to_expression_end();
+                    let inner_end = self.pos;
+                    self.eat('}');
+                    return ExpressionNode {
+                        raw_span: outer_start..self.pos,
+                        span: inner_start..inner_end,
+                        kind: ExpressionKindNode::Literal,
 
-                            payload: None,
-                            diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
-                        };
-                    }
+                        payload: None,
+                        diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
+                    };
                 }
 
                 // Consume trailing attributes (ABNF: *(s attribute) — requires preceding space)
@@ -830,25 +830,24 @@ impl<'a> Parser<'a> {
             }
 
             // Check for reserved/private-use annotation after literal
-            if let Some(ch) = self.peek() {
-                if is_reserved_or_private_use_start_char(ch)
+            if let Some(ch) = self.peek()
+                && (is_reserved_or_private_use_start_char(ch)
                     || (ch == '+'
                         && self
                             .peek_nth(1)
-                            .is_some_and(|c| c != '}' && !is_ignorable_char(c)))
-                {
-                    self.skip_to_expression_end();
-                    let inner_end = self.pos;
-                    self.eat('}');
-                    return ExpressionNode {
-                        raw_span: outer_start..self.pos,
-                        span: inner_start..inner_end,
-                        kind: ExpressionKindNode::Literal,
+                            .is_some_and(|c| c != '}' && !is_ignorable_char(c))))
+            {
+                self.skip_to_expression_end();
+                let inner_end = self.pos;
+                self.eat('}');
+                return ExpressionNode {
+                    raw_span: outer_start..self.pos,
+                    span: inner_start..inner_end,
+                    kind: ExpressionKindNode::Literal,
 
-                        payload: None,
-                        diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
-                    };
-                }
+                    payload: None,
+                    diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
+                };
             }
 
             // Consume trailing attributes (ABNF: *(s attribute) — requires preceding space)
@@ -898,25 +897,25 @@ impl<'a> Parser<'a> {
         }
 
         // Bare annotation (no operand): `:function`
-        if self.peek() == Some(':') {
-            if let Some(function) = self.parse_annotation() {
-                self.skip_optional_whitespace();
-                let inner_end = self.pos;
-                self.eat('}');
-                return ExpressionNode {
-                    raw_span: outer_start..self.pos,
-                    span: inner_start..inner_end,
-                    kind: ExpressionKindNode::Literal,
+        if self.peek() == Some(':')
+            && let Some(function) = self.parse_annotation()
+        {
+            self.skip_optional_whitespace();
+            let inner_end = self.pos;
+            self.eat('}');
+            return ExpressionNode {
+                raw_span: outer_start..self.pos,
+                span: inner_start..inner_end,
+                kind: ExpressionKindNode::Literal,
 
-                    payload: Some(ExpressionPayloadNode::Literal(LiteralExpressionNode {
-                        value_span: inner_start..inner_start,
-                        value: "",
-                        function: Some(function),
-                        is_markup: false,
-                    })),
-                    diag_hint: None,
-                };
-            }
+                payload: Some(ExpressionPayloadNode::Literal(LiteralExpressionNode {
+                    value_span: inner_start..inner_start,
+                    value: "",
+                    function: Some(function),
+                    is_markup: false,
+                })),
+                diag_hint: None,
+            };
         }
 
         // Nothing recognized — consume to `}` and return error node

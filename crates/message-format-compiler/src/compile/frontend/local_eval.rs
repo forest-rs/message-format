@@ -182,10 +182,9 @@ pub(super) fn apply_literal_function(
             if let Some(dp) = options
                 .get("decimalPlaces")
                 .and_then(|value| value.parse::<usize>().ok())
+                && let Some(value) = parse_number_literal(&literal)
             {
-                if let Some(value) = parse_number_literal(&literal) {
-                    literal = format!("{value:.dp$}");
-                }
+                literal = format!("{value:.dp$}");
             }
         }
         _ => {

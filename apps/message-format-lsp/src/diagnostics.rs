@@ -75,42 +75,42 @@ pub(crate) fn compile_error_to_diagnostic(error: &CompileError) -> Diagnostic {
 pub(crate) fn build_error_to_diagnostic(error: &BuildError) -> Diagnostic {
     let severity = Some(map_severity(error.severity));
 
-    if let Some(context) = &error.context {
-        if let Some(origin) = &context.message_origin {
-            let origin_line = saturating_u32(origin.line.unwrap_or(1).saturating_sub(1));
-            // +1 to skip past the opening quote of the string token.
-            let origin_col = saturating_u32(origin.column.unwrap_or(1));
+    if let Some(context) = &error.context
+        && let Some(origin) = &context.message_origin
+    {
+        let origin_line = saturating_u32(origin.line.unwrap_or(1).saturating_sub(1));
+        // +1 to skip past the opening quote of the string token.
+        let origin_col = saturating_u32(origin.column.unwrap_or(1));
 
-            let (pos, message) = if let Some(diag_ctx) = error.error.diagnostic_context() {
-                let body_line = saturating_u32(diag_ctx.line.saturating_sub(1));
-                let body_col = saturating_u32(diag_ctx.column.saturating_sub(1));
+        let (pos, message) = if let Some(diag_ctx) = error.error.diagnostic_context() {
+            let body_line = saturating_u32(diag_ctx.line.saturating_sub(1));
+            let body_col = saturating_u32(diag_ctx.column.saturating_sub(1));
 
-                // For the first line of the body, add origin column offset;
-                // for subsequent lines, the column is body-relative only.
-                let line = origin_line + body_line;
-                let col = if body_line == 0 {
-                    origin_col + body_col
-                } else {
-                    body_col
-                };
-
-                let title = format!("{}: {}", context.message_id, diag_ctx.title);
-                let msg = format_diagnostic_message(&title, diag_ctx.expected, diag_ctx.found);
-                (Position::new(line, col), msg)
+            // For the first line of the body, add origin column offset;
+            // for subsequent lines, the column is body-relative only.
+            let line = origin_line + body_line;
+            let col = if body_line == 0 {
+                origin_col + body_col
             } else {
-                let pos = Position::new(origin_line, origin_col);
-                let msg = format!("{}: {}", context.message_id, error.error);
-                (pos, msg)
+                body_col
             };
 
-            return Diagnostic {
-                range: Range::new(pos, pos),
-                severity,
-                source: Some(String::from("mf2")),
-                message,
-                ..Diagnostic::default()
-            };
-        }
+            let title = format!("{}: {}", context.message_id, diag_ctx.title);
+            let msg = format_diagnostic_message(&title, diag_ctx.expected, diag_ctx.found);
+            (Position::new(line, col), msg)
+        } else {
+            let pos = Position::new(origin_line, origin_col);
+            let msg = format!("{}: {}", context.message_id, error.error);
+            (pos, msg)
+        };
+
+        return Diagnostic {
+            range: Range::new(pos, pos),
+            severity,
+            source: Some(String::from("mf2")),
+            message,
+            ..Diagnostic::default()
+        };
     }
 
     // Fall back to the inner compile error's position.
