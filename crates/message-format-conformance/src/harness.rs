@@ -448,6 +448,7 @@ fn run_wg_test_detail(test: &WgTest) -> String {
 fn run_wg_test_result(test: &WgTest) -> (bool, String) {
     let compile_options = CompileOptions {
         default_bidi_isolation: test.bidi_isolation.as_deref().unwrap_or("none") == "default",
+        ..CompileOptions::default()
     };
     match compile(&test.src, compile_options) {
         Ok(bytes) => {

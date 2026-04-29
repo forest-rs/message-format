@@ -162,6 +162,7 @@ fn bidi_isolation_wraps_placeholders() {
         &[("name", Value::Str("World".into()))],
         CompileOptions {
             default_bidi_isolation: true,
+            ..CompileOptions::default()
         },
     );
     // FSI = U+2068, PDI = U+2069
@@ -189,6 +190,7 @@ fn no_bidi_without_string_function() {
         &[("name", Value::Str("World".into()))],
         CompileOptions {
             default_bidi_isolation: false,
+            ..CompileOptions::default()
         },
     );
     assert!(

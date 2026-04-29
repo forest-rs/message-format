@@ -125,9 +125,9 @@
 
 pub use compile::{
     BuildError, BuildErrorContext, CatalogBuilder, CompileError, CompileInput, CompileOptions,
-    CompileReport, CompiledCatalog, DiagnosticContext, DiagnosticSeverity, MessageSource,
-    SourceMap, compile, compile_inputs, compile_inputs_with_manifest, compile_resources,
-    compile_resources_with_manifest, compile_str, compile_with_manifest,
+    CompileReport, CompiledCatalog, DiagnosticContext, DiagnosticSeverity, LiteralDeduplication,
+    LiteralStats, MessageSource, SourceMap, compile, compile_inputs, compile_inputs_with_manifest,
+    compile_resources, compile_resources_with_manifest, compile_str, compile_with_manifest,
 };
 pub use emit::escape_text;
 pub use manifest::{

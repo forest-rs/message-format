@@ -42,6 +42,19 @@ fn arg(catalog: &Catalog, name: &str, value: Value) -> (u32, Value) {
     (arg_id(catalog, name), value)
 }
 
+fn chunk_len(bytes: &[u8], tag: [u8; 4]) -> u32 {
+    let chunk_count = u32::from_le_bytes(bytes[16..20].try_into().expect("chunk count"));
+    let chunk_table_offset =
+        u32::from_le_bytes(bytes[20..24].try_into().expect("chunk table offset")) as usize;
+    for idx in 0..chunk_count as usize {
+        let pos = chunk_table_offset + idx * 16;
+        if bytes[pos..pos + 4] == tag {
+            return u32::from_le_bytes(bytes[pos + 8..pos + 12].try_into().expect("chunk len"));
+        }
+    }
+    panic!("missing chunk {tag:?}");
+}
+
 #[derive(Default)]
 struct MarkupOptionSink {
     options: Vec<(String, String)>,
@@ -247,6 +260,232 @@ fn compile_inputs_merges_multiple_files_and_tracks_origins() {
             .format_by_id_for_test("bye", &Vec::<(u32, Value)>::new())
             .expect("formatted"),
         "Bye"
+    );
+}
+
+#[test]
+fn compile_inputs_deduplicates_literal_text_slices() {
+    let compiled = expect_compiled(compile_inputs(
+        [
+            CompileInput {
+                name: "one.mf2",
+                message_id: "one",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+            CompileInput {
+                name: "two.mf2",
+                message_id: "two",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+        ],
+        CompileOptions::default(),
+    ));
+
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    assert_eq!(
+        compiled.literal_stats.deduplication,
+        LiteralDeduplication::Enabled
+    );
+    assert_eq!(compiled.literal_stats.literal_slices, 2);
+    assert_eq!(compiled.literal_stats.unique_literals, 1);
+    assert_eq!(compiled.literal_stats.duplicate_literals, 1);
+    assert_eq!(compiled.literal_stats.input_literal_bytes, 10);
+    assert_eq!(compiled.literal_stats.unique_literal_bytes, 5);
+    assert_eq!(compiled.literal_stats.duplicate_literal_bytes, 5);
+    assert_eq!(compiled.literal_stats.emitted_literal_bytes, 5);
+    assert_eq!(compiled.literal_stats.saved_literal_bytes, 5);
+    assert_eq!(chunk_len(&compiled.bytes, *b"LITS"), 5);
+    assert_eq!(
+        catalog.code(),
+        &[
+            schema::OP_OUT_SLICE,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+            schema::OP_OUT_SLICE,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+        ]
+    );
+}
+
+#[test]
+fn disabled_literal_deduplication_keeps_append_only_literals_without_duplicate_tracking() {
+    let compiled = expect_compiled(compile_inputs(
+        [
+            CompileInput {
+                name: "one.mf2",
+                message_id: "one",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+            CompileInput {
+                name: "two.mf2",
+                message_id: "two",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+        ],
+        CompileOptions {
+            literal_deduplication: LiteralDeduplication::Disabled,
+            ..CompileOptions::default()
+        },
+    ));
+
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    assert_eq!(chunk_len(&compiled.bytes, *b"LITS"), 10);
+    assert_eq!(compiled.literal_stats.literal_slices, 2);
+    assert_eq!(compiled.literal_stats.duplicate_literals, 0);
+    assert_eq!(compiled.literal_stats.input_literal_bytes, 10);
+    assert_eq!(compiled.literal_stats.emitted_literal_bytes, 10);
+    assert_eq!(compiled.literal_stats.saved_literal_bytes, 0);
+    assert_eq!(
+        catalog.code(),
+        &[
+            schema::OP_OUT_SLICE,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+            schema::OP_OUT_SLICE,
+            5,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+        ]
+    );
+}
+
+#[test]
+fn measure_only_literal_deduplication_counts_opportunities_without_rewriting_literals() {
+    let compiled = expect_compiled(compile_inputs(
+        [
+            CompileInput {
+                name: "one.mf2",
+                message_id: "one",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+            CompileInput {
+                name: "two.mf2",
+                message_id: "two",
+                source: "Hello",
+                kind: SourceKind::MessageFormat,
+            },
+        ],
+        CompileOptions {
+            literal_deduplication: LiteralDeduplication::MeasureOnly,
+            ..CompileOptions::default()
+        },
+    ));
+
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    assert_eq!(chunk_len(&compiled.bytes, *b"LITS"), 10);
+    assert_eq!(compiled.literal_stats.literal_slices, 2);
+    assert_eq!(compiled.literal_stats.unique_literals, 1);
+    assert_eq!(compiled.literal_stats.duplicate_literals, 1);
+    assert_eq!(compiled.literal_stats.duplicate_literal_bytes, 5);
+    assert_eq!(compiled.literal_stats.input_literal_bytes, 10);
+    assert_eq!(compiled.literal_stats.emitted_literal_bytes, 10);
+    assert_eq!(compiled.literal_stats.saved_literal_bytes, 0);
+    assert_eq!(
+        catalog.code(),
+        &[
+            schema::OP_OUT_SLICE,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+            schema::OP_OUT_SLICE,
+            5,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+        ]
+    );
+}
+
+#[test]
+fn compile_inputs_deduplicates_literal_expression_slices() {
+    let compiled = expect_compiled(compile_inputs(
+        [
+            CompileInput {
+                name: "one.mf2",
+                message_id: "one",
+                source: "{|Hello|}",
+                kind: SourceKind::MessageFormat,
+            },
+            CompileInput {
+                name: "two.mf2",
+                message_id: "two",
+                source: "{|Hello|}",
+                kind: SourceKind::MessageFormat,
+            },
+        ],
+        CompileOptions::default(),
+    ));
+
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    assert_eq!(chunk_len(&compiled.bytes, *b"LITS"), 5);
+    assert_eq!(
+        catalog.code(),
+        &[
+            schema::OP_OUT_EXPR,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+            schema::OP_OUT_EXPR,
+            0,
+            0,
+            0,
+            0,
+            5,
+            0,
+            0,
+            0,
+            schema::OP_HALT,
+        ]
     );
 }
 
@@ -1301,6 +1540,7 @@ fn default_bidi_isolation_rewrites_bare_interpolation_to_string_call() {
         "{ $name }",
         CompileOptions {
             default_bidi_isolation: true,
+            ..CompileOptions::default()
         },
     )
     .expect("parsed");
@@ -1327,6 +1567,7 @@ fn default_bidi_isolation_rewrites_bare_literal_expression_to_string_call() {
         "{ hello }",
         CompileOptions {
             default_bidi_isolation: true,
+            ..CompileOptions::default()
         },
     )
     .expect("parsed");
