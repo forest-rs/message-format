@@ -313,6 +313,8 @@ impl BuiltinHost {
     /// Returns:
     /// - `FormatError::Trap(Trap::UnsupportedLocale)` when ICU plural rules are unavailable.
     pub fn new(locale: &Locale) -> Result<Self, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let cardinal_rules = PluralRules::try_new_cardinal(locale.into())
             .map_err(|_| FormatError::Trap(Trap::UnsupportedLocale))?;
         let ordinal_rules = PluralRules::try_new_ordinal(locale.into())

@@ -13,7 +13,11 @@ description = "TOML resource adapter for message-format compiler resource inputs
 
 [dependencies]
 message-format-compiler.workspace = true
+profiling = { optional = true, workspace = true }
 toml = "1"
+
+[features]
+profiling = ["dep:profiling", "message-format-compiler/profiling"]
 
 [lints]
 workspace = true

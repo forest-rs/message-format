@@ -16,11 +16,13 @@ default = ["std"]
 std = ["message-format-runtime/std"]
 icu4x = ["message-format-runtime/icu4x"]
 compile = ["dep:message-format-compiler"]
+profiling = ["dep:profiling", "message-format-runtime/profiling", "message-format-compiler?/profiling"]
 
 [dependencies]
 icu_locale_core = { default-features = false, version = "2.1.1" }
 message-format-compiler = { optional = true, workspace = true }
 message-format-runtime = { workspace = true }
+profiling = { optional = true, workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

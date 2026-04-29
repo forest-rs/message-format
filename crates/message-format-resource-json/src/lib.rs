@@ -68,6 +68,8 @@ pub fn parse_json_resource(
     source: &str,
     profile: JsonProfile,
 ) -> Result<ResourceInput, ResourceJsonError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let root: JsonValue = json_spanned_value::from_str(source)
         .map_err(|err| ResourceJsonError::from_json(source, err))?;
     match profile {
@@ -82,6 +84,8 @@ pub fn parse_flat_json_resource(
     name: impl Into<String>,
     source: &str,
 ) -> Result<ResourceInput, ResourceJsonError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     parse_json_resource(name, source, JsonProfile::Flat)
 }
 
@@ -91,6 +95,8 @@ pub fn parse_chrome_json_resource(
     name: impl Into<String>,
     source: &str,
 ) -> Result<ResourceInput, ResourceJsonError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     parse_json_resource(name, source, JsonProfile::Chrome)
 }
 

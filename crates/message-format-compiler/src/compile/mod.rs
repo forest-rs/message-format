@@ -424,6 +424,8 @@ impl CatalogBuilder {
 
     /// Parse one MF2 message body and add it under its explicit message id.
     pub fn add_input(&mut self, input: CompileInput<'_>) -> Result<SourceId, BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let source_id = self
             .register_source(input.name, input.kind)
             .map_err(|error| BuildError::error(None, error))?;
@@ -461,6 +463,8 @@ impl CatalogBuilder {
 
     /// Parse one resource/container input made up of named MF2 message bodies.
     pub fn add_resource_input(&mut self, input: ResourceInput) -> Result<SourceId, BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let source_name = input.name.clone();
         let source_kind = input.kind.clone();
         let source_id = self
@@ -515,6 +519,8 @@ impl CatalogBuilder {
 
     /// Compile into a binary catalog payload plus provenance sidecar data.
     pub fn compile(self) -> CompileReport {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let Self {
             options,
             sources,
@@ -559,6 +565,8 @@ impl CatalogBuilder {
 /// assert!(!bytes.is_empty());
 /// ```
 pub fn compile_str(source: &str) -> Result<Vec<u8>, CompileError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     compile(source, CompileOptions::default())
 }
 
@@ -575,6 +583,8 @@ pub fn compile_str(source: &str) -> Result<Vec<u8>, CompileError> {
 /// assert!(!bytes.is_empty());
 /// ```
 pub fn compile(source: &str, options: CompileOptions) -> Result<Vec<u8>, CompileError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let message = parse_single_message_with_source(source, options, Some(SourceId(0)))?;
     compile_parsed_messages(vec![message], None, options)
 }
@@ -588,6 +598,8 @@ pub fn compile_with_manifest(
     options: CompileOptions,
     manifest: &FunctionManifest,
 ) -> Result<Vec<u8>, CompileError> {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let message = parse_single_message_with_source(source, options, Some(SourceId(0)))?;
     compile_parsed_messages(vec![message], Some(manifest), options)
 }
@@ -597,6 +609,8 @@ pub fn compile_inputs<'a>(
     inputs: impl IntoIterator<Item = CompileInput<'a>>,
     options: CompileOptions,
 ) -> CompileReport {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let mut builder = CatalogBuilder::with_options(options);
     let mut diagnostics = Vec::new();
     for input in inputs {
@@ -612,6 +626,8 @@ pub fn compile_resources(
     inputs: impl IntoIterator<Item = ResourceInput>,
     options: CompileOptions,
 ) -> CompileReport {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let mut builder = CatalogBuilder::with_options(options);
     let mut diagnostics = Vec::new();
     for input in inputs {
@@ -626,6 +642,8 @@ pub fn compile_inputs_with_manifest<'a>(
     options: CompileOptions,
     manifest: &FunctionManifest,
 ) -> CompileReport {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let mut builder = CatalogBuilder::with_options(options);
     builder.set_function_manifest(manifest.clone());
     let mut diagnostics = Vec::new();
@@ -643,6 +661,8 @@ pub fn compile_resources_with_manifest(
     options: CompileOptions,
     manifest: &FunctionManifest,
 ) -> CompileReport {
+    #[cfg(feature = "profiling")]
+    profiling::function_scope!();
     let mut builder = CatalogBuilder::with_options(options);
     builder.set_function_manifest(manifest.clone());
     let mut diagnostics = Vec::new();

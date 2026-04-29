@@ -67,6 +67,8 @@ impl<'a, H: Host> Formatter<'a, H> {
     ///
     /// Calls [`Host::index`] to pre-compute catalog-specific data.
     pub fn new(catalog: &'a Catalog, mut host: H) -> Result<Self, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let index = host.index(catalog)?;
         Ok(Self {
             catalog,
@@ -88,6 +90,8 @@ impl<'a, H: Host> Formatter<'a, H> {
 
     /// Resolve a message id to a reusable handle.
     pub fn resolve(&self, message_id: &str) -> Result<MessageHandle, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         MessageHandle::from_catalog(self.catalog, message_id)
     }
 
@@ -105,6 +109,8 @@ impl<'a, H: Host> Formatter<'a, H> {
         args: &dyn Args,
         sink: &mut S,
     ) -> Result<Vec<FormatError>, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let mut diagnostics = VecDiagnostics::default();
         run_bytecode(
             self.catalog,
@@ -161,6 +167,8 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
         catalogs: impl IntoIterator<Item = &'a Catalog>,
         mut host: H,
     ) -> Result<Self, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let catalogs: Box<[_]> = catalogs
             .into_iter()
             .map(|catalog| {
@@ -191,6 +199,8 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
     ///
     /// Returns a handle to the first catalog that contains the message.
     pub fn resolve(&self, message_id: &str) -> Result<MultiMessageHandle, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         for (idx, (catalog, _)) in self.catalogs.iter().enumerate() {
             if let Some(entry_pc) = catalog.message_pc(message_id) {
                 return Ok(MultiMessageHandle {
@@ -261,6 +271,8 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
         args: &dyn Args,
         sink: &mut S,
     ) -> Result<Vec<FormatError>, FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let (catalog, index) = self
             .catalogs
             .get(message.catalog_idx as usize)

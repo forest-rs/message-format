@@ -34,6 +34,8 @@ pub struct MessageCatalog {
 impl MessageCatalog {
     /// Decode a serialized catalog payload.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, runtime::CatalogError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         Ok(Self {
             catalog: runtime::Catalog::from_bytes(bytes)?,
         })
@@ -68,6 +70,8 @@ impl MessageCatalog {
         &self,
         locale: &Locale,
     ) -> Result<MessageFormatter<'_>, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let candidates = locale_candidates(locale);
         MessageFormatter::new(core::iter::once(&self.catalog), &candidates)
     }
@@ -81,6 +85,8 @@ impl MessageCatalog {
         source: &str,
         options: crate::compiler::CompileOptions,
     ) -> Result<Self, crate::compiler::CompileError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let bytes = crate::compiler::compile(source, options)?;
         Self::from_compiler_bytes(&bytes)
     }
@@ -91,12 +97,16 @@ impl MessageCatalog {
         options: crate::compiler::CompileOptions,
         manifest: &crate::compiler::FunctionManifest,
     ) -> Result<Self, crate::compiler::CompileError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let bytes = crate::compiler::compile_with_manifest(source, options, manifest)?;
         Self::from_compiler_bytes(&bytes)
     }
 
     /// Compile one MF2 message source string with default options and decode it into a loaded catalog.
     pub fn compile_str(source: &str) -> Result<Self, crate::compiler::CompileError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let bytes = crate::compiler::compile_str(source)?;
         Self::from_compiler_bytes(&bytes)
     }
@@ -106,6 +116,8 @@ impl MessageCatalog {
         inputs: impl IntoIterator<Item = crate::compiler::CompileInput<'a>>,
         options: crate::compiler::CompileOptions,
     ) -> Result<(Self, crate::compiler::SourceMap), crate::compiler::BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let compiled = crate::compiler::compile_inputs(inputs, options)
             .into_result()
             .map_err(first_build_error)?;
@@ -125,6 +137,8 @@ impl MessageCatalog {
         inputs: impl IntoIterator<Item = crate::compiler::ResourceInput>,
         options: crate::compiler::CompileOptions,
     ) -> Result<(Self, crate::compiler::SourceMap), crate::compiler::BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let compiled = crate::compiler::compile_resources(inputs, options)
             .into_result()
             .map_err(first_build_error)?;
@@ -145,6 +159,8 @@ impl MessageCatalog {
         options: crate::compiler::CompileOptions,
         manifest: &crate::compiler::FunctionManifest,
     ) -> Result<(Self, crate::compiler::SourceMap), crate::compiler::BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let compiled = crate::compiler::compile_inputs_with_manifest(inputs, options, manifest)
             .into_result()
             .map_err(first_build_error)?;
@@ -165,6 +181,8 @@ impl MessageCatalog {
         options: crate::compiler::CompileOptions,
         manifest: &crate::compiler::FunctionManifest,
     ) -> Result<(Self, crate::compiler::SourceMap), crate::compiler::BuildError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let compiled = crate::compiler::compile_resources_with_manifest(inputs, options, manifest)
             .into_result()
             .map_err(first_build_error)?;
@@ -182,6 +200,8 @@ impl MessageCatalog {
     /// Compile a file from disk and decode it into a loaded catalog.
     #[cfg(feature = "std")]
     pub fn compile_file(path: &std::path::Path) -> Result<Self, crate::compiler::CompileError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let source = std::fs::read_to_string(path).map_err(|err| {
             crate::compiler::CompileError::IoError {
                 path: path.to_path_buf(),
@@ -253,6 +273,8 @@ impl CatalogBundle {
         catalogs: impl IntoIterator<Item = LocalizedCatalog>,
         locale: &Locale,
     ) -> Result<Self, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let candidates = locale_candidates(locale);
         let mut slots: Vec<Option<runtime::Catalog>> = vec![None; candidates.len()];
         for lc in catalogs {
@@ -284,6 +306,8 @@ impl CatalogBundle {
         locale: &Locale,
         mut fetch: impl FnMut(&Locale) -> Result<Option<MessageCatalog>, E>,
     ) -> Result<Self, LookupError<E>> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         let candidates = locale_candidates(locale);
         let mut catalogs = Vec::new();
         for candidate in &candidates {
@@ -308,6 +332,8 @@ impl CatalogBundle {
     /// The host locale for number/date formatting is derived from the
     /// target locale's CLDR fallback chain.
     pub fn formatter(&self) -> Result<MessageFormatter<'_>, runtime::FormatError> {
+        #[cfg(feature = "profiling")]
+        profiling::function_scope!();
         MessageFormatter::new(self.catalogs.iter(), &self.candidates)
     }
 }

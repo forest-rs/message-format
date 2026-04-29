@@ -14,6 +14,10 @@ description = "JSON resource adapters for message-format compiler resource input
 [dependencies]
 json-spanned-value = "0.2.2"
 message-format-compiler.workspace = true
+profiling = { optional = true, workspace = true }
+
+[features]
+profiling = ["dep:profiling", "message-format-compiler/profiling"]
 
 [lints]
 workspace = true
