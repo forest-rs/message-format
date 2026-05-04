@@ -145,7 +145,7 @@ fn compute_fallback(part: &Part) -> String {
     }
 }
 
-/// Emit an `OP_EXPR_FALLBACK` instruction before a call in the output path.
+/// Emit an `ExprFallback` instruction before a call in the output path.
 fn emit_expr_fallback(
     part: &Part,
     string_map: &BTreeMap<String, u32>,
@@ -155,7 +155,7 @@ fn emit_expr_fallback(
     let fb_str_id = *string_map
         .get(&fb)
         .ok_or(CompileError::internal("missing interned string"))?;
-    code.push(schema::OP_EXPR_FALLBACK);
+    code.push(schema::Opcode::ExprFallback as u8);
     code.extend_from_slice(&fb_str_id.to_le_bytes());
     Ok(())
 }
@@ -171,13 +171,13 @@ pub(super) fn lower_parts(
         match part {
             Part::Text(value) => {
                 let (off, len) = literals.intern(value)?;
-                code.push(schema::OP_OUT_SLICE);
+                code.push(schema::Opcode::OutSlice as u8);
                 code.extend_from_slice(&off.to_le_bytes());
                 code.extend_from_slice(&len.to_le_bytes());
             }
             Part::Literal(value) => {
                 let (off, len) = literals.intern(value)?;
-                code.push(schema::OP_OUT_EXPR);
+                code.push(schema::Opcode::OutExpr as u8);
                 code.extend_from_slice(&off.to_le_bytes());
                 code.extend_from_slice(&len.to_le_bytes());
             }
@@ -185,7 +185,7 @@ pub(super) fn lower_parts(
                 let str_id = *string_map
                     .get(name)
                     .ok_or(CompileError::internal("missing interned variable"))?;
-                code.push(schema::OP_OUT_ARG);
+                code.push(schema::Opcode::OutArg as u8);
                 code.extend_from_slice(&str_id.to_le_bytes());
             }
             Part::Call(CallExpr { operand, func, .. }) => {
@@ -200,30 +200,30 @@ pub(super) fn lower_parts(
                     let key_str_id = *string_map
                         .get(key)
                         .ok_or(CompileError::internal("missing interned string"))?;
-                    code.push(schema::OP_PUSH_CONST);
+                    code.push(schema::Opcode::PushConst as u8);
                     code.extend_from_slice(&key_str_id.to_le_bytes());
                     let var_str_id = *string_map
                         .get(value)
                         .ok_or(CompileError::internal("missing interned variable"))?;
-                    code.push(schema::OP_LOAD_ARG);
+                    code.push(schema::Opcode::LoadArg as u8);
                     code.extend_from_slice(&var_str_id.to_le_bytes());
                 }
                 emit_expr_fallback(part, string_map, code)?;
-                code.push(schema::OP_CALL_FUNC);
+                code.push(schema::Opcode::CallFunc as u8);
                 code.extend_from_slice(&fn_id.to_le_bytes());
                 code.push(1);
                 code.push(
                     u8::try_from(dynamic_options.len())
                         .map_err(|_| CompileError::size_overflow("option count"))?,
                 );
-                code.push(schema::OP_OUT_VAL);
+                code.push(schema::Opcode::OutVal as u8);
             }
             Part::MarkupOpen { name, options } => {
                 emit_markup_options(options, string_map, code)?;
                 let name_str_id = *string_map
                     .get(name)
                     .ok_or(CompileError::internal("missing interned markup name"))?;
-                code.push(schema::OP_MARKUP_OPEN);
+                code.push(schema::Opcode::MarkupOpen as u8);
                 code.extend_from_slice(&name_str_id.to_le_bytes());
                 code.push(
                     u8::try_from(options.len())
@@ -235,7 +235,7 @@ pub(super) fn lower_parts(
                 let name_str_id = *string_map
                     .get(name)
                     .ok_or(CompileError::internal("missing interned markup name"))?;
-                code.push(schema::OP_MARKUP_CLOSE);
+                code.push(schema::Opcode::MarkupClose as u8);
                 code.extend_from_slice(&name_str_id.to_le_bytes());
                 code.push(
                     u8::try_from(options.len())
@@ -260,21 +260,21 @@ fn emit_markup_options(
         let key_str_id = *string_map
             .get(&option.key)
             .ok_or(CompileError::internal("missing interned string"))?;
-        code.push(schema::OP_PUSH_CONST);
+        code.push(schema::Opcode::PushConst as u8);
         code.extend_from_slice(&key_str_id.to_le_bytes());
         match &option.value {
             FunctionOptionValue::Literal(value) => {
                 let value_str_id = *string_map
                     .get(value)
                     .ok_or(CompileError::internal("missing interned string"))?;
-                code.push(schema::OP_PUSH_CONST);
+                code.push(schema::Opcode::PushConst as u8);
                 code.extend_from_slice(&value_str_id.to_le_bytes());
             }
             FunctionOptionValue::Var(var) => {
                 let var_str_id = *string_map
                     .get(var)
                     .ok_or(CompileError::internal("missing interned variable"))?;
-                code.push(schema::OP_LOAD_ARG);
+                code.push(schema::Opcode::LoadArg as u8);
                 code.extend_from_slice(&var_str_id.to_le_bytes());
             }
         }
@@ -296,14 +296,14 @@ fn lower_select(
         let key_str_id = *string_map
             .get(&arm.key)
             .ok_or(CompileError::internal("missing interned string"))?;
-        code.push(schema::OP_CASE_STR);
+        code.push(schema::Opcode::CaseStr as u8);
         code.extend_from_slice(&key_str_id.to_le_bytes());
         let rel_pos = code.len();
         code.extend_from_slice(&0_i32.to_le_bytes());
         dispatch_patches.push((rel_pos, arm_idx));
     }
 
-    code.push(schema::OP_CASE_DEFAULT);
+    code.push(schema::Opcode::CaseDefault as u8);
     let default_rel_pos = code.len();
     code.extend_from_slice(&0_i32.to_le_bytes());
 
@@ -314,7 +314,7 @@ fn lower_select(
         arm_starts[arm_idx] = u32::try_from(code.len())
             .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
         lower_parts(&arm.parts, string_map, func_map, literals, code)?;
-        code.push(schema::OP_JMP);
+        code.push(schema::Opcode::Jmp as u8);
         let rel_pos = code.len();
         code.extend_from_slice(&0_i32.to_le_bytes());
         end_jump_patch_positions.push(rel_pos);
@@ -325,7 +325,7 @@ fn lower_select(
     lower_parts(&select.default, string_map, func_map, literals, code)?;
     let end_pc = u32::try_from(code.len())
         .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
-    code.push(schema::OP_SELECT_END);
+    code.push(schema::Opcode::SelectEnd as u8);
 
     for (rel_pos, arm_idx) in dispatch_patches {
         patch_rel32(code, rel_pos, arm_starts[arm_idx])?;
@@ -349,7 +349,7 @@ fn emit_selector_start(
             let str_id = *string_map
                 .get(name)
                 .ok_or(CompileError::internal("missing interned variable"))?;
-            code.push(schema::OP_SELECT_ARG);
+            code.push(schema::Opcode::SelectArg as u8);
             code.extend_from_slice(&str_id.to_le_bytes());
             Ok(())
         }
@@ -360,13 +360,13 @@ fn emit_selector_start(
             let str_id = *string_map
                 .get(name)
                 .ok_or(CompileError::internal("missing interned variable"))?;
-            code.push(schema::OP_SELECT_ARG);
+            code.push(schema::Opcode::SelectArg as u8);
             code.extend_from_slice(&str_id.to_le_bytes());
             Ok(())
         }
         _ => {
             lower_selector(selector, string_map, func_map, code)?;
-            code.push(schema::OP_SELECT_BEGIN);
+            code.push(schema::Opcode::SelectBegin as u8);
             Ok(())
         }
     }
@@ -398,16 +398,16 @@ fn lower_selector(
                 let key_str_id = *string_map
                     .get(key)
                     .ok_or(CompileError::internal("missing interned string"))?;
-                code.push(schema::OP_PUSH_CONST);
+                code.push(schema::Opcode::PushConst as u8);
                 code.extend_from_slice(&key_str_id.to_le_bytes());
                 let value_var_str_id = *string_map
                     .get(value)
                     .ok_or(CompileError::internal("missing interned variable"))?;
-                code.push(schema::OP_LOAD_ARG);
+                code.push(schema::Opcode::LoadArg as u8);
                 code.extend_from_slice(&value_var_str_id.to_le_bytes());
             }
-            // No OP_EXPR_FALLBACK for selectors — errors abort.
-            code.push(schema::OP_CALL_SELECT);
+            // No ExprFallback for selectors — errors abort.
+            code.push(schema::Opcode::CallSelect as u8);
             code.extend_from_slice(&fn_id.to_le_bytes());
             code.push(1);
             code.push(
@@ -417,7 +417,7 @@ fn lower_selector(
             Ok(())
         }
         SelectorExpr::Literal(value) => {
-            code.push(schema::OP_PUSH_CONST);
+            code.push(schema::Opcode::PushConst as u8);
             let value_str_id = *string_map
                 .get(value)
                 .ok_or(CompileError::internal("missing interned string"))?;
@@ -437,14 +437,14 @@ fn emit_operand(
             let var_str_id = *string_map
                 .get(var)
                 .ok_or(CompileError::internal("missing interned variable"))?;
-            code.push(schema::OP_LOAD_ARG);
+            code.push(schema::Opcode::LoadArg as u8);
             code.extend_from_slice(&var_str_id.to_le_bytes());
         }
         Operand::Literal { value, .. } => {
             let value_str_id = *string_map
                 .get(value)
                 .ok_or(CompileError::internal("missing interned string"))?;
-            code.push(schema::OP_PUSH_CONST);
+            code.push(schema::Opcode::PushConst as u8);
             code.extend_from_slice(&value_str_id.to_le_bytes());
         }
     }

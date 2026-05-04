@@ -14,17 +14,12 @@ use core::str;
 
 use crate::{
     catalog::{Catalog, read_i32},
-    error::{CatalogError, FormatError, HostCallError, Trap},
+    error::{FormatError, HostCallError, Trap},
     schema::decode_opcode_and_next_pc,
     value::{Args, StrId, Value},
 };
 
-pub use crate::schema::{
-    Decoded, FlowKind, OP_CALL_FUNC, OP_CALL_SELECT, OP_CASE_DEFAULT, OP_CASE_STR,
-    OP_EXPR_FALLBACK, OP_HALT, OP_JMP, OP_JMP_IF_FALSE, OP_LOAD_ARG, OP_MARKUP_CLOSE,
-    OP_MARKUP_OPEN, OP_OUT_ARG, OP_OUT_EXPR, OP_OUT_LIT, OP_OUT_SLICE, OP_OUT_VAL, OP_PUSH_CONST,
-    OP_SELECT_ARG, OP_SELECT_BEGIN, OP_SELECT_END, decode,
-};
+pub use crate::schema::{Decoded, FlowKind, Opcode, decode};
 
 /// Resolved message handle for repeated formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +39,7 @@ impl MessageHandle {
 
 /// Host callback interface for function calls.
 ///
-/// Implement this trait to provide function behavior for `OP_CALL_FUNC`.
+/// Implement this trait to provide function behavior for [`Opcode::CallFunc`].
 /// The VM also consults [`Host::format_default`] for plain interpolation output.
 pub trait Host {
     /// Catalog-specific data computed once and reused across format calls.
@@ -395,31 +390,35 @@ where
         let (base, opcode, next_pc) = decode_opcode_and_next_pc(code, pc)?;
 
         match opcode {
-            OP_HALT => break,
-            OP_JMP => {
+            Opcode::Halt => break,
+            Opcode::Jmp => {
                 pc = apply_rel_jump(pc, next_pc, read_i32(code, base + 1)?)?;
                 continue;
             }
-            OP_JMP_IF_FALSE => {
+            Opcode::JmpIfFalse => {
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
                 if is_falsey(&value, catalog) {
                     pc = apply_rel_jump(pc, next_pc, read_i32(code, base + 1)?)?;
                     continue;
                 }
             }
-            OP_PUSH_CONST => {
+            Opcode::PushConst => {
                 let id = read_u32(code, base + 1)?;
                 if catalog.pool_string_len_opt(id).is_none() {
                     return Err(FormatError::Trap(Trap::InvalidConstStringId));
                 }
                 stack.push(Value::StrRef(id));
             }
-            OP_LOAD_ARG => {
+            Opcode::LoadArg => {
                 let id = read_u32(code, base + 1)?;
                 let value = load_arg_value(args, catalog, id, &mut expr_state);
                 stack.push(value);
             }
-            OP_OUT_LIT | OP_OUT_SLICE | OP_OUT_EXPR | OP_OUT_VAL | OP_OUT_ARG => {
+            Opcode::OutLit
+            | Opcode::OutSlice
+            | Opcode::OutExpr
+            | Opcode::OutVal
+            | Opcode::OutArg => {
                 handle_output_instruction(
                     sink,
                     host,
@@ -432,7 +431,11 @@ where
                     base,
                 )?;
             }
-            OP_SELECT_ARG | OP_SELECT_BEGIN | OP_CASE_STR | OP_CASE_DEFAULT | OP_SELECT_END => {
+            Opcode::SelectArg
+            | Opcode::SelectBegin
+            | Opcode::CaseStr
+            | Opcode::CaseDefault
+            | Opcode::SelectEnd => {
                 if let Some(jump_pc) = handle_select_instruction(
                     args,
                     stack,
@@ -449,10 +452,10 @@ where
                     continue;
                 }
             }
-            OP_EXPR_FALLBACK => {
+            Opcode::ExprFallback => {
                 expr_state.set_fallback(read_u32(code, base + 1)?);
             }
-            OP_CALL_FUNC | OP_CALL_SELECT => {
+            Opcode::CallFunc | Opcode::CallSelect => {
                 handle_call_opcode(
                     host,
                     index,
@@ -467,10 +470,9 @@ where
                     &mut expr_state,
                 )?;
             }
-            OP_MARKUP_OPEN | OP_MARKUP_CLOSE => {
+            Opcode::MarkupOpen | Opcode::MarkupClose => {
                 handle_markup_instruction(sink, stack, catalog, opcode, base, code, call_options)?;
             }
-            _ => return Err(CatalogError::UnknownOpcode { pc, opcode }.into()),
         }
 
         pc = next_pc;
@@ -493,32 +495,32 @@ fn handle_output_instruction<H: Host, S>(
     catalog: &Catalog,
     args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
-    opcode: u8,
+    opcode: Opcode,
     base: usize,
 ) -> Result<(), FormatError>
 where
     S: FormatSink + ?Sized,
 {
     match opcode {
-        OP_OUT_LIT => {
+        Opcode::OutLit => {
             let id = read_u32(catalog.code(), base + 1)?;
             emit_pool_literal(sink, catalog, id);
         }
-        OP_OUT_SLICE => {
+        Opcode::OutSlice => {
             let off = read_u32(catalog.code(), base + 1)?;
             let len = read_u32(catalog.code(), base + 5)?;
             emit_literal_slice(sink, catalog, off, len);
         }
-        OP_OUT_EXPR => {
+        Opcode::OutExpr => {
             let off = read_u32(catalog.code(), base + 1)?;
             let len = read_u32(catalog.code(), base + 5)?;
             emit_expr_literal_slice(sink, catalog, off, len);
         }
-        OP_OUT_VAL => {
+        Opcode::OutVal => {
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
             emit_output_value(sink, host, index, catalog, &value);
         }
-        OP_OUT_ARG => {
+        Opcode::OutArg => {
             let key_id = read_u32(catalog.code(), base + 1)?;
             emit_arg_direct_or_fallback(sink, catalog, host, index, args, key_id, diagnostics);
         }
@@ -534,23 +536,23 @@ fn handle_select_instruction<'a>(
     selector: &mut Option<SelectorValue<'a>>,
     catalog: &'a Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
-    opcode: u8,
+    opcode: Opcode,
     pc: u32,
     next_pc: u32,
     base: usize,
     code: &[u8],
 ) -> Result<Option<u32>, FormatError> {
     match opcode {
-        OP_SELECT_ARG => {
+        Opcode::SelectArg => {
             let key_id = read_u32(code, base + 1)?;
             *selector = Some(load_selector_value(args, catalog, key_id, diagnostics));
             Ok(None)
         }
-        OP_SELECT_BEGIN => {
+        Opcode::SelectBegin => {
             *selector = Some(SelectorValue::from_stack(stack)?);
             Ok(None)
         }
-        OP_CASE_STR => {
+        Opcode::CaseStr => {
             let selector = selector
                 .as_ref()
                 .ok_or(FormatError::Trap(Trap::CaseStringWithoutSelector))?;
@@ -562,11 +564,11 @@ fn handle_select_instruction<'a>(
                 Ok(None)
             }
         }
-        OP_CASE_DEFAULT => {
+        Opcode::CaseDefault => {
             let rel = read_i32(code, base + 1)?;
             apply_rel_jump(pc, next_pc, rel).map(Some)
         }
-        OP_SELECT_END => {
+        Opcode::SelectEnd => {
             *selector = None;
             Ok(None)
         }
@@ -671,7 +673,7 @@ fn handle_call_opcode<H: Host>(
     index: &H::CatalogIndex,
     stack: &mut Vec<Value>,
     catalog: &Catalog,
-    opcode: u8,
+    opcode: Opcode,
     base: usize,
     code: &[u8],
     call_args: &mut Vec<Value>,
@@ -702,7 +704,7 @@ fn handle_markup_instruction<S>(
     sink: &mut S,
     stack: &mut Vec<Value>,
     catalog: &Catalog,
-    opcode: u8,
+    opcode: Opcode,
     base: usize,
     code: &[u8],
     call_options: &mut Vec<(u32, Value)>,
@@ -720,7 +722,7 @@ where
         resolve_markup_option_key,
     )?;
 
-    if opcode == OP_MARKUP_OPEN {
+    if opcode == Opcode::MarkupOpen {
         emit_markup_open(sink, catalog, name_str_id, call_options);
     } else {
         emit_markup_close(sink, catalog, name_str_id, call_options);
@@ -732,7 +734,7 @@ where
 fn handle_call_instruction<H: Host>(
     host: &mut H,
     index: &H::CatalogIndex,
-    opcode: u8,
+    opcode: Opcode,
     fn_id: u16,
     call_args: &[Value],
     call_options: &[(u32, Value)],
@@ -746,7 +748,7 @@ fn handle_call_instruction<H: Host>(
     // TR35 §16.
     if expr_state.should_skip_call() {
         let pending_errors = expr_state.take_pending_errors();
-        if opcode == OP_CALL_SELECT {
+        if opcode == Opcode::CallSelect {
             let mut pending_errors = pending_errors.into_iter();
             record_bad_selector(diagnostics, pending_errors.next());
             for error in pending_errors {
@@ -763,7 +765,7 @@ fn handle_call_instruction<H: Host>(
         return Ok(());
     }
 
-    let call_result = if opcode == OP_CALL_SELECT {
+    let call_result = if opcode == Opcode::CallSelect {
         host.call_select(catalog, index, fn_id, call_args, call_options)
     } else {
         host.call(catalog, index, fn_id, call_args, call_options)
@@ -781,7 +783,7 @@ fn handle_call_instruction<H: Host>(
                 HostCallError::UnknownFunction { fn_id } => FormatError::UnknownFunction { fn_id },
                 HostCallError::Function(error) => FormatError::Function(error),
             };
-            if opcode == OP_CALL_SELECT {
+            if opcode == Opcode::CallSelect {
                 record_diagnostic(diagnostics, into_bad_selector(err));
                 expr_state.clear_fallback();
                 expr_state.clear_pending_errors();
@@ -1243,7 +1245,7 @@ mod tests {
         let mut max_fn_id = None;
         while (pc as usize) < code.len() {
             let decoded = decode(code, pc).expect("well-formed test bytecode");
-            if decoded.opcode == OP_CALL_FUNC || decoded.opcode == OP_CALL_SELECT {
+            if decoded.opcode == Opcode::CallFunc || decoded.opcode == Opcode::CallSelect {
                 let fn_id = u16::from_le_bytes([code[pc as usize + 1], code[pc as usize + 2]]);
                 max_fn_id = Some(max_fn_id.map_or(fn_id, |current: u16| current.max(fn_id)));
             }
@@ -1378,7 +1380,7 @@ mod tests {
 
     #[test]
     fn expr_fallback_uses_strref_when_catalog_string_exists() {
-        let catalog = catalog_for_test(&["main", "{$name}"], "", &[OP_HALT]);
+        let catalog = catalog_for_test(&["main", "{$name}"], "", &[Opcode::Halt as u8]);
         let mut stack = Vec::new();
 
         push_expr_fallback(&mut stack, &catalog, Some(1)).expect("fallback");
@@ -1983,7 +1985,7 @@ mod tests {
 
     #[test]
     fn out_expr_produces_same_string_as_out_slice() {
-        // OP_OUT_EXPR uses same encoding as OP_OUT_SLICE
+        // OutExpr uses same encoding as OutSlice
         let code_expr = TestOps::new().out_expr(0, 5).halt().build();
         let code_slice = TestOps::new().out_slice(0, 5).halt().build();
         let catalog_expr = catalog_for_test(&["main"], "Hello", &code_expr);

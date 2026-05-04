@@ -6,6 +6,8 @@
 use alloc::{boxed::Box, string::String};
 use core::{error::Error, fmt};
 
+use crate::schema::Opcode;
+
 /// Errors returned while decoding or verifying catalog bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
@@ -109,7 +111,7 @@ pub enum CatalogError {
         /// Program counter of the offending instruction.
         pc: u32,
         /// Offending opcode.
-        opcode: u8,
+        opcode: Opcode,
     },
     /// Bytecode set an expression fallback without an immediate call to consume it.
     InvalidExprFallbackSequence {
@@ -345,11 +347,7 @@ impl fmt::Display for CatalogError {
                 )
             }
             Self::InvalidSelectSequence { pc, opcode } => {
-                write!(f, "invalid select opcode 0x{opcode:02x}")?;
-                if let Some(name) = crate::schema::opcode_name(*opcode) {
-                    write!(f, " ({name})")?;
-                }
-                write!(f, " sequencing at pc {pc}")
+                write!(f, "invalid select opcode {opcode} sequencing at pc {pc}")
             }
             Self::InvalidExprFallbackSequence { pc } => {
                 write!(
