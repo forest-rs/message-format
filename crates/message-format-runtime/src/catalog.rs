@@ -7,7 +7,11 @@ use alloc::{collections::binary_heap::BinaryHeap, vec, vec::Vec};
 use core::{cmp::Ordering, ops::Range, str};
 
 pub use crate::schema::{FuncEntry, MessageEntry};
-use crate::{error::CatalogError, schema as vm, value::StrId};
+use crate::{
+    error::CatalogError,
+    schema::{self as vm, Opcode},
+    value::StrId,
+};
 
 const MAGIC: [u8; 8] = *b"MFCAT\0\0\x01";
 const VERSION_MAJOR: u16 = 1;
@@ -497,8 +501,8 @@ fn verify_code(
         validate_instruction_operands(code, decoded, string_count, literal_len, func_count)?;
 
         match decoded.opcode {
-            vm::OP_EXPR_FALLBACK if !expr_fallback_pending => expr_fallback_pending = true,
-            vm::OP_CALL_FUNC | vm::OP_CALL_SELECT => expr_fallback_pending = false,
+            Opcode::ExprFallback if !expr_fallback_pending => expr_fallback_pending = true,
+            Opcode::CallFunc | Opcode::CallSelect => expr_fallback_pending = false,
             _ => {
                 if expr_fallback_pending {
                     return Err(CatalogError::InvalidExprFallbackSequence { pc });
@@ -563,30 +567,30 @@ fn validate_instruction_operands(
 ) -> Result<(), CatalogError> {
     let base = decoded.pc as usize;
     match decoded.opcode {
-        vm::OP_PUSH_CONST
-        | vm::OP_LOAD_ARG
-        | vm::OP_OUT_LIT
-        | vm::OP_OUT_ARG
-        | vm::OP_SELECT_ARG
-        | vm::OP_CASE_STR
-        | vm::OP_EXPR_FALLBACK => {
+        Opcode::PushConst
+        | Opcode::LoadArg
+        | Opcode::OutLit
+        | Opcode::OutArg
+        | Opcode::SelectArg
+        | Opcode::CaseStr
+        | Opcode::ExprFallback => {
             let id = read_u32(code, base + 1)?;
             if id as usize >= string_count {
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
-        vm::OP_OUT_SLICE | vm::OP_OUT_EXPR => {
+        Opcode::OutSlice | Opcode::OutExpr => {
             let offset = read_u32(code, base + 1)?;
             let len = read_u32(code, base + 5)?;
             validate_literal_ref(decoded.pc, offset, len, literal_len)?;
         }
-        vm::OP_MARKUP_OPEN | vm::OP_MARKUP_CLOSE => {
+        Opcode::MarkupOpen | Opcode::MarkupClose => {
             let id = read_u32(code, base + 1)?;
             if id as usize >= string_count {
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
-        vm::OP_CALL_FUNC | vm::OP_CALL_SELECT => {
+        Opcode::CallFunc | Opcode::CallSelect => {
             let fn_id = read_u16(code, base + 1)?;
             if usize::from(fn_id) >= func_count {
                 return Err(CatalogError::InvalidFunctionRef {
@@ -619,16 +623,16 @@ fn validate_literal_ref(
 fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
     let base = decoded.pc as usize;
     match decoded.opcode {
-        vm::OP_JMP_IF_FALSE | vm::OP_OUT_VAL | vm::OP_SELECT_BEGIN => (1, 0),
-        vm::OP_PUSH_CONST | vm::OP_LOAD_ARG => (0, 1),
-        vm::OP_OUT_ARG | vm::OP_SELECT_ARG => (0, 0),
-        vm::OP_CALL_FUNC | vm::OP_CALL_SELECT => {
+        Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin => (1, 0),
+        Opcode::PushConst | Opcode::LoadArg => (0, 1),
+        Opcode::OutArg | Opcode::SelectArg => (0, 0),
+        Opcode::CallFunc | Opcode::CallSelect => {
             let arg_count = u32::from(code[base + 3]);
             let optc = u32::from(code[base + 4]);
             let pops = arg_count + optc.saturating_mul(2);
             (pops, 1)
         }
-        vm::OP_MARKUP_OPEN | vm::OP_MARKUP_CLOSE => {
+        Opcode::MarkupOpen | Opcode::MarkupClose => {
             let optc = u32::from(code[base + 5]);
             let pops = optc.saturating_mul(2);
             (pops, 0)
@@ -797,7 +801,7 @@ impl AbstractExecutionVerifier {
 
 fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<(), CatalogError> {
     match decoded.opcode {
-        vm::OP_SELECT_ARG | vm::OP_SELECT_BEGIN => {
+        Opcode::SelectArg | Opcode::SelectBegin => {
             *select_depth =
                 select_depth
                     .checked_add(1)
@@ -806,13 +810,13 @@ fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<()
                         opcode: decoded.opcode,
                     })?;
         }
-        vm::OP_CASE_STR | vm::OP_CASE_DEFAULT if *select_depth == 0 => {
+        Opcode::CaseStr | Opcode::CaseDefault if *select_depth == 0 => {
             return Err(CatalogError::InvalidSelectSequence {
                 pc: decoded.pc,
                 opcode: decoded.opcode,
             });
         }
-        vm::OP_SELECT_END => {
+        Opcode::SelectEnd => {
             *select_depth =
                 select_depth
                     .checked_sub(1)
@@ -983,8 +987,8 @@ mod tests {
     use core::mem::size_of;
 
     use super::*;
+    use crate::schema::Opcode;
     use crate::schema::TestOps;
-    use crate::vm::{OP_CASE_STR, OP_HALT, OP_JMP};
 
     fn chunk_entry_offset(index: usize) -> usize {
         HEADER_LEN + (index * CHUNK_ENTRY_LEN)
@@ -1010,7 +1014,7 @@ mod tests {
 
     #[test]
     fn unsupported_version_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1027,7 +1031,7 @@ mod tests {
 
     #[test]
     fn missing_required_chunk_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1060,7 +1064,7 @@ mod tests {
 
     #[test]
     fn overlapping_chunks_fail_verification() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1079,7 +1083,7 @@ mod tests {
 
     #[test]
     fn duplicate_required_chunk_fails_verification() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1096,7 +1100,7 @@ mod tests {
 
     #[test]
     fn truncated_code_chunk_fails_decode() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1114,7 +1118,7 @@ mod tests {
 
     #[test]
     fn invalid_utf8_string_table_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "",
@@ -1133,7 +1137,7 @@ mod tests {
 
     #[test]
     fn invalid_utf8_literals_table_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let mut bytes = build_catalog(
             &["main"],
             "ok",
@@ -1151,7 +1155,7 @@ mod tests {
 
     #[test]
     fn invalid_message_name_ref_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1170,7 +1174,7 @@ mod tests {
 
     #[test]
     fn unsorted_message_table_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog(
             &["main", "z", "a"],
             "",
@@ -1317,7 +1321,7 @@ mod tests {
             err,
             CatalogError::InvalidSelectSequence {
                 pc: 0,
-                opcode: OP_CASE_STR
+                opcode: Opcode::CaseStr
             }
         );
     }
@@ -1343,7 +1347,7 @@ mod tests {
             err,
             CatalogError::InvalidSelectSequence {
                 pc: 14,
-                opcode: OP_HALT,
+                opcode: Opcode::Halt,
             }
         );
     }
@@ -1407,7 +1411,7 @@ mod tests {
 
     #[test]
     fn func_chunk_round_trip() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let funcs = [
             FuncEntry {
                 name_str_id: 1,
@@ -1445,7 +1449,7 @@ mod tests {
 
     #[test]
     fn invalid_function_name_ref_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog_with_funcs(
             &["main"],
             "",
@@ -1468,7 +1472,7 @@ mod tests {
 
     #[test]
     fn invalid_function_option_refs_are_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog_with_funcs(
             &["main", "number"],
             "",
@@ -1491,7 +1495,7 @@ mod tests {
 
     #[test]
     fn invalid_function_option_value_ref_is_rejected() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog_with_funcs(
             &["main", "number", "style"],
             "",
@@ -1514,7 +1518,7 @@ mod tests {
 
     #[test]
     fn catalog_without_func_chunk_has_empty_funcs() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1531,7 +1535,7 @@ mod tests {
 
     #[test]
     fn unknown_chunk_tag_is_ignored() {
-        let code = [OP_HALT];
+        let code = [Opcode::Halt as u8];
         let bytes = build_catalog(
             &["main"],
             "",
@@ -1629,10 +1633,10 @@ mod tests {
     /// would see pc 0 as already-visited (from `main`) and report `UnterminatedEntry`.
     #[test]
     fn halts_reachable_buffer_is_reset_between_messages() {
-        // pc 0:  OP_HALT          (entry: "main")
-        // pc 1:  OP_JMP rel=-6    (entry: "msg_b")  next_pc=6,  target=0
-        // pc 6:  OP_JMP rel=-11   (entry: "msg_c")  next_pc=11, target=0
-        // pc 11: OP_HALT          (trailing sentinel so the code ends in HALT)
+        // pc 0:  HALT          (entry: "main")
+        // pc 1:  JMP rel=-6    (entry: "msg_b")  next_pc=6,  target=0
+        // pc 6:  JMP rel=-11   (entry: "msg_c")  next_pc=11, target=0
+        // pc 11: HALT          (trailing sentinel so the code ends in HALT)
         let code = TestOps::new()
             .halt()
             .jmp_rel(-6)
@@ -1721,7 +1725,7 @@ mod tests {
         let mut code = Vec::with_capacity(blocks_len + dispatchers_len + 1);
 
         for i in 0..BACKJUMPS {
-            code.push(OP_JMP);
+            code.push(Opcode::Jmp as u8);
             let next_pc = i64::try_from(i * JMP_LEN + JMP_LEN).expect("pc fits in i64");
             let target = if i + 1 == BACKJUMPS {
                 i64::from(halt_pc)
@@ -1733,7 +1737,7 @@ mod tests {
         }
 
         for i in 0..BACKJUMPS {
-            code.push(OP_JMP);
+            code.push(Opcode::Jmp as u8);
             let pc = blocks_len + i * JMP_LEN;
             let next_pc = i64::try_from(pc + JMP_LEN).expect("pc fits in i64");
             let target = i64::try_from(i * JMP_LEN).expect("target fits in i64");
@@ -1741,7 +1745,7 @@ mod tests {
             code.extend_from_slice(&rel.to_le_bytes());
         }
 
-        code.push(OP_HALT);
+        code.push(Opcode::Halt as u8);
 
         let bytes = build_catalog(
             &["main"],

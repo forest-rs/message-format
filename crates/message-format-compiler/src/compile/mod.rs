@@ -873,7 +873,7 @@ fn encode_messages(
             &mut literals,
             &mut code,
         )?;
-        code.push(schema::OP_HALT);
+        code.push(schema::Opcode::Halt as u8);
     }
     sort_messages(&mut entries);
 

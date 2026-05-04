@@ -14,6 +14,7 @@
 //! verifier and VM interpret the same schema when loading and executing them.
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::{
     catalog::{read_i32, read_i32_unchecked},
@@ -38,52 +39,123 @@ pub struct FuncEntry {
     pub static_options: Vec<(u32, u32)>,
 }
 
-/// Stop execution.
-pub const OP_HALT: u8 = 0x00;
-/// Relative unconditional jump.
-pub const OP_JMP: u8 = 0x01;
-/// Relative jump when popped value is falsey.
-pub const OP_JMP_IF_FALSE: u8 = 0x02;
-/// Push constant from pool (reserved for next milestone).
-pub const OP_PUSH_CONST: u8 = 0x10;
-/// Load argument by string-pool id.
-pub const OP_LOAD_ARG: u8 = 0x11;
-/// Output pool string by id.
-pub const OP_OUT_LIT: u8 = 0x20;
-/// Output literal slice by offset and length.
-pub const OP_OUT_SLICE: u8 = 0x21;
-/// Pop and output runtime value.
-pub const OP_OUT_VAL: u8 = 0x22;
-/// Output literal expression slice by offset and length (sink: expression event).
-pub const OP_OUT_EXPR: u8 = 0x23;
-/// Output one argument directly by string-pool id.
-pub const OP_OUT_ARG: u8 = 0x24;
-/// Load one selector argument directly by string-pool id.
-pub const OP_SELECT_ARG: u8 = 0x25;
-/// Begin select dispatch.
-pub const OP_SELECT_BEGIN: u8 = 0x30;
-/// Case compare against string-pool id.
-pub const OP_CASE_STR: u8 = 0x31;
-/// Default case jump.
-pub const OP_CASE_DEFAULT: u8 = 0x32;
-/// End select dispatch.
-pub const OP_SELECT_END: u8 = 0x33;
-/// Host function call.
-pub const OP_CALL_FUNC: u8 = 0x40;
-/// Set expression fallback string for error recovery.
-pub const OP_EXPR_FALLBACK: u8 = 0x41;
-/// Host function call for selection (zero-allocation fast path).
-pub const OP_CALL_SELECT: u8 = 0x42;
-/// Markup open tag with name and options.
-pub const OP_MARKUP_OPEN: u8 = 0x50;
-/// Markup close tag with name and options.
-pub const OP_MARKUP_CLOSE: u8 = 0x51;
+/// Bytecode opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum Opcode {
+    /// Stop execution.
+    Halt = 0x00,
+    /// Relative unconditional jump.
+    Jmp = 0x01,
+    /// Relative jump when popped value is falsey.
+    JmpIfFalse = 0x02,
+    /// Push constant from pool.
+    PushConst = 0x10,
+    /// Load argument by string-pool id.
+    LoadArg = 0x11,
+    /// Output pool string by id.
+    OutLit = 0x20,
+    /// Output literal slice by offset and length.
+    OutSlice = 0x21,
+    /// Pop and output runtime value.
+    OutVal = 0x22,
+    /// Output literal expression slice by offset and length (sink: expression event).
+    OutExpr = 0x23,
+    /// Output one argument directly by string-pool id.
+    OutArg = 0x24,
+    /// Load one selector argument directly by string-pool id.
+    SelectArg = 0x25,
+    /// Begin select dispatch.
+    SelectBegin = 0x30,
+    /// Case compare against string-pool id.
+    CaseStr = 0x31,
+    /// Default case jump.
+    CaseDefault = 0x32,
+    /// End select dispatch.
+    SelectEnd = 0x33,
+    /// Host function call.
+    CallFunc = 0x40,
+    /// Set expression fallback string for error recovery.
+    ExprFallback = 0x41,
+    /// Host function call for selection (zero-allocation fast path).
+    CallSelect = 0x42,
+    /// Markup open tag with name and options.
+    MarkupOpen = 0x50,
+    /// Markup close tag with name and options.
+    MarkupClose = 0x51,
+}
+
+impl Opcode {
+    /// Instruction width in bytes (opcode byte + operands).
+    #[must_use]
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::Halt => 1,
+            Self::Jmp => 5,
+            Self::JmpIfFalse => 5,
+            Self::PushConst => 5,
+            Self::LoadArg => 5,
+            Self::OutLit => 5,
+            Self::OutSlice => 9,
+            Self::OutVal => 1,
+            Self::OutExpr => 9,
+            Self::OutArg => 5,
+            Self::SelectArg => 5,
+            Self::SelectBegin => 1,
+            Self::CaseStr => 9,
+            Self::CaseDefault => 5,
+            Self::SelectEnd => 1,
+            Self::CallFunc => 5,
+            Self::ExprFallback => 5,
+            Self::CallSelect => 5,
+            Self::MarkupOpen => 6,
+            Self::MarkupClose => 6,
+        }
+    }
+}
+
+impl TryFrom<u8> for Opcode {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            0x00 => Ok(Self::Halt),
+            0x01 => Ok(Self::Jmp),
+            0x02 => Ok(Self::JmpIfFalse),
+            0x10 => Ok(Self::PushConst),
+            0x11 => Ok(Self::LoadArg),
+            0x20 => Ok(Self::OutLit),
+            0x21 => Ok(Self::OutSlice),
+            0x22 => Ok(Self::OutVal),
+            0x23 => Ok(Self::OutExpr),
+            0x24 => Ok(Self::OutArg),
+            0x25 => Ok(Self::SelectArg),
+            0x30 => Ok(Self::SelectBegin),
+            0x31 => Ok(Self::CaseStr),
+            0x32 => Ok(Self::CaseDefault),
+            0x33 => Ok(Self::SelectEnd),
+            0x40 => Ok(Self::CallFunc),
+            0x41 => Ok(Self::ExprFallback),
+            0x42 => Ok(Self::CallSelect),
+            0x50 => Ok(Self::MarkupOpen),
+            0x51 => Ok(Self::MarkupClose),
+            other => Err(other),
+        }
+    }
+}
+
+impl fmt::Display for Opcode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?} (0x{:02x})", *self as u8)
+    }
+}
 
 /// Decoded instruction metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Decoded {
-    /// Opcode byte.
-    pub opcode: u8,
+    /// Opcode.
+    pub opcode: Opcode,
     /// Program counter of this instruction.
     pub pc: u32,
     /// Program counter of next linear instruction.
@@ -103,9 +175,9 @@ impl Decoded {
     #[must_use]
     pub fn flow_kind(self) -> FlowKind {
         match self.opcode {
-            OP_HALT => FlowKind::Stop,
-            OP_JMP | OP_CASE_DEFAULT => FlowKind::JumpOnly,
-            OP_JMP_IF_FALSE | OP_CASE_STR => FlowKind::Conditional,
+            Opcode::Halt => FlowKind::Stop,
+            Opcode::Jmp | Opcode::CaseDefault => FlowKind::JumpOnly,
+            Opcode::JmpIfFalse | Opcode::CaseStr => FlowKind::Conditional,
             _ => FlowKind::Linear,
         }
     }
@@ -129,8 +201,10 @@ pub fn decode(code: &[u8], pc: u32) -> Result<Decoded, CatalogError> {
     let (pc_usize, opcode, next_pc) = decode_opcode_and_next_pc(code, pc)?;
 
     let rel32 = match opcode {
-        OP_JMP | OP_JMP_IF_FALSE | OP_CASE_DEFAULT => Some(read_i32(code, pc_usize + 1)?),
-        OP_CASE_STR => Some(read_i32(code, pc_usize + 5)?),
+        Opcode::Jmp | Opcode::JmpIfFalse | Opcode::CaseDefault => {
+            Some(read_i32(code, pc_usize + 1)?)
+        }
+        Opcode::CaseStr => Some(read_i32(code, pc_usize + 5)?),
         _ => None,
     };
 
@@ -145,12 +219,14 @@ pub fn decode(code: &[u8], pc: u32) -> Result<Decoded, CatalogError> {
 pub(crate) fn decode_opcode_and_next_pc(
     code: &[u8],
     pc: u32,
-) -> Result<(usize, u8, u32), CatalogError> {
+) -> Result<(usize, Opcode, u32), CatalogError> {
     let pc_usize = usize::try_from(pc).map_err(|_| CatalogError::TruncatedInstruction { pc })?;
-    let opcode = *code
+    let raw = *code
         .get(pc_usize)
         .ok_or(CatalogError::TruncatedInstruction { pc })?;
-    let len = opcode_len(opcode).ok_or(CatalogError::UnknownOpcode { pc, opcode })?;
+    let opcode =
+        Opcode::try_from(raw).map_err(|opcode| CatalogError::UnknownOpcode { pc, opcode })?;
+    let len = opcode.bytes();
     let len_u32 = u32::try_from(len).map_err(|_| CatalogError::TruncatedInstruction { pc })?;
     let next_pc = pc
         .checked_add(len_u32)
@@ -167,19 +243,19 @@ pub(crate) fn decode_opcode_and_next_pc(
 /// Assumptions shared with [`decode_opcode_and_next_pc`]:
 /// - `usize::try_from(pc).is_ok()`
 /// - `pc < code.len()`
-/// - valid opcode ([`opcode_len`] returns `Some`)
-/// - `pc + opcode_len(opcode)` does not overflow `u32`
+/// - valid opcode ([`Opcode::try_from`] returns `Ok`)
+/// - `pc + opcode.bytes()` does not overflow `u32`
 ///
 /// Also assumes:
-/// - `pc + opcode_len(opcode) < code.len()`
+/// - `pc + opcode.len() < code.len()`
 pub(crate) unsafe fn decode_unchecked(code: &[u8], pc: u32) -> Decoded {
     let (pc_usize, opcode, next_pc) = unsafe { decode_opcode_and_next_pc_unchecked(code, pc) };
 
     let rel32 = match opcode {
-        OP_JMP | OP_JMP_IF_FALSE | OP_CASE_DEFAULT => {
+        Opcode::Jmp | Opcode::JmpIfFalse | Opcode::CaseDefault => {
             Some(unsafe { read_i32_unchecked(code, pc_usize + 1) })
         }
-        OP_CASE_STR => Some(unsafe { read_i32_unchecked(code, pc_usize + 5) }),
+        Opcode::CaseStr => Some(unsafe { read_i32_unchecked(code, pc_usize + 5) }),
         _ => None,
     };
 
@@ -197,68 +273,20 @@ pub(crate) unsafe fn decode_unchecked(code: &[u8], pc: u32) -> Decoded {
 /// Assumes:
 /// - `usize::try_from(pc).is_ok()`
 /// - `pc < code.len()`
-/// - valid opcode ([`opcode_len`] returns `Some`)
-/// - `pc + opcode_len(opcode)` does not overflow `u32`
-pub(crate) unsafe fn decode_opcode_and_next_pc_unchecked(code: &[u8], pc: u32) -> (usize, u8, u32) {
+/// - valid opcode ([`Opcode::try_from`] returns `Ok`)
+/// - `pc + opcode.bytes()` does not overflow `u32`
+pub(crate) unsafe fn decode_opcode_and_next_pc_unchecked(
+    code: &[u8],
+    pc: u32,
+) -> (usize, Opcode, u32) {
     let pc_usize = pc as usize;
-    let opcode = *unsafe { code.get_unchecked(pc_usize) };
-    let len = unsafe { opcode_len(opcode).unwrap_unchecked() };
+    let raw = *unsafe { code.get_unchecked(pc_usize) };
+    let opcode = unsafe { Opcode::try_from(raw).unwrap_unchecked() };
+    let len = opcode.bytes();
     #[expect(clippy::cast_possible_truncation, reason = "unchecked")]
     let len_u32 = len as u32;
     let next_pc = pc + len_u32;
     (pc_usize, opcode, next_pc)
-}
-
-fn opcode_len(opcode: u8) -> Option<usize> {
-    Some(match opcode {
-        OP_HALT => 1,
-        OP_JMP => 5,
-        OP_JMP_IF_FALSE => 5,
-        OP_PUSH_CONST => 5,
-        OP_LOAD_ARG => 5,
-        OP_OUT_LIT => 5,
-        OP_OUT_SLICE => 9,
-        OP_OUT_VAL => 1,
-        OP_OUT_ARG => 5,
-        OP_SELECT_BEGIN => 1,
-        OP_CASE_STR => 9,
-        OP_CASE_DEFAULT => 5,
-        OP_SELECT_END => 1,
-        OP_CALL_FUNC => 5,
-        OP_EXPR_FALLBACK => 5,
-        OP_CALL_SELECT => 5,
-        OP_OUT_EXPR => 9,
-        OP_SELECT_ARG => 5,
-        OP_MARKUP_OPEN => 6,
-        OP_MARKUP_CLOSE => 6,
-        _ => return None,
-    })
-}
-
-pub(crate) fn opcode_name(opcode: u8) -> Option<&'static str> {
-    Some(match opcode {
-        OP_HALT => "HALT",
-        OP_JMP => "JMP",
-        OP_JMP_IF_FALSE => "JMP_IF_FALSE",
-        OP_PUSH_CONST => "PUSH_CONST",
-        OP_LOAD_ARG => "LOAD_ARG",
-        OP_OUT_LIT => "OUT_LIT",
-        OP_OUT_SLICE => "OUT_SLICE",
-        OP_OUT_VAL => "OUT_VAL",
-        OP_OUT_ARG => "OUT_ARG",
-        OP_SELECT_BEGIN => "SELECT_BEGIN",
-        OP_CASE_STR => "CASE_STR",
-        OP_CASE_DEFAULT => "CASE_DEFAULT",
-        OP_SELECT_END => "SELECT_END",
-        OP_CALL_FUNC => "CALL_FUNC",
-        OP_EXPR_FALLBACK => "EXPR_FALLBACK",
-        OP_CALL_SELECT => "CALL_SELECT",
-        OP_OUT_EXPR => "OUT_EXPR",
-        OP_SELECT_ARG => "SELECT_ARG",
-        OP_MARKUP_OPEN => "MARKUP_OPEN",
-        OP_MARKUP_CLOSE => "MARKUP_CLOSE",
-        _ => return None,
-    })
 }
 
 /// Fluent bytecode builder for tests.
@@ -291,59 +319,59 @@ impl TestOps {
     // -- 1-byte instructions --------------------------------------------------
 
     pub fn halt(mut self) -> Self {
-        self.code.push(OP_HALT);
+        self.code.push(Opcode::Halt as u8);
         self
     }
 
     pub fn select_begin(mut self) -> Self {
-        self.code.push(OP_SELECT_BEGIN);
+        self.code.push(Opcode::SelectBegin as u8);
         self
     }
 
     pub fn select_end(mut self) -> Self {
-        self.code.push(OP_SELECT_END);
+        self.code.push(Opcode::SelectEnd as u8);
         self
     }
 
     pub fn out_val(mut self) -> Self {
-        self.code.push(OP_OUT_VAL);
+        self.code.push(Opcode::OutVal as u8);
         self
     }
 
     // -- 5-byte: opcode + u32 -------------------------------------------------
 
     pub fn push_const(mut self, str_id: u32) -> Self {
-        self.code.push(OP_PUSH_CONST);
+        self.code.push(Opcode::PushConst as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
 
     pub fn load_arg(mut self, str_id: u32) -> Self {
-        self.code.push(OP_LOAD_ARG);
+        self.code.push(Opcode::LoadArg as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
 
     pub fn out_lit(mut self, str_id: u32) -> Self {
-        self.code.push(OP_OUT_LIT);
+        self.code.push(Opcode::OutLit as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
 
     pub fn out_arg(mut self, str_id: u32) -> Self {
-        self.code.push(OP_OUT_ARG);
+        self.code.push(Opcode::OutArg as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
 
     pub fn select_arg(mut self, str_id: u32) -> Self {
-        self.code.push(OP_SELECT_ARG);
+        self.code.push(Opcode::SelectArg as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
 
     pub fn expr_fallback(mut self, str_id: u32) -> Self {
-        self.code.push(OP_EXPR_FALLBACK);
+        self.code.push(Opcode::ExprFallback as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self
     }
@@ -351,14 +379,14 @@ impl TestOps {
     // -- 9-byte: opcode + u32 + u32 -------------------------------------------
 
     pub fn out_slice(mut self, offset: u32, len: u32) -> Self {
-        self.code.push(OP_OUT_SLICE);
+        self.code.push(Opcode::OutSlice as u8);
         self.code.extend_from_slice(&offset.to_le_bytes());
         self.code.extend_from_slice(&len.to_le_bytes());
         self
     }
 
     pub fn out_expr(mut self, offset: u32, len: u32) -> Self {
-        self.code.push(OP_OUT_EXPR);
+        self.code.push(Opcode::OutExpr as u8);
         self.code.extend_from_slice(&offset.to_le_bytes());
         self.code.extend_from_slice(&len.to_le_bytes());
         self
@@ -367,7 +395,7 @@ impl TestOps {
     // -- label-based jumps (rel32 resolved in build) --------------------------
 
     pub fn jmp(mut self, label: &'static str) -> Self {
-        self.code.push(OP_JMP);
+        self.code.push(Opcode::Jmp as u8);
         let patch = self.code.len();
         self.code.extend_from_slice(&0_i32.to_le_bytes());
         let next_pc = self.code.len();
@@ -376,7 +404,7 @@ impl TestOps {
     }
 
     pub fn jmp_if_false(mut self, label: &'static str) -> Self {
-        self.code.push(OP_JMP_IF_FALSE);
+        self.code.push(Opcode::JmpIfFalse as u8);
         let patch = self.code.len();
         self.code.extend_from_slice(&0_i32.to_le_bytes());
         let next_pc = self.code.len();
@@ -385,7 +413,7 @@ impl TestOps {
     }
 
     pub fn case_str(mut self, str_id: u32, label: &'static str) -> Self {
-        self.code.push(OP_CASE_STR);
+        self.code.push(Opcode::CaseStr as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         let patch = self.code.len();
         self.code.extend_from_slice(&0_i32.to_le_bytes());
@@ -395,7 +423,7 @@ impl TestOps {
     }
 
     pub fn case_default(mut self, label: &'static str) -> Self {
-        self.code.push(OP_CASE_DEFAULT);
+        self.code.push(Opcode::CaseDefault as u8);
         let patch = self.code.len();
         self.code.extend_from_slice(&0_i32.to_le_bytes());
         let next_pc = self.code.len();
@@ -406,26 +434,26 @@ impl TestOps {
     // -- raw-offset jumps (no label resolution) -------------------------------
 
     pub fn jmp_rel(mut self, rel: i32) -> Self {
-        self.code.push(OP_JMP);
+        self.code.push(Opcode::Jmp as u8);
         self.code.extend_from_slice(&rel.to_le_bytes());
         self
     }
 
     pub fn jmp_if_false_rel(mut self, rel: i32) -> Self {
-        self.code.push(OP_JMP_IF_FALSE);
+        self.code.push(Opcode::JmpIfFalse as u8);
         self.code.extend_from_slice(&rel.to_le_bytes());
         self
     }
 
     pub fn case_str_rel(mut self, str_id: u32, rel: i32) -> Self {
-        self.code.push(OP_CASE_STR);
+        self.code.push(Opcode::CaseStr as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
         self.code.extend_from_slice(&rel.to_le_bytes());
         self
     }
 
     pub fn case_default_rel(mut self, rel: i32) -> Self {
-        self.code.push(OP_CASE_DEFAULT);
+        self.code.push(Opcode::CaseDefault as u8);
         self.code.extend_from_slice(&rel.to_le_bytes());
         self
     }
@@ -433,7 +461,7 @@ impl TestOps {
     // -- function calls: opcode + u16(fn_id) + u8(arg_count) + u8(optc) ------
 
     pub fn call_func(mut self, fn_id: u16, arg_count: u8, optc: u8) -> Self {
-        self.code.push(OP_CALL_FUNC);
+        self.code.push(Opcode::CallFunc as u8);
         self.code.extend_from_slice(&fn_id.to_le_bytes());
         self.code.push(arg_count);
         self.code.push(optc);
@@ -441,7 +469,7 @@ impl TestOps {
     }
 
     pub fn call_select(mut self, fn_id: u16, arg_count: u8, optc: u8) -> Self {
-        self.code.push(OP_CALL_SELECT);
+        self.code.push(Opcode::CallSelect as u8);
         self.code.extend_from_slice(&fn_id.to_le_bytes());
         self.code.push(arg_count);
         self.code.push(optc);
@@ -451,14 +479,14 @@ impl TestOps {
     // -- markup: opcode + u32(name_id) + u8(optc) ----------------------------
 
     pub fn markup_open(mut self, name_id: u32, optc: u8) -> Self {
-        self.code.push(OP_MARKUP_OPEN);
+        self.code.push(Opcode::MarkupOpen as u8);
         self.code.extend_from_slice(&name_id.to_le_bytes());
         self.code.push(optc);
         self
     }
 
     pub fn markup_close(mut self, name_id: u32, optc: u8) -> Self {
-        self.code.push(OP_MARKUP_CLOSE);
+        self.code.push(Opcode::MarkupClose as u8);
         self.code.extend_from_slice(&name_id.to_le_bytes());
         self.code.push(optc);
         self
@@ -509,7 +537,10 @@ mod tests {
     #[test]
     fn simple_bytecode_matches_expected_bytes() {
         let code = TestOps::new().out_arg(1).halt().build();
-        assert_eq!(code, vec![OP_OUT_ARG, 1, 0, 0, 0, OP_HALT]);
+        assert_eq!(
+            code,
+            vec![Opcode::OutArg as u8, 1, 0, 0, 0, Opcode::Halt as u8]
+        );
     }
 
     #[test]
@@ -523,7 +554,19 @@ mod tests {
         // JMP next_pc=5, target=10 → rel=5
         assert_eq!(
             code,
-            vec![OP_JMP, 5, 0, 0, 0, OP_OUT_ARG, 1, 0, 0, 0, OP_HALT]
+            vec![
+                Opcode::Jmp as u8,
+                5,
+                0,
+                0,
+                0,
+                Opcode::OutArg as u8,
+                1,
+                0,
+                0,
+                0,
+                Opcode::Halt as u8,
+            ]
         );
     }
 
@@ -540,17 +583,17 @@ mod tests {
         assert_eq!(
             code,
             vec![
-                OP_LOAD_ARG,
+                Opcode::LoadArg as u8,
                 1,
                 0,
                 0,
                 0,
-                OP_JMP_IF_FALSE,
+                Opcode::JmpIfFalse as u8,
                 rel[0],
                 rel[1],
                 rel[2],
                 rel[3],
-                OP_HALT,
+                Opcode::Halt as u8,
             ]
         );
     }
@@ -571,12 +614,12 @@ mod tests {
     fn select_dispatch_matches_handwritten_bytes() {
         // Reproduce the canonical select pattern from vm.rs tests.
         let handwritten: Vec<u8> = vec![
-            OP_SELECT_ARG,
+            Opcode::SelectArg as u8,
             1,
             0,
             0,
             0,
-            OP_CASE_STR,
+            Opcode::CaseStr as u8,
             2,
             0,
             0,
@@ -585,12 +628,12 @@ mod tests {
             0,
             0,
             0,
-            OP_CASE_DEFAULT,
+            Opcode::CaseDefault as u8,
             14,
             0,
             0,
             0,
-            OP_OUT_SLICE,
+            Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -599,12 +642,12 @@ mod tests {
             0,
             0,
             0,
-            OP_JMP,
+            Opcode::Jmp as u8,
             9,
             0,
             0,
             0,
-            OP_OUT_SLICE,
+            Opcode::OutSlice as u8,
             1,
             0,
             0,
@@ -613,8 +656,8 @@ mod tests {
             0,
             0,
             0,
-            OP_SELECT_END,
-            OP_HALT,
+            Opcode::SelectEnd as u8,
+            Opcode::Halt as u8,
         ];
         let built = TestOps::new()
             .select_arg(1)

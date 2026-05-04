@@ -2107,7 +2107,7 @@ mod tests {
                 name_str_id: string_map["msg"],
                 entry_pc: 0,
             }],
-            &[vm::OP_HALT],
+            &[vm::Opcode::Halt as u8],
             &func_entries,
         );
         let boxed_catalog = Box::new(Catalog::from_bytes(&bytes).expect("valid catalog"));
@@ -2576,7 +2576,7 @@ mod tests {
                 name_str_id: 0,
                 entry_pc: 0,
             }],
-            &[vm::OP_HALT],
+            &[vm::Opcode::Halt as u8],
         );
         let catalog = Catalog::from_bytes(&bytes).expect("catalog");
         let validated =

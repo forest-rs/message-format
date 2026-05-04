@@ -111,7 +111,7 @@ fn message_args<'a>(catalog: &'a Catalog, entries: &[(&str, Value)]) -> MessageA
 fn build_plain_catalog() -> Catalog {
     let strings = ["main", "name"];
     let code = vec![
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -120,12 +120,12 @@ fn build_plain_catalog() -> Catalog {
         0,
         0,
         0, // "Hello, "
-        vm::OP_OUT_ARG,
+        vm::Opcode::OutArg as u8,
         1,
         0,
         0,
         0, // $name
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         7,
         0,
         0,
@@ -134,7 +134,7 @@ fn build_plain_catalog() -> Catalog {
         0,
         0,
         0, // "!"
-        vm::OP_HALT,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog(
         &strings,
@@ -151,12 +151,12 @@ fn build_plain_catalog() -> Catalog {
 fn build_select_catalog() -> Catalog {
     let strings = ["main", "kind", "formal"];
     let code = vec![
-        vm::OP_SELECT_ARG,
+        vm::Opcode::SelectArg as u8,
         1,
         0,
         0,
         0, // selector: $kind
-        vm::OP_CASE_STR,
+        vm::Opcode::CaseStr as u8,
         2,
         0,
         0,
@@ -165,12 +165,12 @@ fn build_select_catalog() -> Catalog {
         0,
         0,
         0, // jump to formal output
-        vm::OP_CASE_DEFAULT,
+        vm::Opcode::CaseDefault as u8,
         0,
         0,
         0,
         0, // jump to default output
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -179,12 +179,12 @@ fn build_select_catalog() -> Catalog {
         0,
         0,
         0, // "Hi"
-        vm::OP_JMP,
+        vm::Opcode::Jmp as u8,
         9,
         0,
         0,
         0, // jump after formal branch
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         2,
         0,
         0,
@@ -193,8 +193,8 @@ fn build_select_catalog() -> Catalog {
         0,
         0,
         0, // "Good evening"
-        vm::OP_SELECT_END,
-        vm::OP_HALT,
+        vm::Opcode::SelectEnd as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog(
         &strings,
@@ -221,18 +221,18 @@ fn build_call_catalog_no_opts() -> Catalog {
         },
     ];
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         1,
         0,
         0,
         0, // arg $name
-        vm::OP_CALL_FUNC,
+        vm::Opcode::CallFunc as u8,
         1,
         0,
         1,
         0, // fn=1 args=1 opts=0
-        vm::OP_OUT_VAL,
-        vm::OP_HALT,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,
@@ -260,38 +260,38 @@ fn build_call_catalog_with_opts() -> Catalog {
         },
     ];
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         1,
         0,
         0,
         0, // arg $name
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         2,
         0,
         0,
         0, // key "style"
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         3,
         0,
         0,
         0, // val "short"
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         4,
         0,
         0,
         0, // key "currency"
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         5,
         0,
         0,
         0, // val "USD"
-        vm::OP_CALL_FUNC,
+        vm::Opcode::CallFunc as u8,
         1,
         0,
         1,
         2, // fn=1 args=1 opts=2
-        vm::OP_OUT_VAL,
-        vm::OP_HALT,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,
@@ -312,12 +312,12 @@ fn build_many_segments_catalog() -> Catalog {
     // Build a larger output with alternating literal slices and runtime value.
     for i in 0_u32..24_u32 {
         let lit_off = i * 2;
-        code.push(vm::OP_OUT_SLICE);
+        code.push(vm::Opcode::OutSlice as u8);
         code.extend_from_slice(&lit_off.to_le_bytes());
         code.extend_from_slice(&2_u32.to_le_bytes());
-        code.extend_from_slice(&[vm::OP_OUT_ARG, 1, 0, 0, 0]);
+        code.extend_from_slice(&[vm::Opcode::OutArg as u8, 1, 0, 0, 0]);
     }
-    code.push(vm::OP_HALT);
+    code.push(vm::Opcode::Halt as u8);
 
     let mut lits = String::new();
     for _ in 0..24 {
@@ -340,13 +340,13 @@ fn build_markup_catalog() -> Catalog {
     // MARKUP_CLOSE "b"(1) optc=0, HALT
     let strings = ["main", "b", "name"];
     let code = vec![
-        vm::OP_MARKUP_OPEN,
+        vm::Opcode::MarkupOpen as u8,
         1,
         0,
         0,
         0,
         0,
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -355,19 +355,19 @@ fn build_markup_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         2,
         0,
         0,
         0,
-        vm::OP_OUT_VAL,
-        vm::OP_MARKUP_CLOSE,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::MarkupClose as u8,
         1,
         0,
         0,
         0,
         0,
-        vm::OP_HALT,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog(
         &strings,
@@ -386,23 +386,23 @@ fn build_markup_option_literal_catalog() -> Catalog {
     // MARKUP_OPEN "a"(1) optc=1, OUT_SLICE "link"(0,4), MARKUP_CLOSE "a"(1) optc=0, HALT
     let strings = ["main", "a", "href", "https://example.com"];
     let code = vec![
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         2,
         0,
         0,
         0,
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         3,
         0,
         0,
         0,
-        vm::OP_MARKUP_OPEN,
+        vm::Opcode::MarkupOpen as u8,
         1,
         0,
         0,
         0,
         1,
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -411,13 +411,13 @@ fn build_markup_option_literal_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_MARKUP_CLOSE,
+        vm::Opcode::MarkupClose as u8,
         1,
         0,
         0,
         0,
         0,
-        vm::OP_HALT,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog(
         &strings,
@@ -436,23 +436,23 @@ fn build_markup_option_variable_catalog() -> Catalog {
     // MARKUP_OPEN "a"(1) optc=1, OUT_SLICE "click"(0,5), MARKUP_CLOSE "a"(1) optc=0, HALT
     let strings = ["main", "a", "href", "url"];
     let code = vec![
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         2,
         0,
         0,
         0,
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         3,
         0,
         0,
         0,
-        vm::OP_MARKUP_OPEN,
+        vm::Opcode::MarkupOpen as u8,
         1,
         0,
         0,
         0,
         1,
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -461,13 +461,13 @@ fn build_markup_option_variable_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_MARKUP_CLOSE,
+        vm::Opcode::MarkupClose as u8,
         1,
         0,
         0,
         0,
         0,
-        vm::OP_HALT,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog(
         &strings,
@@ -488,18 +488,18 @@ fn build_builtin_call_catalog_no_opts() -> Catalog {
         static_options: vec![],
     }];
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         1,
         0,
         0,
         0, // arg $amount
-        vm::OP_CALL_FUNC,
+        vm::Opcode::CallFunc as u8,
         0,
         0,
         1,
         0, // fn=0 ("number"), args=1, opts=0
-        vm::OP_OUT_VAL,
-        vm::OP_HALT,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,
@@ -521,28 +521,28 @@ fn build_builtin_call_catalog_with_opts() -> Catalog {
         static_options: vec![],
     }];
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         1,
         0,
         0,
         0, // arg $amount
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         3,
         0,
         0,
         0, // key "minimumFractionDigits"
-        vm::OP_PUSH_CONST,
+        vm::Opcode::PushConst as u8,
         4,
         0,
         0,
         0, // val "2"
-        vm::OP_CALL_FUNC,
+        vm::Opcode::CallFunc as u8,
         0,
         0,
         1,
         1, // fn=0 ("number"), args=1, opts=1
-        vm::OP_OUT_VAL,
-        vm::OP_HALT,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,
@@ -1018,18 +1018,18 @@ fn build_plural_select_catalog() -> Catalog {
     //   pc 48: SELECT_END                          (1 byte)
     //   pc 49: HALT                                (1 byte)
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         0,
         0,
         0,
         0,
-        vm::OP_CALL_SELECT,
+        vm::Opcode::CallSelect as u8,
         0,
         0,
         1,
         0,
-        vm::OP_SELECT_BEGIN,
-        vm::OP_CASE_STR,
+        vm::Opcode::SelectBegin as u8,
+        vm::Opcode::CaseStr as u8,
         5,
         0,
         0,
@@ -1038,12 +1038,12 @@ fn build_plural_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_CASE_DEFAULT,
+        vm::Opcode::CaseDefault as u8,
         14,
         0,
         0,
         0,
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -1052,12 +1052,12 @@ fn build_plural_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_JMP,
+        vm::Opcode::Jmp as u8,
         9,
         0,
         0,
         0,
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         8,
         0,
         0,
@@ -1066,8 +1066,8 @@ fn build_plural_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_SELECT_END,
-        vm::OP_HALT,
+        vm::Opcode::SelectEnd as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,
@@ -1120,18 +1120,18 @@ fn build_ordinal_select_catalog() -> Catalog {
     //   pc 94: SELECT_END                           (1)
     //   pc 95: HALT                                 (1)
     let code = vec![
-        vm::OP_LOAD_ARG,
+        vm::Opcode::LoadArg as u8,
         7,
         0,
         0,
         0,
-        vm::OP_CALL_SELECT,
+        vm::Opcode::CallSelect as u8,
         0,
         0,
         1,
         0,
-        vm::OP_SELECT_BEGIN,
-        vm::OP_CASE_STR,
+        vm::Opcode::SelectBegin as u8,
+        vm::Opcode::CaseStr as u8,
         4,
         0,
         0,
@@ -1140,7 +1140,7 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0, // "one" -> pc 43
-        vm::OP_CASE_STR,
+        vm::Opcode::CaseStr as u8,
         9,
         0,
         0,
@@ -1149,7 +1149,7 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0, // "two" -> pc 57
-        vm::OP_CASE_STR,
+        vm::Opcode::CaseStr as u8,
         0,
         0,
         0,
@@ -1158,13 +1158,13 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0, // "few" -> pc 71
-        vm::OP_CASE_DEFAULT,
+        vm::Opcode::CaseDefault as u8,
         42,
         0,
         0,
         0, // -> pc 85
         // "1st"
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         0,
         0,
         0,
@@ -1173,13 +1173,13 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_JMP,
+        vm::Opcode::Jmp as u8,
         37,
         0,
         0,
         0,
         // "2nd"
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         3,
         0,
         0,
@@ -1188,13 +1188,13 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_JMP,
+        vm::Opcode::Jmp as u8,
         23,
         0,
         0,
         0,
         // "3rd"
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         6,
         0,
         0,
@@ -1203,13 +1203,13 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_JMP,
+        vm::Opcode::Jmp as u8,
         9,
         0,
         0,
         0,
         // "Nth"
-        vm::OP_OUT_SLICE,
+        vm::Opcode::OutSlice as u8,
         9,
         0,
         0,
@@ -1218,8 +1218,8 @@ fn build_ordinal_select_catalog() -> Catalog {
         0,
         0,
         0,
-        vm::OP_SELECT_END,
-        vm::OP_HALT,
+        vm::Opcode::SelectEnd as u8,
+        vm::Opcode::Halt as u8,
     ];
     let bytes = build_catalog_with_funcs(
         &strings,

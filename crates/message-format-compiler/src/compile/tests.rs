@@ -84,7 +84,7 @@ fn bare_interpolation_lowers_to_out_arg() {
     assert_eq!(
         catalog.code(),
         &[
-            schema::OP_OUT_SLICE,
+            schema::Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -93,12 +93,12 @@ fn bare_interpolation_lowers_to_out_arg() {
             0,
             0,
             0,
-            schema::OP_OUT_ARG,
+            schema::Opcode::OutArg as u8,
             1,
             0,
             0,
             0,
-            schema::OP_OUT_SLICE,
+            schema::Opcode::OutSlice as u8,
             6,
             0,
             0,
@@ -107,7 +107,7 @@ fn bare_interpolation_lowers_to_out_arg() {
             0,
             0,
             0,
-            schema::OP_HALT,
+            schema::Opcode::Halt as u8,
         ]
     );
 }
@@ -118,8 +118,12 @@ fn simple_select_lowers_to_select_arg() {
         compile_str(".input { $kind :string }\n.match $kind\nformal {{Good evening}}\n* {{Hi}}")
             .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    assert_eq!(catalog.code()[0], schema::OP_SELECT_ARG);
-    assert!(!catalog.code().contains(&schema::OP_SELECT_BEGIN));
+    assert_eq!(catalog.code()[0], schema::Opcode::SelectArg as u8);
+    assert!(
+        !catalog
+            .code()
+            .contains(&(schema::Opcode::SelectBegin as u8))
+    );
 }
 
 #[test]
@@ -143,8 +147,8 @@ fn string_selector_with_options_does_not_lower_to_select_arg() {
 
     let compiled = expect_compiled(builder.compile());
     let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
-    assert_ne!(catalog.code()[0], schema::OP_SELECT_ARG);
-    assert!(catalog.code().contains(&schema::OP_CALL_SELECT));
+    assert_ne!(catalog.code()[0], schema::Opcode::SelectArg as u8);
+    assert!(catalog.code().contains(&(schema::Opcode::CallSelect as u8)));
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn compile_inputs_deduplicates_literal_text_slices() {
     assert_eq!(
         catalog.code(),
         &[
-            schema::OP_OUT_SLICE,
+            schema::Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -309,8 +313,8 @@ fn compile_inputs_deduplicates_literal_text_slices() {
             0,
             0,
             0,
-            schema::OP_HALT,
-            schema::OP_OUT_SLICE,
+            schema::Opcode::Halt as u8,
+            schema::Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -319,7 +323,7 @@ fn compile_inputs_deduplicates_literal_text_slices() {
             0,
             0,
             0,
-            schema::OP_HALT,
+            schema::Opcode::Halt as u8,
         ]
     );
 }
@@ -357,7 +361,7 @@ fn disabled_literal_deduplication_keeps_append_only_literals_without_duplicate_t
     assert_eq!(
         catalog.code(),
         &[
-            schema::OP_OUT_SLICE,
+            schema::Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -366,8 +370,8 @@ fn disabled_literal_deduplication_keeps_append_only_literals_without_duplicate_t
             0,
             0,
             0,
-            schema::OP_HALT,
-            schema::OP_OUT_SLICE,
+            schema::Opcode::Halt as u8,
+            schema::Opcode::OutSlice as u8,
             5,
             0,
             0,
@@ -376,7 +380,7 @@ fn disabled_literal_deduplication_keeps_append_only_literals_without_duplicate_t
             0,
             0,
             0,
-            schema::OP_HALT,
+            schema::Opcode::Halt as u8,
         ]
     );
 }
@@ -416,7 +420,7 @@ fn measure_only_literal_deduplication_counts_opportunities_without_rewriting_lit
     assert_eq!(
         catalog.code(),
         &[
-            schema::OP_OUT_SLICE,
+            schema::Opcode::OutSlice as u8,
             0,
             0,
             0,
@@ -425,8 +429,8 @@ fn measure_only_literal_deduplication_counts_opportunities_without_rewriting_lit
             0,
             0,
             0,
-            schema::OP_HALT,
-            schema::OP_OUT_SLICE,
+            schema::Opcode::Halt as u8,
+            schema::Opcode::OutSlice as u8,
             5,
             0,
             0,
@@ -435,7 +439,7 @@ fn measure_only_literal_deduplication_counts_opportunities_without_rewriting_lit
             0,
             0,
             0,
-            schema::OP_HALT,
+            schema::Opcode::Halt as u8,
         ]
     );
 }
@@ -465,7 +469,7 @@ fn compile_inputs_deduplicates_literal_expression_slices() {
     assert_eq!(
         catalog.code(),
         &[
-            schema::OP_OUT_EXPR,
+            schema::Opcode::OutExpr as u8,
             0,
             0,
             0,
@@ -474,8 +478,8 @@ fn compile_inputs_deduplicates_literal_expression_slices() {
             0,
             0,
             0,
-            schema::OP_HALT,
-            schema::OP_OUT_EXPR,
+            schema::Opcode::Halt as u8,
+            schema::Opcode::OutExpr as u8,
             0,
             0,
             0,
@@ -484,7 +488,7 @@ fn compile_inputs_deduplicates_literal_expression_slices() {
             0,
             0,
             0,
-            schema::OP_HALT,
+            schema::Opcode::Halt as u8,
         ]
     );
 }
