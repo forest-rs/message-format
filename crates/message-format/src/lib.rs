@@ -19,10 +19,10 @@
 //! ```rust
 //! # #[cfg(all(feature = "compile", feature = "icu4x"))]
 //! # {
-//! use message_format::{Locale, MessageArgs, MessageCatalog, compiler::CompileOptions};
+//! use message_format::{Locale, MessageArgs, runtime::Catalog, compiler::CompileOptions};
 //!
 //! let source = "Hello { $name }!";
-//! let catalog = MessageCatalog::compile(source, CompileOptions::default()).unwrap();
+//! let catalog = Catalog::compile(source, CompileOptions::default()).unwrap();
 //! let locale: Locale = "en-US".parse().unwrap();
 //! let mut formatter = catalog.formatter_for_locale(&locale).unwrap();
 //!
@@ -42,12 +42,12 @@
 //! ```rust
 //! # #[cfg(all(feature = "compile", feature = "icu4x"))]
 //! # {
-//! use message_format::{CatalogBundle, LocalizedCatalog, Locale, MessageArgs, MessageCatalog, compiler::CompileOptions};
+//! use message_format::{CatalogBundle, LocalizedCatalog, Locale, MessageArgs, runtime::Catalog, compiler::CompileOptions};
 //!
 //! let fr: Locale = "fr".parse().unwrap();
 //! let en: Locale = "en".parse().unwrap();
-//! let fr_catalog = MessageCatalog::compile("Salut { $name }", CompileOptions::default()).unwrap();
-//! let en_catalog = MessageCatalog::compile("Hello { $name }", CompileOptions::default()).unwrap();
+//! let fr_catalog = Catalog::compile("Salut { $name }", CompileOptions::default()).unwrap();
+//! let en_catalog = Catalog::compile("Hello { $name }", CompileOptions::default()).unwrap();
 //!
 //! let requested: Locale = "fr-CA".parse().unwrap();
 //! let bundle = CatalogBundle::new(
@@ -68,9 +68,8 @@
 //! in string output.
 //!
 //! When you need structured output, resolved markup options, or recoverable
-//! diagnostics from fallback rendering, drop down to the runtime APIs via
-//! [`MessageCatalog::as_runtime_catalog`] and use
-//! [`runtime::Formatter::format_to`].
+//! diagnostics from fallback rendering, use [`runtime::Formatter::format_to`]
+//! directly.
 
 extern crate alloc;
 #[cfg(feature = "std")]
@@ -86,9 +85,11 @@ pub mod compiler;
 
 mod args;
 mod catalog;
+#[cfg(feature = "compile")]
+mod catalog_compile;
 mod formatter;
 pub use args::MessageArgs;
-pub use catalog::{CatalogBundle, LocalizedCatalog, LookupError, MessageCatalog};
+pub use catalog::{CatalogBundle, LocalizedCatalog, LookupError};
 pub use formatter::MessageFormatter;
 
 #[cfg(test)]
@@ -102,7 +103,7 @@ mod tests {
         all(feature = "compile", feature = "icu4x"),
         all(feature = "compile", feature = "std")
     ))]
-    use super::*;
+    use super::{runtime::Catalog, *};
     #[cfg(all(feature = "compile", feature = "std"))]
     use alloc::format;
     #[cfg(all(feature = "compile", feature = "icu4x"))]
@@ -130,7 +131,7 @@ mod tests {
     fn localized(tag: &str, source: &str) -> LocalizedCatalog {
         LocalizedCatalog::new(
             locale(tag),
-            MessageCatalog::compile_str(source).unwrap_or_else(|e| panic!("compile {tag}: {e:?}")),
+            Catalog::compile_str(source).unwrap_or_else(|e| panic!("compile {tag}: {e:?}")),
         )
     }
 
@@ -139,13 +140,13 @@ mod tests {
     fn compile_entry_points_preserve_simple_whitespace() {
         let source = "  hello  ";
         let catalog_direct =
-            MessageCatalog::compile(source, compiler::CompileOptions::default()).expect("compile");
+            Catalog::compile(source, compiler::CompileOptions::default()).expect("compile");
         let compiled_str = compiler::compile_str(source).expect("compile_str");
-        let catalog_str = MessageCatalog::from_bytes(&compiled_str).expect("from bytes");
+        let catalog_str = Catalog::from_bytes(&compiled_str).expect("from bytes");
 
         let path = unique_temp_path("mf2_whitespace");
         std::fs::write(&path, source).expect("write temp source");
-        let catalog_file = MessageCatalog::compile_file(&path).expect("compile_file");
+        let catalog_file = Catalog::compile_file(&path).expect("compile_file");
         std::fs::remove_file(&path).expect("remove temp source");
 
         let mut fmt_direct = catalog_direct
@@ -176,7 +177,7 @@ mod tests {
     fn compile_file_missing_path_returns_io_error() {
         let path = unique_temp_path("mf2_missing_compile_file_test_should_not_exist");
         let _ = std::fs::remove_file(&path);
-        let err = MessageCatalog::compile_file(&path).unwrap_err();
+        let err = Catalog::compile_file(&path).unwrap_err();
         match err {
             compiler::CompileError::IoError { path: got, source } => {
                 assert_eq!(got, path);
@@ -189,7 +190,7 @@ mod tests {
     #[cfg(all(feature = "compile", feature = "icu4x"))]
     #[test]
     fn compile_resources_merges_named_message_bodies() {
-        let (catalog, source_map) = MessageCatalog::compile_resources(
+        let (catalog, source_map) = Catalog::compile_resources(
             [compiler::ResourceInput::new(
                 "app.toml",
                 compiler::SourceKind::Other(String::from("resource-toml")),
@@ -211,7 +212,7 @@ mod tests {
         let mut manifest = compiler::FunctionManifest::new();
         manifest.insert(compiler::FunctionSchema::new("custom:format").allow_format());
 
-        let err = MessageCatalog::compile_with_manifest(
+        let err = Catalog::compile_with_manifest(
             "{ $value :custom:missing }",
             compiler::CompileOptions::default(),
             &manifest,
@@ -327,8 +328,8 @@ mod tests {
     }
 
     #[cfg(all(feature = "compile", feature = "icu4x"))]
-    fn compile_messages(messages: &[(&str, &str)]) -> MessageCatalog {
-        let (catalog, _) = MessageCatalog::compile_inputs(
+    fn compile_messages(messages: &[(&str, &str)]) -> Catalog {
+        let (catalog, _) = Catalog::compile_inputs(
             messages.iter().map(|(id, source)| compiler::CompileInput {
                 name: id,
                 message_id: id,
@@ -409,14 +410,13 @@ mod tests {
         // Compile a catalog with a bare expression (no :number annotation).
         // Float values go through BuiltinHost::format_default which is
         // locale-sensitive.
-        let catalog = MessageCatalog::compile_str("{ $n }").expect("compile");
+        let catalog = Catalog::compile_str("{ $n }").expect("compile");
 
         // Create a formatter with host locale "fr" (French formatting uses
         // comma as decimal separator) — the catalog itself has no locale.
         let candidates = locale_candidates(&locale("fr"));
         let mut formatter =
-            MessageFormatter::new(core::iter::once(catalog.as_runtime_catalog()), &candidates)
-                .expect("formatter");
+            MessageFormatter::new(core::iter::once(&catalog), &candidates).expect("formatter");
 
         let mut args = MessageArgs::new();
         args.insert("n", 123.5);
