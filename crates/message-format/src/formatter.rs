@@ -7,24 +7,6 @@ use icu_locale_core::Locale;
 
 use crate::{MessageArgs, runtime};
 
-struct OutputStringSink<'a> {
-    out: &'a mut String,
-}
-
-impl runtime::FormatSink for OutputStringSink<'_> {
-    fn literal(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
-    fn expression(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
-    fn markup_open(&mut self, _name: &str, _options: &[runtime::FormatOption<'_>]) {}
-
-    fn markup_close(&mut self, _name: &str, _options: &[runtime::FormatOption<'_>]) {}
-}
-
 /// Reusable formatter that resolves messages across one or more catalogs.
 ///
 /// When multiple catalogs are provided, messages are resolved by searching
@@ -122,8 +104,7 @@ impl<'a> MessageFormatter<'a> {
         out.clear();
         let catalog = self.inner.catalog_for(message)?;
         let resolved = args.resolve(catalog);
-        let mut sink = OutputStringSink { out };
-        let _diagnostics = self.inner.format_to(message, &resolved, &mut sink)?;
+        let _diagnostics = self.inner.format_to(message, &resolved, out)?;
         Ok(())
     }
 

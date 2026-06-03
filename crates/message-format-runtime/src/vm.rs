@@ -211,6 +211,20 @@ pub trait FormatSink {
     fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]);
 }
 
+impl FormatSink for String {
+    fn literal(&mut self, s: &str) {
+        self.push_str(s);
+    }
+
+    fn expression(&mut self, s: &str) {
+        self.push_str(s);
+    }
+
+    fn markup_open(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
+
+    fn markup_close(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
+}
+
 /// One resolved markup option key/value pair delivered to [`FormatSink`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOption<'a> {
