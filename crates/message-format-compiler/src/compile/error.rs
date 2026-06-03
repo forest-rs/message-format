@@ -1,7 +1,8 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::fmt;
+use alloc::{boxed::Box, format, string::String, string::ToString};
+use core::fmt;
 
 use crate::manifest::{FunctionOperandKind, FunctionOptionValueKind};
 use crate::semantic::SourceSpan;
@@ -225,6 +226,7 @@ pub enum CompileError {
         origin: Option<Box<SourceSpan>>,
     },
     /// File I/O or encoding error from `message_format::compile_file`.
+    #[cfg(feature = "std")]
     IoError {
         /// Path that failed to load.
         path: std::path::PathBuf,
@@ -887,8 +889,9 @@ impl CompileError {
                 expected: expected.as_ref().copied(),
                 found: found.as_deref(),
             }),
-            Self::IoError { .. }
-            | Self::FunctionIdOverflow
+            #[cfg(feature = "std")]
+            Self::IoError { .. } => None,
+            Self::FunctionIdOverflow
             | Self::TooManyStrings
             | Self::SizeOverflow { .. }
             | Self::ResourceInputError { .. }
@@ -1150,6 +1153,7 @@ impl fmt::Display for CompileError {
                 expected.as_ref().copied(),
                 found.as_ref(),
             ),
+            #[cfg(feature = "std")]
             Self::IoError { path, source } => {
                 write!(f, "I/O error at {}: {source}", path.display())
             }
@@ -1165,9 +1169,10 @@ impl fmt::Display for CompileError {
     }
 }
 
-impl std::error::Error for CompileError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for CompileError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "std")]
             Self::IoError { source, .. } => Some(source),
             _ => None,
         }

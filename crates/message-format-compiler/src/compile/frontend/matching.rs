@@ -1,6 +1,9 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
+use core::ops::Range;
+
 use super::*;
 use crate::semantic::{SelectorExpr, SourceSpan};
 use crate::syntax::literal::parse_number_literal;
@@ -9,7 +12,7 @@ use crate::syntax::literal::parse_number_literal;
 pub(super) struct MatchKey {
     pub(super) key: String,
     pub(super) is_default: bool,
-    pub(super) span: std::ops::Range<usize>,
+    pub(super) span: Range<usize>,
     pub(super) origin: Option<SourceSpan>,
 }
 

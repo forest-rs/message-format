@@ -3,6 +3,11 @@
 
 //! Shared byte-offset → line/column mapping and snippet utilities.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+};
+
 /// Convert a byte index into a 1-based character column within `source`.
 ///
 /// The entire `source` slice is treated as a single line; use [`byte_to_line_col`]

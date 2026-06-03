@@ -3,7 +3,14 @@
 
 //! Public compiler entry points.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use message_format_runtime::schema::{self, FuncEntry, MessageEntry};
 
@@ -205,8 +212,8 @@ impl core::fmt::Display for BuildError {
     }
 }
 
-impl std::error::Error for BuildError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for BuildError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(self.error.as_ref())
     }
 }
@@ -217,7 +224,7 @@ impl core::fmt::Display for CompileReport {
     }
 }
 
-impl std::error::Error for CompileReport {}
+impl core::error::Error for CompileReport {}
 
 impl BuildError {
     fn error(context: Option<Box<BuildErrorContext>>, error: CompileError) -> Self {

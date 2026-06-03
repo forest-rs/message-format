@@ -1,6 +1,9 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{format, string::String, string::ToString, vec::Vec};
+use core::ops::Range;
+
 use crate::syntax::{
     ident::canonicalize_identifier, literal::parse_number_literal, span::quoted_snippet,
 };
@@ -275,7 +278,7 @@ fn lower_operand_literal(
 }
 
 fn lower_literal_expression_operand(
-    value_span: &core::ops::Range<usize>,
+    value_span: &Range<usize>,
     value: String,
     source: &str,
 ) -> Operand {
@@ -287,7 +290,7 @@ fn lower_literal_expression_operand(
 
 fn classify_operand_literal_kind(
     source: &str,
-    value_span: &core::ops::Range<usize>,
+    value_span: &Range<usize>,
     value: &str,
 ) -> OperandLiteralKind {
     let raw = source.get(value_span.clone()).unwrap_or(value);

@@ -9,6 +9,8 @@
 //! data, but should treat it as a low-level compiler input boundary rather than
 //! a long-term calm public IR.
 
+use alloc::{string::String, vec::Vec};
+
 /// Parsed catalog message definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -621,6 +623,8 @@ pub struct DetachedSourceSpan {
 
 #[cfg(test)]
 mod tests {
+    use alloc::{string::String, vec};
+
     use super::*;
 
     #[test]

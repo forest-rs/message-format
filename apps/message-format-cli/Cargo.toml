@@ -12,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-message-format-compiler.workspace = true
+message-format-compiler = { features = ["std"], workspace = true }
 message-format-resource-json.workspace = true
 message-format-resource-toml.workspace = true
 

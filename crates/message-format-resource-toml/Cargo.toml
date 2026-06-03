@@ -12,7 +12,7 @@ categories.workspace = true
 description = "TOML resource adapter for message-format compiler resource inputs."
 
 [dependencies]
-message-format-compiler.workspace = true
+message-format-compiler = { features = ["std"], workspace = true }
 profiling = { optional = true, workspace = true }
 toml = "1"
 

@@ -3,6 +3,8 @@
 
 //! Test-only helpers shared across compiler-crate tests.
 
+use alloc::{string::String, vec::Vec};
+
 use message_format_runtime::{Catalog, FormatError, Formatter, Host, NoopHost};
 
 use crate::compile::compile_str;

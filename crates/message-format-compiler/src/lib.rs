@@ -11,6 +11,7 @@
 #![cfg_attr(target_pointer_width = "64", warn(clippy::trivially_copy_pass_by_ref))]
 // END LINEBENDER LINT SET
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![no_std]
 #![doc = "Compiler from message format source text to binary catalog bytes."]
 //!
 //! # Error Model
@@ -122,6 +123,10 @@
 //! emission. The executable catalog schema it targets lives in
 //! [`message_format_runtime::schema`], which is also used by the runtime
 //! verifier and VM.
+
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 pub use compile::{
     BuildError, BuildErrorContext, CatalogBuilder, CompileError, CompileInput, CompileOptions,

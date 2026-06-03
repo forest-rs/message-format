@@ -1,6 +1,8 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+
 use super::*;
 use crate::semantic::SelectorExpr;
 use crate::syntax::span::byte_to_line_col;

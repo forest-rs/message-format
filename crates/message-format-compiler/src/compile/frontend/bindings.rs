@@ -1,6 +1,8 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{borrow::ToOwned, string::String};
+
 use super::*;
 
 use super::local_eval::{

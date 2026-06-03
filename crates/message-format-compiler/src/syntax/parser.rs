@@ -3,6 +3,9 @@
 
 //! Grammar-driven parser following TR35 ABNF productions.
 
+use alloc::{boxed::Box, vec::Vec};
+use core::ops::Range;
+
 use crate::compile::CompileError;
 use crate::syntax::ast::{
     AttributeNode, CallExpressionNode, CallOperandNode, DeclarationKind, DeclarationNode,
@@ -1175,7 +1178,7 @@ impl<'a> Parser<'a> {
 
         // Parse variants: greedy key parsing until `{{`
         let mut variants = Vec::new();
-        let mut last_key_span: core::ops::Range<usize> = 0..0;
+        let mut last_key_span: Range<usize> = 0..0;
         loop {
             self.skip_optional_whitespace();
             if self.at_end() {
@@ -1322,7 +1325,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_variant_pattern_span(&mut self) -> Option<(core::ops::Range<usize>, usize)> {
+    fn parse_variant_pattern_span(&mut self) -> Option<(Range<usize>, usize)> {
         if !self.eat_str("{{") {
             return None;
         }
@@ -1539,7 +1542,7 @@ fn is_ignorable_char(ch: char) -> bool {
     is_mf2_whitespace(ch) || is_bidi_control(ch)
 }
 
-fn trim_ignorable_span(source: &str, mut start: usize, mut end: usize) -> core::ops::Range<usize> {
+fn trim_ignorable_span(source: &str, mut start: usize, mut end: usize) -> Range<usize> {
     while start < end {
         let Some(ch) = source[start..].chars().next() else {
             break;
@@ -1565,6 +1568,8 @@ fn trim_ignorable_span(source: &str, mut start: usize, mut end: usize) -> core::
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::{find_matching_brace, parse_document, validate_known_declaration_heads};
     use crate::syntax::ast::{
         DeclarationKind, DeclarationPayloadNode, ExpressionKindNode, ExpressionNode,

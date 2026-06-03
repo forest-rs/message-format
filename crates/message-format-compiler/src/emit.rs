@@ -9,7 +9,7 @@
 //! they take arbitrary text and produce MF2 source that round-trips back
 //! to that same text.
 
-use std::borrow::Cow;
+use alloc::{borrow::Cow, string::String};
 
 use crate::syntax::ident::is_ignorable_char;
 

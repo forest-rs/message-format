@@ -1,6 +1,11 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use super::*;
 use crate::syntax::span::{SourceContext, byte_to_line_col};
 

@@ -3,6 +3,7 @@
 
 //! Syntax tree scaffolding for TR35-aligned parser migration.
 
+use alloc::{boxed::Box, vec::Vec};
 use core::ops::Range;
 
 /// Parsed message document with declaration prelude and remaining pattern body.

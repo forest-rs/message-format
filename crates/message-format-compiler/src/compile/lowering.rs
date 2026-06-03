@@ -1,12 +1,10 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-};
+use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use core::hash::BuildHasher;
 
-use hashbrown::{HashMap, hash_map::RawEntryMut};
+use hashbrown::{DefaultHashBuilder, HashMap, hash_map::RawEntryMut};
 use message_format_runtime::schema;
 
 use crate::semantic::{
@@ -20,11 +18,11 @@ use super::{
     function_dynamic_options,
 };
 
-#[derive(Debug)]
 pub(super) struct LiteralPool {
     mode: LiteralDeduplication,
     bytes: String,
     offsets: HashMap<LiteralSpan, ()>,
+    hash_builder: DefaultHashBuilder,
     stats: LiteralStats,
 }
 
@@ -40,6 +38,7 @@ impl LiteralPool {
             mode,
             bytes: String::new(),
             offsets: HashMap::new(),
+            hash_builder: DefaultHashBuilder::default(),
             stats: LiteralStats {
                 deduplication: mode,
                 ..LiteralStats::default()
@@ -61,7 +60,7 @@ impl LiteralPool {
             return self.append(value, len);
         }
 
-        let hash = literal_hash(value);
+        let hash = hash_str(&self.hash_builder, value);
         match self
             .offsets
             .raw_entry_mut()
@@ -78,7 +77,8 @@ impl LiteralPool {
             RawEntryMut::Vacant(entry) => {
                 let (offset, len) = append_literal(&mut self.bytes, &mut self.stats, value, len)?;
                 entry.insert_with_hasher(hash, LiteralSpan { off: offset, len }, (), |span| {
-                    literal_hash(
+                    hash_str(
+                        &self.hash_builder,
                         span_text(self.bytes.as_str(), *span)
                             .expect("literal span must reference appended bytes"),
                     )
@@ -125,10 +125,8 @@ fn append_literal(
     Ok((offset, len))
 }
 
-fn literal_hash(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+fn hash_str(builder: &DefaultHashBuilder, value: &str) -> u64 {
+    builder.hash_one(value)
 }
 
 /// Compute the fallback string for a call part.

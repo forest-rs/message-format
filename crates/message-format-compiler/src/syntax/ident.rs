@@ -3,6 +3,8 @@
 
 //! Shared identifier and bidi-control helpers for syntax and semantic passes.
 
+use alloc::string::{String, ToString};
+
 /// Returns `true` when `value` is a valid MF2 identifier.
 pub(crate) fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();

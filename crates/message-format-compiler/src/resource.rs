@@ -8,6 +8,8 @@
 //! crates parse concrete resource formats and translate them into these shared
 //! model types before handing them to the compiler.
 
+use alloc::{string::String, vec::Vec};
+
 use crate::semantic::{DetachedSourceSpan, SourceKind};
 
 /// One named MF2 message body extracted from a resource container.

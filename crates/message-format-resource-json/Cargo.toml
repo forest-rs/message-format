@@ -13,7 +13,7 @@ description = "JSON resource adapters for message-format compiler resource input
 
 [dependencies]
 json-spanned-value = "0.2.2"
-message-format-compiler.workspace = true
+message-format-compiler = { features = ["std"], workspace = true }
 profiling = { optional = true, workspace = true }
 
 [features]

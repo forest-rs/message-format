@@ -3,6 +3,12 @@
 
 //! Semantic checks for parsed syntax scaffolding.
 
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::ops::Range;
 
 use icu_normalizer::ComposingNormalizer;
@@ -184,8 +190,7 @@ pub(crate) fn validate_no_duplicate_single_selector_keys(
     keys: &[VariantKeyOccurrence],
 ) -> Result<(), CompileError> {
     let normalizer = ComposingNormalizer::new_nfc();
-    let mut first: std::collections::BTreeMap<String, (usize, usize)> =
-        std::collections::BTreeMap::new();
+    let mut first: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for occurrence in keys {
         if occurrence.is_default {
             continue;
@@ -215,7 +220,7 @@ fn validate_no_duplicate_variant_tuples(
     ctx: SourceContext,
     source: &str,
 ) -> Result<(), CompileError> {
-    let mut seen: std::collections::BTreeMap<Vec<&str>, usize> = std::collections::BTreeMap::new();
+    let mut seen: BTreeMap<Vec<&str>, usize> = BTreeMap::new();
     for (idx, variant) in variants.iter().enumerate() {
         let tuple: Vec<&str> = variant.keys.iter().map(|k| k.key.as_str()).collect();
         if let Some(&prev_idx) = seen.get(&tuple) {
@@ -280,8 +285,8 @@ pub(crate) fn validate_declaration_scope(
     declarations: &DeclarationPrelude<'_>,
     ctx: SourceContext,
 ) -> Result<(), CompileError> {
-    let mut declared = std::collections::BTreeSet::new();
-    let mut inputs = std::collections::BTreeSet::new();
+    let mut declared = BTreeSet::new();
+    let mut inputs = BTreeSet::new();
     let all_locals = collect_local_names(&declarations.locals);
 
     for declaration in &declarations.inputs {
@@ -364,8 +369,8 @@ pub(crate) fn validate_no_implicit_redeclaration(
     ctx: SourceContext,
 ) -> Result<(), CompileError> {
     let doc = parse_document(source);
-    let mut explicitly_declared = std::collections::BTreeSet::new();
-    let mut implicitly_referenced = std::collections::BTreeSet::new();
+    let mut explicitly_declared = BTreeSet::new();
+    let mut implicitly_referenced = BTreeSet::new();
 
     for declaration in &doc.declarations {
         match declaration.kind {
@@ -718,8 +723,8 @@ fn parse_input_declared_var(
     Ok(canonical)
 }
 
-fn collect_local_names(locals: &[LocalDeclaration<'_>]) -> std::collections::BTreeSet<String> {
-    let mut names = std::collections::BTreeSet::new();
+fn collect_local_names(locals: &[LocalDeclaration<'_>]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     for declaration in locals {
         let Some(name) = strip_boundary_bidi_controls(&declaration.name) else {
             continue;
@@ -819,7 +824,7 @@ fn parse_options_tail(
     column: usize,
 ) -> Result<Vec<FunctionOption>, CompileError> {
     let mut filtered = Vec::new();
-    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut seen_keys = BTreeSet::new();
     for token in &tokens {
         if token.starts_with('@') {
             continue;
@@ -995,6 +1000,8 @@ fn declaration_payload_error(
 
 #[cfg(test)]
 mod tests {
+    use alloc::{string::ToString, vec, vec::Vec};
+
     use super::{
         VariantKeyOccurrence, parse_declaration_prelude, parse_function_spec_node,
         parse_match_declaration_prelude, parse_prefixed_variable_token,

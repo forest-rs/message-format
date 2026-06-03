@@ -1,7 +1,12 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::String,
+    vec::Vec,
+};
 
 use crate::semantic::{
     CallExpr, FunctionOptionValue, FunctionSpec, Message, Operand, Part, SelectExpr, SelectorExpr,

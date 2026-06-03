@@ -1,6 +1,12 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::{String, ToString},
+};
+
 use super::bindings::{DeclFunction, LocalValue};
 use super::*;
 use crate::syntax::literal::parse_number_literal;
@@ -124,9 +130,9 @@ pub(super) fn apply_literal_function(
         "integer" => {
             if let Some(value) = parse_number_literal(&literal) {
                 let truncated = if value.is_sign_negative() {
-                    value.ceil()
+                    libm::ceil(value)
                 } else {
-                    value.floor()
+                    libm::floor(value)
                 };
                 literal = format_signed_number(parse_sign_display(&options), truncated);
             }
@@ -230,7 +236,7 @@ fn parse_sign_display(options: &BTreeMap<String, String>) -> SignDisplay {
 }
 
 fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
-    let out = if value.fract() == 0.0 {
+    let out = if libm::fmod(value, 1.0) == 0.0 {
         format!("{value:.0}")
     } else {
         value.to_string()

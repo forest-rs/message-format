@@ -17,7 +17,7 @@ env_logger = "0.11"
 log = "0.4"
 lsp-server = "0.7"
 lsp-types = "0.95"
-message-format-compiler.workspace = true
+message-format-compiler = { features = ["std"], workspace = true }
 message-format-resource-json.workspace = true
 message-format-resource-toml.workspace = true
 serde = { features = ["derive"], version = "1" }

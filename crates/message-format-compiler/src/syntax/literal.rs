@@ -3,6 +3,11 @@
 
 //! Literal and text decoding helpers used by parser/semantic/lowering stages.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+};
+
 use crate::compile::CompileError;
 use crate::syntax::ident::is_ignorable_char;
 use crate::syntax::span::{char_column, quoted_snippet};

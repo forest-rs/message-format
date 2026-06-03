@@ -3,8 +3,11 @@
 
 //! Host-agnostic function manifest types for compiler validation and tooling metadata.
 
-use std::collections::BTreeMap;
-use std::fmt;
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+};
+use core::fmt;
 
 use serde::Deserialize;
 
@@ -359,7 +362,7 @@ impl fmt::Display for ManifestParseError {
     }
 }
 
-impl std::error::Error for ManifestParseError {}
+impl core::error::Error for ManifestParseError {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

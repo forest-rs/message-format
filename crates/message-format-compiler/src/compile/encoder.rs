@@ -1,6 +1,7 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::{vec, vec::Vec};
 use core::cmp::Ordering;
 
 use message_format_runtime::schema::{FuncEntry, MessageEntry};
