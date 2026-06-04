@@ -351,11 +351,7 @@ impl BuiltinHost {
             BuiltinFn::String => Ok(Value::Str(format_string(catalog, raw_arg, &options))),
             BuiltinFn::Number | BuiltinFn::Integer => {
                 let integer_only = entry.func == BuiltinFn::Integer;
-                match options
-                    .get(BuiltinOptionKey::Select)
-                    .as_ref()
-                    .map(OptionValue::as_str)
-                {
+                match options.get(BuiltinOptionKey::Select).as_deref() {
                     Some("plural") => Ok(Value::Str(format_plural(
                         raw_arg,
                         catalog,
@@ -368,12 +364,7 @@ impl BuiltinHost {
                         ordinal_rules,
                         &options,
                     )?)),
-                    _ if options
-                        .get(BuiltinOptionKey::Style)
-                        .as_ref()
-                        .map(OptionValue::as_str)
-                        == Some("percent") =>
-                    {
+                    _ if options.get(BuiltinOptionKey::Style).as_deref() == Some("percent") => {
                         Ok(Value::Str(format_percent(raw_arg, catalog, &options)?))
                     }
                     _ => Ok(Value::Str(format_number(
@@ -469,11 +460,7 @@ impl BuiltinHost {
         }
         let options =
             EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
-        match options
-            .get(BuiltinOptionKey::Select)
-            .as_ref()
-            .map(OptionValue::as_str)
-        {
+        match options.get(BuiltinOptionKey::Select).as_deref() {
             Some("plural") => Some(&self.cardinal_rules),
             Some("ordinal") => Some(&self.ordinal_rules),
             _ => None,
@@ -630,10 +617,7 @@ fn parse_static_select_mode(
 
 fn format_string(catalog: &Catalog, value: &Value, options: &EffectiveOptions<'_>) -> String {
     let dir = options.get(BuiltinOptionKey::UDir);
-    apply_bidi_dir(
-        plain_text(catalog, value),
-        dir.as_ref().map(OptionValue::as_str),
-    )
+    apply_bidi_dir(plain_text(catalog, value), dir.as_deref())
 }
 
 fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
@@ -652,10 +636,7 @@ fn format_number(
     options: &EffectiveOptions<'_>,
 ) -> Result<String, FormatError> {
     let notation = options.get(BuiltinOptionKey::Notation);
-    if notation
-        .as_ref()
-        .is_some_and(|n| n.as_str() == "scientific")
-    {
+    if notation.is_some_and(|n| n == "scientific") {
         let num = numeric_operand(value, catalog)?;
         return Ok(format_scientific(num));
     }
@@ -975,7 +956,7 @@ fn validate_enum_option(
     let Some(value) = options.get(key) else {
         return Ok(());
     };
-    if allowed.iter().any(|candidate| *candidate == value.as_str()) {
+    if allowed.iter().any(|candidate| *candidate == value) {
         return Ok(());
     }
     Err(bad_option())
@@ -1009,7 +990,7 @@ fn parse_digit_option(
     let Some(raw) = options.get(key) else {
         return Ok(None);
     };
-    let value = raw.as_str().parse::<usize>().map_err(|_| bad_option())?;
+    let value = raw.parse::<usize>().map_err(|_| bad_option())?;
     if value > max {
         return Err(bad_option());
     }
@@ -1124,11 +1105,7 @@ fn parse_minimum_integer_digits(
 }
 
 fn parse_sign_display(options: &EffectiveOptions<'_>) -> BuiltinSignDisplay {
-    match options
-        .get(BuiltinOptionKey::SignDisplay)
-        .as_ref()
-        .map(OptionValue::as_str)
-    {
+    match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
         Some("always") => BuiltinSignDisplay::Always,
         Some("never") => BuiltinSignDisplay::Never,
         Some("auto") | None => BuiltinSignDisplay::Auto,
@@ -1241,11 +1218,7 @@ fn apply_grouping_min2(value: String) -> String {
 }
 
 fn parse_use_grouping(options: &EffectiveOptions<'_>) -> BuiltinGrouping {
-    match options
-        .get(BuiltinOptionKey::UseGrouping)
-        .as_ref()
-        .map(OptionValue::as_str)
-    {
+    match options.get(BuiltinOptionKey::UseGrouping).as_deref() {
         Some("always") => BuiltinGrouping::Always,
         Some("never") => BuiltinGrouping::Never,
         Some("min2") => BuiltinGrouping::Min2,
@@ -1365,10 +1338,10 @@ fn format_currency(
         return Err(bad_operand());
     };
     if let Value::Int(v) = value {
-        return Ok(format!("{} {v}", currency.as_str()));
+        return Ok(format!("{} {v}", currency));
     }
     let number = numeric_operand(value, catalog)?;
-    Ok(format!("{} {number}", currency.as_str()))
+    Ok(format!("{} {number}", currency))
 }
 
 fn looks_like_currency_literal(value: &str) -> bool {
@@ -1394,10 +1367,10 @@ fn format_offset(
     let preserve_plus = value_text(catalog, value).is_some_and(|raw| raw.starts_with('+'));
     let add = options
         .get(BuiltinOptionKey::Add)
-        .map(|raw| parse_number(raw.as_str()));
+        .map(|raw| parse_number(&raw));
     let subtract = options
         .get(BuiltinOptionKey::Subtract)
-        .map(|raw| parse_number(raw.as_str()));
+        .map(|raw| parse_number(&raw));
 
     if add.is_none() && subtract.is_none() {
         return Err(bad_option());
@@ -1448,13 +1421,13 @@ fn format_test_select(
 ) -> Result<String, FormatError> {
     if options
         .get(BuiltinOptionKey::Fails)
-        .is_some_and(|it| it.as_str() == "select")
+        .is_some_and(|it| it == "select")
     {
         return Err(implementation_failure(ImplementationFailure::TestSelect));
     }
     let number = numeric_operand(value, catalog)?;
     if let Some(raw) = options.get(BuiltinOptionKey::DecimalPlaces) {
-        let dp = raw.as_str().parse::<usize>().map_err(|_| bad_option())?;
+        let dp = raw.parse::<usize>().map_err(|_| bad_option())?;
         if dp > 3 {
             return Err(bad_option());
         }
@@ -1471,7 +1444,7 @@ fn format_test_function(
 ) -> Result<Value, FormatError> {
     if options
         .get(BuiltinOptionKey::Fails)
-        .is_some_and(|it| it.as_str() == "format")
+        .is_some_and(|it| it == "format")
     {
         if numeric_operand(value, catalog).is_ok() {
             return Err(bad_option());
@@ -1489,21 +1462,6 @@ struct EffectiveOptions<'a> {
     runtime: [Option<&'a Value>; BUILTIN_OPTION_KEY_COUNT],
     has_invalid_runtime_key: bool,
     catalog: &'a Catalog,
-}
-
-#[derive(Debug)]
-enum OptionValue<'a> {
-    Borrowed(&'a str),
-    Owned(String),
-}
-
-impl OptionValue<'_> {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Borrowed(value) => value,
-            Self::Owned(value) => value,
-        }
-    }
 }
 
 impl<'a> EffectiveOptions<'a> {
@@ -1540,22 +1498,22 @@ impl<'a> EffectiveOptions<'a> {
         Ok(())
     }
 
-    fn get(&self, key: BuiltinOptionKey) -> Option<OptionValue<'a>> {
+    fn get(&self, key: BuiltinOptionKey) -> Option<Cow<'a, str>> {
         if let Some(value) = self.runtime[key.index()] {
             return Some(match value {
-                Value::Str(value) => OptionValue::Borrowed(value.as_str()),
+                Value::Str(value) => Cow::Borrowed(value.as_str()),
                 Value::StrRef(id) => {
                     let value = self.catalog.pool_string_opt(*id)?;
-                    OptionValue::Borrowed(value)
+                    Cow::Borrowed(value)
                 }
                 Value::LitRef { off, len } => {
                     let value = self.catalog.literal_opt(*off, *len)?;
-                    OptionValue::Borrowed(value)
+                    Cow::Borrowed(value)
                 }
-                _ => OptionValue::Owned(plain_text(self.catalog, value).into_owned()),
+                _ => Cow::Owned(plain_text(self.catalog, value).into_owned()),
             });
         }
-        self.base[key.index()].as_deref().map(OptionValue::Borrowed)
+        self.base[key.index()].as_deref().map(Cow::Borrowed)
     }
 }
 
@@ -1702,7 +1660,7 @@ fn resolve_date_style(options: &EffectiveOptions<'_>) -> Length {
     let style_str = options
         .get(BuiltinOptionKey::DateStyle)
         .or_else(|| options.get(BuiltinOptionKey::Style));
-    match style_str.as_ref().map(OptionValue::as_str) {
+    match style_str.as_deref() {
         Some("short") => Length::Short,
         Some("long") | Some("full") => Length::Long,
         _ => Length::Medium,
@@ -1714,7 +1672,7 @@ fn resolve_time_style(options: &EffectiveOptions<'_>) -> Length {
     let style_str = options
         .get(BuiltinOptionKey::TimeStyle)
         .or_else(|| options.get(BuiltinOptionKey::Style));
-    match style_str.as_ref().map(OptionValue::as_str) {
+    match style_str.as_deref() {
         Some("medium") => Length::Medium,
         Some("long") | Some("full") => Length::Long,
         _ => Length::Short,
