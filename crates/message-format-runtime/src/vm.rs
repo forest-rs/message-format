@@ -261,10 +261,21 @@ enum SelectorValue<'a> {
     Owned(Value),
 }
 
-#[derive(Default)]
+enum ExprStatePendingErrors {
+    /// Record the minimum amount of information required
+    Minimal {
+        /// Were there any errors?
+        ///
+        /// This is important for [`ExprState::should_skip_call`].
+        any: bool,
+    },
+    /// Record all errors
+    All(Vec<FormatError>),
+}
+
 struct ExprState {
     fallback_id: Option<u32>,
-    pending_errors: Vec<FormatError>,
+    pending_errors: ExprStatePendingErrors,
 }
 
 impl<'a> SelectorValue<'a> {
@@ -327,8 +338,21 @@ impl<'a> SelectorValue<'a> {
 }
 
 impl ExprState {
+    fn new(diagnostics: &Option<&mut dyn DiagnosticsSink>) -> Self {
+        Self {
+            fallback_id: None,
+            pending_errors: match diagnostics {
+                Some(_) => ExprStatePendingErrors::All(Vec::new()),
+                None => ExprStatePendingErrors::Minimal { any: false },
+            },
+        }
+    }
+
     fn record_error(&mut self, error: FormatError) {
-        self.pending_errors.push(error);
+        match &mut self.pending_errors {
+            ExprStatePendingErrors::Minimal { any } => *any = true,
+            ExprStatePendingErrors::All(errors) => errors.push(error),
+        }
     }
 
     fn set_fallback(&mut self, fallback_id: u32) {
@@ -336,7 +360,10 @@ impl ExprState {
     }
 
     fn should_skip_call(&self) -> bool {
-        !self.pending_errors.is_empty()
+        match &self.pending_errors {
+            ExprStatePendingErrors::Minimal { any } => *any,
+            ExprStatePendingErrors::All(errors) => !errors.is_empty(),
+        }
     }
 
     fn clear_fallback(&mut self) {
@@ -355,12 +382,23 @@ impl ExprState {
         push_expr_fallback(stack, catalog, self.fallback_id.take())
     }
 
-    fn take_pending_errors(&mut self) -> Vec<FormatError> {
-        core::mem::take(&mut self.pending_errors)
+    fn take_pending_errors(&mut self) -> Option<Vec<FormatError>> {
+        match &mut self.pending_errors {
+            ExprStatePendingErrors::Minimal { any } => {
+                *any = false;
+                None
+            }
+            ExprStatePendingErrors::All(errors) => Some(core::mem::take(errors)),
+        }
     }
 
     fn clear_pending_errors(&mut self) {
-        self.pending_errors.clear();
+        match &mut self.pending_errors {
+            ExprStatePendingErrors::Minimal { any } => {
+                *any = false;
+            }
+            ExprStatePendingErrors::All(errors) => errors.clear(),
+        }
     }
 }
 
@@ -384,7 +422,7 @@ where
     let mut pc = entry_pc;
     stack.clear();
     let mut selector: Option<SelectorValue<'_>> = None;
-    let mut expr_state = ExprState::default();
+    let mut expr_state = ExprState::new(&diagnostics);
     let mut remaining_fuel = fuel;
 
     loop {
@@ -755,21 +793,21 @@ fn handle_call_instruction<H: Host>(
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
     // TR35 §16.
     if expr_state.should_skip_call() {
-        let pending_errors = expr_state.take_pending_errors();
-        if opcode == Opcode::CallSelect {
+        if let Some(pending_errors) = expr_state.take_pending_errors() {
             let mut pending_errors = pending_errors.into_iter();
-            record_bad_selector(diagnostics, pending_errors.next());
+            if opcode == Opcode::CallSelect {
+                record_bad_selector(diagnostics, pending_errors.next());
+            }
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
             }
+        }
+        if opcode == Opcode::CallSelect {
             expr_state.clear_fallback();
             stack.push(Value::Null);
-            return Ok(());
+        } else {
+            expr_state.push_fallback(stack, catalog)?;
         }
-        for error in pending_errors {
-            record_diagnostic(diagnostics, error);
-        }
-        expr_state.push_fallback(stack, catalog)?;
         return Ok(());
     }
 
