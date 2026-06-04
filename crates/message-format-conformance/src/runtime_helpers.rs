@@ -15,7 +15,7 @@ pub(crate) fn format<H: Host>(
     args: &dyn Args,
 ) -> Result<String, FormatError> {
     let mut out = String::new();
-    let _diagnostics = formatter.format_to(message, args, &mut out)?;
+    formatter.format_to(message, args, &mut out, None)?;
     Ok(out)
 }
 
@@ -35,7 +35,8 @@ pub(crate) fn format_with_diagnostics_by_id<H: Host>(
 ) -> Result<FormatOutput, FormatError> {
     let message = formatter.resolve(message_id)?;
     let mut out = String::new();
-    let errors = formatter.format_to(message, args, &mut out)?;
+    let mut errors = vec![];
+    formatter.format_to(message, args, &mut out, Some(&mut errors))?;
     Ok(FormatOutput { value: out, errors })
 }
 
@@ -47,5 +48,7 @@ pub(crate) fn format_to_by_id<H: Host>(
     sink: &mut dyn message_format::runtime::FormatSink,
 ) -> Result<Vec<FormatError>, FormatError> {
     let message = formatter.resolve(message_id)?;
-    formatter.format_to(message, args, sink)
+    let mut errors = vec![];
+    formatter.format_to(message, args, sink, Some(&mut errors))?;
+    Ok(errors)
 }

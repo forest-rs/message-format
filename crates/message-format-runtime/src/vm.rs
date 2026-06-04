@@ -1311,7 +1311,7 @@ mod tests {
         ) -> Result<String, FormatError> {
             let message = self.resolve(message_id)?;
             let mut sink = TestStringSink::default();
-            let _diagnostics = self.format_to(message, args, &mut sink)?;
+            self.format_to(message, args, &mut sink, None)?;
             Ok(sink.out)
         }
 
@@ -1322,7 +1322,9 @@ mod tests {
             sink: &mut dyn FormatSink,
         ) -> Result<Vec<FormatError>, FormatError> {
             let message = self.resolve(message_id)?;
-            self.format_to(message, args, sink)
+            let mut errors = vec![];
+            self.format_to(message, args, sink, Some(&mut errors))?;
+            Ok(errors)
         }
     }
 
@@ -1560,8 +1562,8 @@ mod tests {
             .format_by_id_for_test("main", &args)
             .expect("format");
         let mut sink = TestStringSink::default();
-        let _diagnostics = formatter
-            .format_to(handle, &args, &mut sink)
+        formatter
+            .format_to(handle, &args, &mut sink, None)
             .expect("format");
         let resolved = sink.out;
         assert_eq!(direct, resolved);

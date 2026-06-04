@@ -64,7 +64,7 @@
 //!     .expect("catalog defines `name`");
 //! let mut out = String::new();
 //! let mut sink = StringSink(&mut out);
-//! let _errors = formatter.format_to(message, &args, &mut sink)?;
+//! formatter.format_to(message, &args, &mut sink, None)?;
 //! # Ok(out)
 //! # }
 //! ```
@@ -149,7 +149,8 @@
 //! args.insert("url", "https://example.com")
 //!     .expect("catalog defines `url`");
 //! let mut sink = CollectingSink::default();
-//! let errors = formatter.format_to(message, &args, &mut sink)?;
+//! let mut errors = vec![];
+//! formatter.format_to(message, &args, &mut sink, Some(&mut errors))?;
 //! assert!(errors.is_empty());
 //! # Ok(sink.events)
 //! # }

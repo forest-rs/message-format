@@ -104,7 +104,7 @@ impl<'a> MessageFormatter<'a> {
         out.clear();
         let catalog = self.inner.catalog_for(message)?;
         let resolved = args.resolve(catalog);
-        let _diagnostics = self.inner.format_to(message, &resolved, out)?;
+        self.inner.format_to(message, &resolved, out, None)?;
         Ok(())
     }
 

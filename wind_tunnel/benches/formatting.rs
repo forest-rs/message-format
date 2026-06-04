@@ -53,7 +53,7 @@ trait RuntimeFormatExt<H: Host> {
         message_id: &str,
         args: &dyn Args,
         sink: &mut S,
-    ) -> Result<Vec<FormatError>, FormatError>;
+    ) -> Result<(), FormatError>;
 }
 
 impl<H: Host> RuntimeFormatExt<H> for Formatter<'_, H> {
@@ -63,7 +63,7 @@ impl<H: Host> RuntimeFormatExt<H> for Formatter<'_, H> {
         args: &dyn Args,
     ) -> Result<String, FormatError> {
         let mut sink = BenchStringSink::default();
-        let _diagnostics = self.format_to(message, args, &mut sink)?;
+        self.format_to(message, args, &mut sink, None)?;
         Ok(sink.out)
     }
 
@@ -81,9 +81,10 @@ impl<H: Host> RuntimeFormatExt<H> for Formatter<'_, H> {
         message_id: &str,
         args: &dyn Args,
         sink: &mut S,
-    ) -> Result<Vec<FormatError>, FormatError> {
+    ) -> Result<(), FormatError> {
         let message = self.resolve(message_id)?;
-        self.format_to(message, args, sink)
+        self.format_to(message, args, sink, None)?;
+        Ok(())
     }
 }
 
@@ -948,10 +949,10 @@ fn bench_formatting(c: &mut Criterion) {
         let mut sink = CountingSink::default();
         b.iter(|| {
             sink.reset();
-            let errors = formatter
+            formatter
                 .format_to_by_id_for_bench("main", black_box(&markup_args), &mut sink)
                 .expect("format_to");
-            black_box((&errors, sink.events, sink.bytes));
+            black_box((sink.events, sink.bytes));
         });
     });
 
@@ -962,10 +963,10 @@ fn bench_formatting(c: &mut Criterion) {
         let empty_args: Vec<(u32, Value)> = Vec::new();
         b.iter(|| {
             sink.reset();
-            let errors = formatter
+            formatter
                 .format_to_by_id_for_bench("main", black_box(&empty_args), &mut sink)
                 .expect("format_to");
-            black_box((&errors, sink.events, sink.bytes));
+            black_box((sink.events, sink.bytes));
         });
     });
 
@@ -979,10 +980,10 @@ fn bench_formatting(c: &mut Criterion) {
         let mut sink = CountingSink::default();
         b.iter(|| {
             sink.reset();
-            let errors = formatter
+            formatter
                 .format_to_by_id_for_bench("main", black_box(&markup_option_args), &mut sink)
                 .expect("format_to");
-            black_box((&errors, sink.events, sink.bytes));
+            black_box((sink.events, sink.bytes));
         });
     });
     sink_group.finish();

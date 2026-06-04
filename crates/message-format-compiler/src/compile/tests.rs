@@ -166,8 +166,9 @@ fn markup_option_variables_are_canonicalized_like_other_variables() {
         Value::Str("https://example.test".to_string()),
     )];
     let mut sink = MarkupOptionSink::default();
-    let diagnostics = formatter
-        .format_to(message, &args, &mut sink)
+    let mut diagnostics = vec![];
+    formatter
+        .format_to(message, &args, &mut sink, Some(&mut diagnostics))
         .expect("format");
 
     assert!(diagnostics.is_empty());

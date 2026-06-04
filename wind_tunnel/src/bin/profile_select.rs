@@ -220,8 +220,8 @@ fn main() {
             for _ in 0..iters {
                 out.clear();
                 let mut sink = OutputStringSink { out: &mut out };
-                let _diagnostics = formatter
-                    .format_to(message, &args, &mut sink)
+                formatter
+                    .format_to(message, &args, &mut sink, None)
                     .expect("format");
                 checksum = checksum.wrapping_add(black_box(out.len()));
             }
@@ -239,8 +239,8 @@ fn main() {
             for _ in 0..iters {
                 out.clear();
                 let mut sink = OutputStringSink { out: &mut out };
-                let _diagnostics = formatter
-                    .format_to(message, &args, &mut sink)
+                formatter
+                    .format_to(message, &args, &mut sink, None)
                     .expect("format");
                 checksum = checksum.wrapping_add(black_box(out.len()));
             }
@@ -258,8 +258,8 @@ fn main() {
             for _ in 0..iters {
                 out.clear();
                 let mut sink = OutputStringSink { out: &mut out };
-                let _diagnostics = formatter
-                    .format_to(message, &args, &mut sink)
+                formatter
+                    .format_to(message, &args, &mut sink, None)
                     .expect("format");
                 checksum = checksum.wrapping_add(black_box(out.len()));
             }
@@ -280,8 +280,8 @@ fn main() {
             for _ in 0..iters {
                 out.clear();
                 let mut sink = OutputStringSink { out: &mut out };
-                let _diagnostics = formatter
-                    .format_to(message, &args, &mut sink)
+                formatter
+                    .format_to(message, &args, &mut sink, None)
                     .expect("format");
                 checksum = checksum.wrapping_add(black_box(out.len()));
             }

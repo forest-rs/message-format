@@ -46,7 +46,7 @@ impl<H: Host> FormatterTestExt<H> for Formatter<'_, H> {
     ) -> Result<String, FormatError> {
         let message = self.resolve(message_id)?;
         let mut sink = OutputStringSink::default();
-        let _diagnostics = self.format_to(message, args, &mut sink)?;
+        self.format_to(message, args, &mut sink, None)?;
         Ok(sink.out)
     }
 }

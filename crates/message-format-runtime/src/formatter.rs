@@ -10,7 +10,7 @@ use crate::{
     catalog::Catalog,
     error::{FormatError, Trap},
     value::{Args, MessageArgs, Value},
-    vm::{FormatSink, Host, MessageHandle, run_bytecode},
+    vm::{DiagnosticsSink, FormatSink, Host, MessageHandle, run_bytecode},
 };
 
 #[derive(Default)]
@@ -43,7 +43,7 @@ pub(crate) struct VmState {
 /// }
 /// let mut out = String::new();
 /// let mut sink = StringSink(&mut out);
-/// let _errors = formatter.format_to(message, &[], &mut sink)?;
+/// formatter.format_to(message, &[], &mut sink, None)?;
 /// # Ok(out)
 /// # }
 /// ```
@@ -97,8 +97,8 @@ impl<'a, H: Host> Formatter<'a, H> {
 
     /// Format one message from a previously resolved handle, dispatching events to a [`FormatSink`].
     ///
-    /// Returns recoverable formatting diagnostics collected during fallback
-    /// rendering. Fatal execution failures are returned as `Err`.
+    /// Recoverable formatting diagnostics are collected into [`diagnostics`](DiagnosticsSink)
+    /// during fallback rendering. Fatal execution failures are returned as `Err`.
     ///
     /// This is the runtime API that preserves structured markup. In contrast,
     /// string-oriented convenience helpers flatten only literal/expression text
@@ -108,10 +108,10 @@ impl<'a, H: Host> Formatter<'a, H> {
         message: MessageHandle,
         args: &dyn Args,
         sink: &mut S,
-    ) -> Result<Vec<FormatError>, FormatError> {
+        diagnostics: Option<&mut dyn DiagnosticsSink>,
+    ) -> Result<(), FormatError> {
         #[cfg(feature = "profiling")]
         profiling::function_scope!();
-        let mut diagnostics = alloc::vec![];
         run_bytecode(
             self.catalog,
             &mut self.host,
@@ -121,11 +121,11 @@ impl<'a, H: Host> Formatter<'a, H> {
             self.vm.fuel,
             &mut self.vm.stack,
             sink,
-            Some(&mut diagnostics),
+            diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         )?;
-        Ok(diagnostics)
+        Ok(())
     }
 }
 
@@ -251,6 +251,9 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
 
     /// Format one message, dispatching events to a [`FormatSink`].
     ///
+    /// Recoverable formatting diagnostics are collected into [`diagnostics`](DiagnosticsSink)
+    /// during fallback rendering. Fatal execution failures are returned as `Err`.
+    ///
     /// The handle identifies both the catalog and the message entry point.
     ///
     /// # Args safety
@@ -270,14 +273,14 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
         message: MultiMessageHandle,
         args: &dyn Args,
         sink: &mut S,
-    ) -> Result<Vec<FormatError>, FormatError> {
+        diagnostics: Option<&mut dyn DiagnosticsSink>,
+    ) -> Result<(), FormatError> {
         #[cfg(feature = "profiling")]
         profiling::function_scope!();
         let (catalog, index) = self
             .catalogs
             .get(message.catalog_idx as usize)
             .ok_or(FormatError::Trap(Trap::InvalidCatalogIndex))?;
-        let mut diagnostics = alloc::vec![];
         run_bytecode(
             catalog,
             &mut self.host,
@@ -287,11 +290,11 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             self.vm.fuel,
             &mut self.vm.stack,
             sink,
-            Some(&mut diagnostics),
+            diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         )?;
-        Ok(diagnostics)
+        Ok(())
     }
 }
 
@@ -397,7 +400,7 @@ mod tests {
         let mut mf = mf;
         let mut sink = TestStringSink::default();
         assert_eq!(
-            mf.format_to(bad_handle, &vec![] as &Vec<(u32, Value)>, &mut sink)
+            mf.format_to(bad_handle, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
                 .unwrap_err(),
             FormatError::Trap(Trap::InvalidCatalogIndex)
         );
@@ -426,7 +429,9 @@ mod tests {
         args.insert("who", "world").expect("arg interned in cat2");
 
         let mut sink = TestStringSink::default();
-        let diagnostics = mf.format_to(handle, &args, &mut sink).unwrap();
+        let mut diagnostics = vec![];
+        mf.format_to(handle, &args, &mut sink, Some(&mut diagnostics))
+            .unwrap();
         assert!(diagnostics.is_empty());
         assert_eq!(sink.out, "world");
     }
