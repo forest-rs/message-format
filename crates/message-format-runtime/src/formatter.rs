@@ -10,7 +10,7 @@ use crate::{
     catalog::Catalog,
     error::{FormatError, Trap},
     value::{Args, MessageArgs, Value},
-    vm::{FormatSink, Host, MessageHandle, VecDiagnostics, run_bytecode},
+    vm::{FormatSink, Host, MessageHandle, run_bytecode},
 };
 
 #[derive(Default)]
@@ -111,7 +111,7 @@ impl<'a, H: Host> Formatter<'a, H> {
     ) -> Result<Vec<FormatError>, FormatError> {
         #[cfg(feature = "profiling")]
         profiling::function_scope!();
-        let mut diagnostics = VecDiagnostics::default();
+        let mut diagnostics = alloc::vec![];
         run_bytecode(
             self.catalog,
             &mut self.host,
@@ -125,7 +125,7 @@ impl<'a, H: Host> Formatter<'a, H> {
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         )?;
-        Ok(diagnostics.into_inner())
+        Ok(diagnostics)
     }
 }
 
@@ -277,7 +277,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             .catalogs
             .get(message.catalog_idx as usize)
             .ok_or(FormatError::Trap(Trap::InvalidCatalogIndex))?;
-        let mut diagnostics = VecDiagnostics::default();
+        let mut diagnostics = alloc::vec![];
         run_bytecode(
             catalog,
             &mut self.host,
@@ -291,7 +291,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         )?;
-        Ok(diagnostics.into_inner())
+        Ok(diagnostics)
     }
 }
 

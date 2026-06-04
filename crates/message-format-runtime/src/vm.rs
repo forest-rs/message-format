@@ -237,24 +237,18 @@ pub struct FormatOption<'a> {
     pub value: Cow<'a, str>,
 }
 
-pub(crate) trait DiagnosticsSink {
+/// Sink for runtime error diagnostics.
+///
+/// Implement this trait to receive [`FormatError`] events. \
+/// Already implemented for `Vec<FormatError>`.
+pub trait DiagnosticsSink {
+    /// Record an error into the diagnostics sink.
     fn record(&mut self, error: FormatError);
 }
 
-#[derive(Default)]
-pub(crate) struct VecDiagnostics {
-    errors: Vec<FormatError>,
-}
-
-impl VecDiagnostics {
-    pub(crate) fn into_inner(self) -> Vec<FormatError> {
-        self.errors
-    }
-}
-
-impl DiagnosticsSink for VecDiagnostics {
+impl DiagnosticsSink for Vec<FormatError> {
     fn record(&mut self, error: FormatError) {
-        self.errors.push(error);
+        self.push(error);
     }
 }
 
