@@ -9,20 +9,65 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Facade API for compiling and formatting message-format catalogs."
+description = "Compile and format message-format catalogs."
 
 [features]
 default = ["std"]
-std = ["message-format-runtime/std", "message-format-compiler?/std"]
-icu4x = ["message-format-runtime/icu4x"]
-compile = ["dep:message-format-compiler"]
-profiling = ["dep:profiling", "message-format-runtime/profiling", "message-format-compiler?/profiling"]
+std = []
+icu4x = [
+    "dep:fixed_decimal",
+    "dep:icu_locale",
+    "dep:icu_plurals",
+    "dep:icu_calendar",
+    "dep:icu_datetime",
+]
+compile = [
+    "dep:hashbrown",
+    "dep:icu_normalizer",
+    "dep:libm",
+    "dep:serde",
+    "dep:toml",
+]
+profiling = ["dep:profiling"]
 
 [dependencies]
+# always-on (runtime)
+bitvec = { default-features = false, features = ["alloc"], version = "1.0.1" }
 icu_locale_core = { default-features = false, version = "2.1.1" }
-message-format-compiler = { default-features = false, optional = true, workspace = true }
-message-format-runtime = { workspace = true }
 profiling = { optional = true, workspace = true }
+
+# icu4x (optional, runtime)
+fixed_decimal = { default-features = false, optional = true, version = "0.7.1" }
+icu_calendar = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+icu_datetime = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+icu_locale = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+icu_plurals = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+
+# compile (optional)
+hashbrown = { default-features = false, features = [
+    "default-hasher",
+    "raw-entry",
+], optional = true, version = "0.17.0" }
+icu_normalizer = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.1.1" }
+libm = { optional = true, version = "0.2" }
+serde = { default-features = false, features = [
+    "alloc",
+    "derive",
+], optional = true, version = "1.0" }
+toml = { default-features = false, features = [
+    "parse",
+    "serde",
+], optional = true, version = "0.9" }
 
 [package.metadata.docs.rs]
 all-features = true

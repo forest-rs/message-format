@@ -24,7 +24,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use message_format_compiler::{
+use message_format::compiler::{
     BuildError, CompileOptions, CompileReport, DiagnosticSeverity, FunctionManifest,
     LiteralDeduplication, LiteralStats, ResourceInput, SourceKind, compile_resources,
     compile_resources_with_manifest,
@@ -329,7 +329,7 @@ where
                 diagnostics.push(BuildError {
                     severity: DiagnosticSeverity::Error,
                     context: None,
-                    error: Box::new(message_format_compiler::CompileError::IoError {
+                    error: Box::new(message_format::compiler::CompileError::IoError {
                         path: path.clone(),
                         source: err,
                     }),
@@ -342,7 +342,7 @@ where
             Err(err) => diagnostics.push(BuildError {
                 severity: DiagnosticSeverity::Error,
                 context: None,
-                error: Box::new(message_format_compiler::CompileError::ResourceInputError {
+                error: Box::new(message_format::compiler::CompileError::ResourceInputError {
                     detail: format!("failed to parse {label} {}: {err}", path.display()),
                 }),
             }),
@@ -387,7 +387,7 @@ fn render_literal_stats(stats: LiteralStats) -> String {
     )
 }
 
-fn render_source_map_json(source_map: &message_format_compiler::SourceMap) -> String {
+fn render_source_map_json(source_map: &message_format::compiler::SourceMap) -> String {
     let mut out = String::new();
     out.push_str("{\n  \"sources\": [\n");
     for (index, source) in source_map.sources.iter().enumerate() {

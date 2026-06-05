@@ -4,19 +4,19 @@
 //! Conversion from compiler errors to LSP diagnostics.
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use message_format_compiler::{BuildError, CompileError, ResourceSpan};
+use message_format::compiler::{BuildError, CompileError, ResourceSpan};
 
 fn saturating_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Map compiler severity to LSP severity.
-fn map_severity(severity: message_format_compiler::DiagnosticSeverity) -> DiagnosticSeverity {
+fn map_severity(severity: message_format::compiler::DiagnosticSeverity) -> DiagnosticSeverity {
     match severity {
-        message_format_compiler::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
-        message_format_compiler::DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
-        message_format_compiler::DiagnosticSeverity::Note => DiagnosticSeverity::INFORMATION,
-        message_format_compiler::DiagnosticSeverity::Help => DiagnosticSeverity::HINT,
+        message_format::compiler::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+        message_format::compiler::DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+        message_format::compiler::DiagnosticSeverity::Note => DiagnosticSeverity::INFORMATION,
+        message_format::compiler::DiagnosticSeverity::Help => DiagnosticSeverity::HINT,
     }
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn resource_error_to_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::resource_error_to_diagnostic;
-    use message_format_compiler::ResourceSpan;
+    use message_format::compiler::ResourceSpan;
 
     #[test]
     fn resource_error_uses_span_when_available() {

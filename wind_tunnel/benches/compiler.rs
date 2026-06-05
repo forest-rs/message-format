@@ -9,7 +9,7 @@
 use core::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use message_format_compiler::compile_str;
+use message_format::compiler::compile_str;
 
 fn build_simple_catalog(message_count: usize) -> String {
     let mut source = String::new();

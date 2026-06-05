@@ -1,11 +1,11 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! TOML resource adapter for [`message_format_compiler::ResourceInput`].
+//! TOML resource adapter for [`message_format::compiler::ResourceInput`].
 
 use std::fmt;
 
-use message_format_compiler::{MessageResource, ResourceInput, ResourceSpan, SourceKind};
+use message_format::compiler::{MessageResource, ResourceInput, ResourceSpan, SourceKind};
 use toml::de::DeTable;
 
 /// Parse one project-owned TOML resource container into a compiler [`ResourceInput`].

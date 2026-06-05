@@ -1,7 +1,7 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! JSON resource adapters for [`message_format_compiler::ResourceInput`].
+//! JSON resource adapters for [`message_format::compiler::ResourceInput`].
 //!
 //! JSON localization data is not one format. Different tools and ecosystems use
 //! different object layouts, metadata conventions, and nesting rules. This
@@ -42,7 +42,7 @@
 use std::fmt;
 
 use json_spanned_value::{ErrorExt, spanned::Value as JsonValue};
-use message_format_compiler::{MessageResource, ResourceInput, ResourceSpan, SourceKind};
+use message_format::compiler::{MessageResource, ResourceInput, ResourceSpan, SourceKind};
 
 /// Supported JSON resource/container profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +334,7 @@ impl std::error::Error for ResourceJsonError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use message_format_compiler::{CompileOptions, SourceId, SourceSpan, compile_resources};
+    use message_format::compiler::{CompileOptions, SourceId, SourceSpan, compile_resources};
 
     #[test]
     fn parse_json_resource_dispatches_flat_profile() {

@@ -15,8 +15,8 @@
 use std::{env, hint::black_box};
 
 use icu_locale_core::Locale;
-use message_format_compiler::compile_str;
-use message_format_runtime::{
+use message_format::compiler::compile_str;
+use message_format::runtime::{
     BuiltinHost, Catalog, Formatter, MessageArgs, Value,
     catalog::{FuncEntry, MessageEntry, build_catalog, build_catalog_with_funcs},
     vm,
@@ -193,7 +193,7 @@ fn main() {
         "plain" => {
             let catalog = build_plain_select_catalog();
             let mut formatter =
-                Formatter::new(&catalog, message_format_runtime::NoopHost).expect("formatter");
+                Formatter::new(&catalog, message_format::runtime::NoopHost).expect("formatter");
             let message = formatter.resolve("main").expect("resolved message");
             let args = message_args(&catalog, &[("kind", Value::Str("formal".to_string()))]);
             let mut checksum = 0_usize;

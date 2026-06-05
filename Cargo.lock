@@ -772,32 +772,28 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 name = "message-format"
 version = "0.1.0"
 dependencies = [
+ "bitvec",
+ "fixed_decimal",
+ "hashbrown",
+ "icu_calendar",
+ "icu_datetime",
+ "icu_locale",
  "icu_locale_core",
- "message-format-compiler",
- "message-format-runtime",
+ "icu_normalizer",
+ "icu_plurals",
+ "libm",
  "profiling",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
 name = "message-format-cli"
 version = "0.1.0"
 dependencies = [
- "message-format-compiler",
+ "message-format",
  "message-format-resource-json",
  "message-format-resource-toml",
-]
-
-[[package]]
-name = "message-format-compiler"
-version = "0.1.0"
-dependencies = [
- "hashbrown",
- "icu_normalizer",
- "libm",
- "message-format-runtime",
- "profiling",
- "serde",
- "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -817,7 +813,7 @@ dependencies = [
  "log",
  "lsp-server",
  "lsp-types",
- "message-format-compiler",
+ "message-format",
  "message-format-resource-json",
  "message-format-resource-toml",
  "serde",
@@ -829,7 +825,7 @@ name = "message-format-resource-json"
 version = "0.1.0"
 dependencies = [
  "json-spanned-value",
- "message-format-compiler",
+ "message-format",
  "profiling",
 ]
 
@@ -837,23 +833,9 @@ dependencies = [
 name = "message-format-resource-toml"
 version = "0.1.0"
 dependencies = [
- "message-format-compiler",
+ "message-format",
  "profiling",
  "toml 1.0.6+spec-1.1.0",
-]
-
-[[package]]
-name = "message-format-runtime"
-version = "0.1.0"
-dependencies = [
- "bitvec",
- "fixed_decimal",
- "icu_calendar",
- "icu_datetime",
- "icu_locale",
- "icu_locale_core",
- "icu_plurals",
- "profiling",
 ]
 
 [[package]]
@@ -1371,8 +1353,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "icu_locale_core",
- "message-format-compiler",
- "message-format-runtime",
+ "message-format",
 ]
 
 [[package]]

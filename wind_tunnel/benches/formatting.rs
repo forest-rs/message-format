@@ -9,8 +9,8 @@
 use core::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use icu_locale_core::Locale;
-use message_format_compiler::compile_str;
-use message_format_runtime::{
+use message_format::compiler::compile_str;
+use message_format::runtime::{
     Args, BuiltinHost, Catalog, FormatError, FormatSink, Formatter, Host, HostFn, MessageArgs,
     MessageHandle, NoopHost, Value,
     catalog::{FuncEntry, MessageEntry, build_catalog, build_catalog_with_funcs},
@@ -582,7 +582,7 @@ impl FormatSink for CountingSink {
         self.bytes += value.len();
     }
 
-    fn markup_open(&mut self, name: &str, options: &[message_format_runtime::FormatOption<'_>]) {
+    fn markup_open(&mut self, name: &str, options: &[message_format::runtime::FormatOption<'_>]) {
         self.events += 1;
         self.bytes += name.len();
         for option in options {
@@ -590,7 +590,7 @@ impl FormatSink for CountingSink {
         }
     }
 
-    fn markup_close(&mut self, name: &str, options: &[message_format_runtime::FormatOption<'_>]) {
+    fn markup_close(&mut self, name: &str, options: &[message_format::runtime::FormatOption<'_>]) {
         self.events += 1;
         self.bytes += name.len();
         for option in options {

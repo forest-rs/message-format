@@ -4,11 +4,9 @@ Rust workspace for compiling and executing MessageFormat catalogs.
 
 ## Workspace
 
-- `message-format-runtime`: `no_std` runtime for loading verified catalogs and formatting messages.
-- `message-format-compiler`: compiler from source text to binary catalog bytes.
+- `message-format`: `no_std` core crate containing a runtime (`message_format::runtime`) for loading verified catalogs and formatting messages, plus an optional compiler (`message_format::compiler`, behind the `compile` feature) for compiling source text to binary catalog bytes.
 - `message-format-resource-json`: JSON resource adapters over the compiler resource model.
 - `message-format-resource-toml`: TOML resource adapter over the compiler resource model.
-- `message-format`: facade crate for `no_std` formatting APIs plus optional compiler APIs.
 - `message-format-conformance`: conformance harness for fixtures and golden tests.
 - `apps/message-format-cli`: CLI for compiling explicit resource-adapter inputs into one binary catalog.
 
@@ -74,9 +72,9 @@ cargo run -p message-format-cli -- compile \
   messages/app.messages.json
 ```
 
-For a single raw MF2 message string, use the compiler or facade libraries
-directly (`message-format-compiler::compile_str` or
-`message-format::MessageCatalog::compile_str`). The CLI operates on explicit
+For a single raw MF2 message string, use the compiler module directly
+(`message_format::compiler::compile_str` with the `compile` feature, or
+`message_format::MessageCatalog::compile_str`). The CLI operates on explicit
 resource/container formats rather than guessing message ids from raw MF2 text.
 
 ## Specs
@@ -86,7 +84,7 @@ resource/container formats rather than guessing message ids from raw MF2 text.
 
 ## Docs
 
-- `docs/architecture-boundaries.md`: crate ownership boundaries and pipeline invariants.
-- `docs/error-model.md`: compile/load/format error contracts across crates.
+- `docs/architecture-boundaries.md`: module ownership boundaries and pipeline invariants.
+- `docs/error-model.md`: compile/load/format error contracts across modules.
 - `docs/runtime-vm-semantics.md`: VM execution invariants and host/error contracts.
 - `CONTRIBUTING.md`: contributor workflow, gates, and commit conventions.

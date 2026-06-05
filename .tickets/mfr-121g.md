@@ -8,9 +8,9 @@ type: task
 priority: 3
 assignee: Bruce Mitchener
 ---
-# Extract shared utility code into a common crate
+# Extract shared utility code into a common module
 
-Several pure functions are duplicated between the compiler and runtime crates. A shared message-format-core (no_std compatible) crate could eliminate the duplication. Candidates:
+Several pure functions are duplicated between the compiler and runtime modules. Now that both live in the same crate, a private sibling module could eliminate the duplication without a new crate. Candidates:
 
 - is_valid_number_literal: compiler syntax/literal.rs vs runtime builtin.rs:341
 - strip_bidi_controls: compiler syntax/ident.rs vs runtime builtin.rs:298

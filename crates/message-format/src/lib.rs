@@ -12,7 +12,7 @@
 // END LINEBENDER LINT SET
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
-#![doc = "Facade crate for message-format runtime and optional compiler APIs."]
+#![doc = "Message-format runtime and optional compiler APIs."]
 
 //! # Recommended Flow
 //!
@@ -77,11 +77,12 @@ extern crate alloc;
 extern crate std;
 
 pub use icu_locale_core::Locale;
-pub use message_format_runtime as runtime;
+
+pub mod runtime;
 
 #[cfg(feature = "compile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "compile")))]
-pub use message_format_compiler as compiler;
+pub mod compiler;
 
 mod args;
 mod catalog;

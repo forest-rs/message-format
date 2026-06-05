@@ -9,14 +9,14 @@ Non-goals:
 - Mapping every WG error code in this document.
 
 The project reports errors in three layers:
-- `CompileError` (compiler crate): source parsing/lowering/encoding failures.
-- `CatalogError` (runtime crate): binary catalog decoding/verification failures.
-- `FormatError` (runtime crate): execution-time failures while formatting.
+- `CompileError` (`message_format::compiler`): source parsing/lowering/encoding failures.
+- `CatalogError` (`message_format::runtime`): binary catalog decoding/verification failures.
+- `FormatError` (`message_format::runtime`): execution-time failures while formatting.
 
 In normal usage:
-1. Compile source with `message_format_compiler`.
-2. Load bytes into `message_format_runtime::Catalog`.
-3. Format messages with `message_format_runtime::Formatter`.
+1. Compile source with `message_format::compiler`.
+2. Load bytes into `message_format::runtime::Catalog`.
+3. Format messages with `message_format::runtime::Formatter`.
 
 Each step has its own error type so callers can decide whether the failure is a build problem, data corruption/problem, or runtime-input problem.
 

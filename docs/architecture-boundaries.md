@@ -13,9 +13,9 @@ This document defines ownership boundaries and invariants across the workspace.
 - Full parser grammar specification.
 - Binary wire-format byte listing (see `spec/catalog-binary-format.md`).
 
-## Crate Boundaries
+## Module / Crate Boundaries
 
-### `message-format-compiler`
+### `message_format::compiler` (feature-gated: `compile`)
 
 Owns:
 - Source parsing and semantic validation.
@@ -31,7 +31,7 @@ Invariants:
 - Emitted catalogs satisfy runtime verifier requirements.
 - Compile-time semantic checks happen before bytecode emission.
 
-### `message-format-runtime`
+### `message_format::runtime`
 
 Owns:
 - The executable catalog schema shared with the compiler.
@@ -49,10 +49,10 @@ Invariants:
 - VM instructions are validated and executed with bounded, checked state transitions.
 - Runtime never assumes host function presence for unknown IDs.
 
-### `message-format`
+### `message-format` (crate root)
 
 Owns:
-- End-user facade API over compiler/runtime crates.
+- End-user facade API over the compiler and runtime modules.
 
 Does not own:
 - Compiler internals or VM internals.
@@ -93,6 +93,6 @@ A layer may validate earlier-layer outputs, but must not reintroduce earlier-lay
 
 ## Change Rules
 
-- If a change moves ownership across crates, update this doc in the same change.
+- If a change moves ownership across modules, update this doc in the same change.
 - If a new public error category is introduced, update `docs/error-model.md`.
 - If binary compatibility rules change, update `spec/catalog-binary-format.md`.

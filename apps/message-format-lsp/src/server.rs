@@ -15,7 +15,7 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, InitializeParams, PublishDiagnosticsParams, Url,
 };
-use message_format_compiler::{CompileOptions, FunctionManifest};
+use message_format::compiler::{CompileOptions, FunctionManifest};
 
 use crate::analysis;
 use crate::document::DocumentStore;

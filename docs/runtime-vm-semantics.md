@@ -1,6 +1,6 @@
 # Runtime VM Semantics
 
-This document defines the behavioral contract for `message-format-runtime` VM execution.
+This document defines the behavioral contract for `message_format::runtime` VM execution.
 
 ## Goals
 
@@ -68,7 +68,7 @@ The string-path methods (`format`, `format_resolved`) produce identical output r
 - Execution issues: `FormatError`.
 - Decode errors surfaced during formatting: `FormatError::Decode(CatalogError)`.
 
-See `docs/error-model.md` for cross-crate error taxonomy.
+See `docs/error-model.md` for cross-module error taxonomy.
 
 ## Refactor Guardrails
 

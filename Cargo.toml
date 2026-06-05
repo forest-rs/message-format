@@ -3,11 +3,9 @@ members = [
     "apps/message-format-cli",
     "apps/message-format-lsp",
     "crates/message-format",
-    "crates/message-format-compiler",
     "crates/message-format-conformance",
     "crates/message-format-resource-json",
     "crates/message-format-resource-toml",
-    "crates/message-format-runtime",
     "wind_tunnel",
 ]
 resolver = "2"
@@ -31,10 +29,8 @@ lto = "thin"
 
 [workspace.dependencies]
 message-format = { path = "crates/message-format", version = "0.1.0" }
-message-format-compiler = { default-features = false, path = "crates/message-format-compiler", version = "0.1.0" }
 message-format-resource-json = { path = "crates/message-format-resource-json", version = "0.1.0" }
 message-format-resource-toml = { path = "crates/message-format-resource-toml", version = "0.1.0" }
-message-format-runtime = { path = "crates/message-format-runtime", version = "0.1.0" }
 profiling = { default-features = false, version = "1.0" }
 
 [workspace.lints]

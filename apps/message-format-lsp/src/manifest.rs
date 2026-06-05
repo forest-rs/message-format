@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use message_format_compiler::FunctionManifest;
+use message_format::compiler::FunctionManifest;
 
 /// Well-known manifest file name.
 const MANIFEST_FILENAME: &str = "manifest.toml";

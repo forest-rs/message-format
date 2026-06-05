@@ -13,12 +13,9 @@ env:
   # This should be limited to packages that are intended for publishing.
   RUST_MIN_VER_PKGS: >-
     -p message-format
-    -p message-format-runtime
-    -p message-format-compiler
   # Publishable packages that are expected to build on `no_std` targets.
   RUST_NO_STD_PKGS: >-
     -p message-format
-    -p message-format-runtime
   # List of packages that don't support wasip1
   RUST_NO_WASIP1_PKGS: >-
     --exclude message-format-cli
@@ -32,7 +29,7 @@ env:
     --exclude message-format-lsp
     --exclude wind_tunnel
   # List of features that depend on the standard library and will be excluded from no_std checks.
-  FEATURES_DEPENDING_ON_STD: "std,default,compile,icu4x"
+  FEATURES_DEPENDING_ON_STD: "std,default,icu4x"
 
 
 # Rationale

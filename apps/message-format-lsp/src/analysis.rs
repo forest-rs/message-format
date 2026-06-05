@@ -4,7 +4,7 @@
 //! Per-document analysis: compile source and collect diagnostics.
 
 use lsp_types::Diagnostic;
-use message_format_compiler::{
+use message_format::compiler::{
     CompileOptions, FunctionManifest, ResourceInput, compile_resources,
     compile_resources_with_manifest, compile_with_manifest,
 };
