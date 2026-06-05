@@ -13,6 +13,8 @@
 //! The compiler targets this schema when emitting catalogs. The runtime
 //! verifier and VM interpret the same schema when loading and executing them.
 
+#[cfg(test)]
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -296,7 +298,7 @@ pub(crate) unsafe fn decode_opcode_and_next_pc_unchecked(
 #[cfg(test)]
 pub(crate) struct TestOps {
     code: Vec<u8>,
-    labels: alloc::collections::BTreeMap<&'static str, usize>,
+    labels: BTreeMap<&'static str, usize>,
     /// (label name, patch offset of rel32, `next_pc` after the instruction)
     fixups: Vec<(&'static str, usize, usize)>,
 }
@@ -311,7 +313,7 @@ impl TestOps {
     pub fn new() -> Self {
         Self {
             code: Vec::new(),
-            labels: alloc::collections::BTreeMap::new(),
+            labels: BTreeMap::new(),
             fixups: Vec::new(),
         }
     }
