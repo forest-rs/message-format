@@ -19,7 +19,7 @@
 //! ```rust
 //! # #[cfg(all(feature = "compile", feature = "icu4x"))]
 //! # {
-//! use message_format::{Locale, MessageArgs, runtime::Catalog, compiler::CompileOptions};
+//! use message_format::{Catalog, Locale, MessageArgs, compiler::CompileOptions};
 //!
 //! let source = "Hello { $name }!";
 //! let catalog = Catalog::compile(source, CompileOptions::default()).unwrap();
@@ -42,7 +42,7 @@
 //! ```rust
 //! # #[cfg(all(feature = "compile", feature = "icu4x"))]
 //! # {
-//! use message_format::{CatalogBundle, LocalizedCatalog, Locale, MessageArgs, runtime::Catalog, compiler::CompileOptions};
+//! use message_format::{Catalog, CatalogBundle, LocalizedCatalog, Locale, MessageArgs, compiler::CompileOptions};
 //!
 //! let fr: Locale = "fr".parse().unwrap();
 //! let en: Locale = "en".parse().unwrap();
@@ -91,6 +91,7 @@ mod formatter;
 pub use args::MessageArgs;
 pub use catalog::{CatalogBundle, LocalizedCatalog, LookupError};
 pub use formatter::MessageFormatter;
+pub use runtime::Catalog;
 
 #[cfg(test)]
 mod tests {
@@ -103,7 +104,7 @@ mod tests {
         all(feature = "compile", feature = "icu4x"),
         all(feature = "compile", feature = "std")
     ))]
-    use super::{runtime::Catalog, *};
+    use super::*;
     #[cfg(all(feature = "compile", feature = "std"))]
     use alloc::format;
     #[cfg(all(feature = "compile", feature = "icu4x"))]
