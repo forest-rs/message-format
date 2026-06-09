@@ -74,7 +74,7 @@ cargo run -p message-format-cli -- compile \
 
 For a single raw MF2 message string, use the compiler module directly
 (`message_format::compiler::compile_str` with the `compile` feature, or
-`message_format::MessageCatalog::compile_str`). The CLI operates on explicit
+`message_format::Catalog::compile_str`). The CLI operates on explicit
 resource/container formats rather than guessing message ids from raw MF2 text.
 
 ## Specs
