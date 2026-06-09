@@ -1856,7 +1856,7 @@ fn format_float_with_min_fraction_digits(value: f64, min: usize) -> String {
     // digits and then padded directly. This avoids an extra `to_string()`
     // pass before the precision-formatting path for non-integral values.
     if value.is_finite() && value % 1.0 == 0.0 {
-        let raw = format!("{value:.0}");
+        let raw = value.to_string();
         if min == 0 {
             return raw;
         }

@@ -406,6 +406,71 @@ mod tests {
     }
 
     #[cfg(all(feature = "compile", feature = "icu4x"))]
+    fn compile_and_format(source: &str, args: &MessageArgs) -> String {
+        let catalog = Catalog::compile_str(source).expect("compile");
+        let mut formatter = catalog
+            .formatter_for_locale(&locale("en-US"))
+            .expect("formatter");
+        formatter.format_by_id("main", args).expect("format")
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn compile_integer_large_float_uses_shortest_representation() {
+        let args = MessageArgs::new();
+        assert_eq!(
+            compile_and_format("{1e23 :integer}", &args),
+            "100000000000000000000000"
+        );
+        assert_eq!(
+            compile_and_format("{1e24 :integer}", &args),
+            "1000000000000000000000000"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn compile_number_large_float_uses_shortest_representation() {
+        let args = MessageArgs::new();
+        assert_eq!(
+            compile_and_format("{1e23 :number}", &args),
+            "100000000000000000000000"
+        );
+        assert_eq!(
+            compile_and_format("{1e24 :number}", &args),
+            "1000000000000000000000000"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn compile_number_negative_zero_sign_display() {
+        let args = MessageArgs::new();
+        assert_eq!(
+            compile_and_format("{-0.0 :number signDisplay=always}", &args),
+            "-0"
+        );
+        assert_eq!(
+            compile_and_format("{-0.0 :number signDisplay=never}", &args),
+            "0"
+        );
+        assert_eq!(
+            compile_and_format("{-0.0 :number signDisplay=auto}", &args),
+            "-0"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn compile_offset_large_negative_sign_display_never() {
+        let args = MessageArgs::new();
+        assert_eq!(
+            compile_and_format("{-1e23 :offset subtract=1 signDisplay=never}", &args),
+            "100000000000000000000000"
+        );
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
     #[test]
     fn formatter_host_locale_independent_of_catalog() {
         // Compile a catalog with a bare expression (no :number annotation).

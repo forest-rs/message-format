@@ -129,11 +129,7 @@ pub(super) fn apply_literal_function(
         }
         "integer" => {
             if let Some(value) = parse_number_literal(&literal) {
-                let truncated = if value.is_sign_negative() {
-                    libm::ceil(value)
-                } else {
-                    libm::floor(value)
-                };
+                let truncated = libm::trunc(value);
                 literal = format_signed_number(parse_sign_display(&options), truncated);
             }
         }
@@ -236,12 +232,7 @@ fn parse_sign_display(options: &BTreeMap<String, String>) -> SignDisplay {
 }
 
 fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
-    let out = if libm::fmod(value, 1.0) == 0.0 {
-        format!("{value:.0}")
-    } else {
-        value.to_string()
-    };
-    format_signed_string(sign_display, out)
+    format_signed_string(sign_display, value.to_string())
 }
 
 fn format_signed_string(sign_display: SignDisplay, value: String) -> String {
