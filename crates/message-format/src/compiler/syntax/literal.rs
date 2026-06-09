@@ -131,13 +131,7 @@ pub(crate) fn ensure_well_formed_quoted_pattern_body(
     Ok(())
 }
 
-/// Parse a number literal token using MF2 lexical rules.
-pub(crate) fn parse_number_literal(value: &str) -> Option<f64> {
-    if is_valid_number_literal(value) {
-        return value.parse::<f64>().ok();
-    }
-    None
-}
+use crate::common::text::is_valid_number_literal;
 
 /// ABNF `escaped-char` in quoted literals: `backslash ( backslash / "{" / "|" / "}" )`
 fn decode_quoted_literal(value: &str, line: usize) -> Result<String, CompileError> {
@@ -204,61 +198,4 @@ fn is_unquoted_literal_token(value: &str) -> bool {
 fn is_noncharacter(ch: char) -> bool {
     let cp = ch as u32;
     (0xFDD0..=0xFDEF).contains(&cp) || (cp & 0xFFFE) == 0xFFFE
-}
-
-fn is_valid_number_literal(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
-        return false;
-    }
-
-    let mut idx = 0_usize;
-    if bytes[idx] == b'-' {
-        idx += 1;
-    }
-    if idx >= len {
-        return false;
-    }
-
-    if bytes[idx] == b'0' {
-        idx += 1;
-        if idx < len && bytes[idx].is_ascii_digit() {
-            return false;
-        }
-    } else if bytes[idx].is_ascii_digit() {
-        idx += 1;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-    } else {
-        return false;
-    }
-
-    if idx < len && bytes[idx] == b'.' {
-        idx += 1;
-        let frac_start = idx;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if frac_start == idx {
-            return false;
-        }
-    }
-
-    if idx < len && (bytes[idx] == b'e' || bytes[idx] == b'E') {
-        idx += 1;
-        if idx < len && (bytes[idx] == b'+' || bytes[idx] == b'-') {
-            idx += 1;
-        }
-        let exp_start = idx;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if exp_start == idx {
-            return false;
-        }
-    }
-
-    idx == len
 }

@@ -4,9 +4,8 @@
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::ops::Range;
 
-use crate::compiler::syntax::{
-    ident::canonicalize_identifier, literal::parse_number_literal, span::quoted_snippet,
-};
+use crate::common::text::parse_number_literal;
+use crate::compiler::syntax::{ident::canonicalize_identifier, span::quoted_snippet};
 
 use super::*;
 

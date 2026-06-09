@@ -14,6 +14,7 @@ use alloc::{
 
 use crate::runtime::schema::{self, FuncEntry, MessageEntry};
 
+use crate::common::text::{parse_number_literal, strip_bidi_controls};
 use crate::compiler::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionSchema, FunctionSelectorKeyKind,
 };
@@ -23,10 +24,10 @@ use crate::compiler::semantic::{
     Operand, OperandLiteralKind, Part, SelectArm, SelectExpr, SourceId, SourceInfo, SourceKind,
     SourceSpan,
 };
-use crate::compiler::syntax::ident::{canonicalize_identifier, is_identifier, strip_bidi_controls};
+use crate::compiler::syntax::ident::{canonicalize_identifier, is_identifier};
 use crate::compiler::syntax::literal::{
     decode_text_fragment, ensure_well_formed_quoted_pattern_body, parse_literal_text,
-    parse_number_literal, validate_balanced_braces,
+    validate_balanced_braces,
 };
 mod encoder;
 mod error;

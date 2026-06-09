@@ -10,7 +10,7 @@ use super::local_eval::{
 };
 use super::lower_expression_node_to_part;
 use super::pattern::FunctionOriginContext;
-use crate::compiler::syntax::literal::parse_number_literal;
+use crate::common::text::parse_number_literal;
 
 pub(super) struct DeclarationBindings {
     pub(super) locals: BTreeMap<String, LocalValue>,

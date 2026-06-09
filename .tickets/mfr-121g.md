@@ -1,6 +1,6 @@
 ---
 id: mfr-121g
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-02-22T04:22:34Z

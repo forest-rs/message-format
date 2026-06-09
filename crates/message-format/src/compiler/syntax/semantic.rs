@@ -13,6 +13,7 @@ use core::ops::Range;
 
 use icu_normalizer::ComposingNormalizer;
 
+use crate::common::text::{is_bidi_control, strip_bidi_controls};
 use crate::compiler::compile::CompileError;
 use crate::compiler::semantic::{FunctionOption, FunctionOptionValue, FunctionSpec};
 use crate::compiler::syntax::literal::parse_literal_text;
@@ -21,8 +22,7 @@ use crate::compiler::syntax::span::{SourceContext, byte_to_line_col, quoted_snip
 use crate::compiler::syntax::{
     ast::{DeclarationKind, DeclarationNode, DeclarationPayloadNode},
     ident::{
-        canonicalize_identifier, is_bidi_control, is_identifier, is_ignorable_char,
-        strip_bidi_controls, strip_boundary_bidi_controls,
+        canonicalize_identifier, is_identifier, is_ignorable_char, strip_boundary_bidi_controls,
     },
 };
 

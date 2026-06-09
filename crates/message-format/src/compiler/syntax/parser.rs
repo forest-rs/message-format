@@ -6,6 +6,7 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::ops::Range;
 
+use crate::common::text::is_bidi_control;
 use crate::compiler::compile::CompileError;
 use crate::compiler::syntax::ast::{
     AttributeNode, CallExpressionNode, CallOperandNode, DeclarationKind, DeclarationNode,
@@ -17,7 +18,6 @@ use crate::compiler::syntax::ast::{
 use crate::compiler::syntax::charset::{
     is_mf2_whitespace, is_name_char, is_name_start, is_quoted_char,
 };
-use crate::compiler::syntax::ident::is_bidi_control;
 
 // ─── Parser struct ───────────────────────────────────────────────────────────
 

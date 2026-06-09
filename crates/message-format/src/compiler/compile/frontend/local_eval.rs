@@ -9,7 +9,9 @@ use alloc::{
 
 use super::bindings::{DeclFunction, LocalValue};
 use super::*;
-use crate::compiler::syntax::literal::parse_number_literal;
+use crate::common::text::{
+    SignDisplay, format_signed_number, format_signed_string, parse_number_literal,
+};
 
 pub(super) fn local_function_may_fail_select(function_spec: &FunctionSpec) -> bool {
     match function_spec.name.as_str() {
@@ -215,43 +217,12 @@ fn function_spec_options_map(function_spec: &FunctionSpec) -> BTreeMap<String, S
     map
 }
 
-#[derive(Clone, Copy)]
-enum SignDisplay {
-    Auto,
-    Always,
-    Never,
-}
-
 fn parse_sign_display(options: &BTreeMap<String, String>) -> SignDisplay {
     match options.get("signDisplay").map(String::as_str) {
         Some("always") => SignDisplay::Always,
         Some("never") => SignDisplay::Never,
         Some("auto") | None => SignDisplay::Auto,
         Some(other) => unreachable!("unexpected validated signDisplay value: {other}"),
-    }
-}
-
-fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
-    format_signed_string(sign_display, value.to_string())
-}
-
-fn format_signed_string(sign_display: SignDisplay, value: String) -> String {
-    match sign_display {
-        SignDisplay::Auto => value,
-        SignDisplay::Always => {
-            if value.starts_with('-') || value.starts_with('+') {
-                value
-            } else {
-                format!("+{value}")
-            }
-        }
-        SignDisplay::Never => {
-            if let Some(stripped) = value.strip_prefix('-').or_else(|| value.strip_prefix('+')) {
-                stripped.to_string()
-            } else {
-                value
-            }
-        }
     }
 }
 

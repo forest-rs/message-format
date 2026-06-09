@@ -31,13 +31,7 @@ pub(crate) fn is_identifier_continue_char(ch: char) -> bool {
     crate::compiler::syntax::charset::is_name_char(ch)
 }
 
-/// Returns `true` when `ch` is one of the bidi control characters.
-pub(crate) fn is_bidi_control(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}'
-    )
-}
+use crate::common::text::{is_bidi_control, strip_bidi_controls};
 
 /// Returns `true` for MF2 whitespace and bidi controls.
 pub(crate) fn is_ignorable_char(ch: char) -> bool {
@@ -49,11 +43,6 @@ pub(crate) fn canonicalize_identifier(value: &str) -> String {
     let stripped = strip_bidi_controls(value);
     let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
     normalizer.normalize(&stripped).to_string()
-}
-
-/// Strip all bidi controls in `value`.
-pub(crate) fn strip_bidi_controls(value: &str) -> String {
-    value.chars().filter(|ch| !is_bidi_control(*ch)).collect()
 }
 
 /// Trim boundary whitespace/bidi controls and reject embedded bidi controls.

@@ -18,6 +18,10 @@ use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};
 
+use crate::common::text::{
+    SignDisplay, format_signed_number, format_signed_string, parse_number_literal,
+    strip_bidi_controls,
+};
 use crate::runtime::{
     catalog::Catalog,
     error::{
@@ -156,13 +160,6 @@ enum BuiltinSelectMode {
     None,
     Plural,
     Ordinal,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuiltinSignDisplay {
-    Auto,
-    Always,
-    Never,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -665,7 +662,7 @@ fn format_number(
             }
         }
         Value::Str(v) => {
-            let parsed = parse_number(v).ok_or_else(bad_operand)?;
+            let parsed = parse_number_literal(v).ok_or_else(bad_operand)?;
             if integer_only {
                 Ok(format_signed_string(sign_display, format_trunc(parsed)))
             } else if let Some(min) = minimum_fraction_digits {
@@ -691,7 +688,7 @@ fn format_number(
         }
         _ => {
             let text = value_text(catalog, value).ok_or_else(bad_operand)?;
-            let parsed = parse_number(text).ok_or_else(bad_operand)?;
+            let parsed = parse_number_literal(text).ok_or_else(bad_operand)?;
             if integer_only {
                 Ok(format_signed_string(sign_display, format_trunc(parsed)))
             } else if let Some(min) = minimum_fraction_digits {
@@ -783,7 +780,7 @@ fn format_plural_operand(
                     maximum_fraction_digits,
                 ));
             }
-            let parsed = parse_number(text).ok_or_else(bad_operand)?;
+            let parsed = parse_number_literal(text).ok_or_else(bad_operand)?;
             let digits = minimum_fraction_digits.unwrap_or(0);
             let rendered = format!("{parsed:.digits$}");
             Ok(apply_maximum_fraction_digits(
@@ -851,24 +848,6 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "timeZoneName" => BuiltinOptionKey::TimeZoneName,
         _ => return None,
     })
-}
-
-fn strip_bidi_controls(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| {
-            !matches!(
-                ch,
-                '\u{061C}'
-                    | '\u{200E}'
-                    | '\u{200F}'
-                    | '\u{2066}'
-                    | '\u{2067}'
-                    | '\u{2068}'
-                    | '\u{2069}'
-            )
-        })
-        .collect()
 }
 
 fn validate_builtin_option_values(
@@ -1104,11 +1083,11 @@ fn parse_minimum_integer_digits(
     )
 }
 
-fn parse_sign_display(options: &EffectiveOptions<'_>) -> BuiltinSignDisplay {
+fn parse_sign_display(options: &EffectiveOptions<'_>) -> SignDisplay {
     match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
-        Some("always") => BuiltinSignDisplay::Always,
-        Some("never") => BuiltinSignDisplay::Never,
-        Some("auto") | None => BuiltinSignDisplay::Auto,
+        Some("always") => SignDisplay::Always,
+        Some("never") => SignDisplay::Never,
+        Some("auto") | None => SignDisplay::Auto,
         Some(other) => unreachable!("unexpected validated signDisplay value: {other}"),
     }
 }
@@ -1227,70 +1206,6 @@ fn parse_use_grouping(options: &EffectiveOptions<'_>) -> BuiltinGrouping {
     }
 }
 
-fn parse_number(value: &str) -> Option<f64> {
-    if !is_valid_number_literal(value) {
-        return None;
-    }
-    value.parse::<f64>().ok()
-}
-
-fn is_valid_number_literal(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
-        return false;
-    }
-
-    let mut idx = 0_usize;
-    if bytes[idx] == b'-' {
-        idx += 1;
-    }
-    if idx >= len {
-        return false;
-    }
-
-    if bytes[idx] == b'0' {
-        idx += 1;
-        if idx < len && bytes[idx].is_ascii_digit() {
-            return false;
-        }
-    } else if bytes[idx].is_ascii_digit() {
-        idx += 1;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-    } else {
-        return false;
-    }
-
-    if idx < len && bytes[idx] == b'.' {
-        idx += 1;
-        let frac_start = idx;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if frac_start == idx {
-            return false;
-        }
-    }
-
-    if idx < len && (bytes[idx] == b'e' || bytes[idx] == b'E') {
-        idx += 1;
-        if idx < len && (bytes[idx] == b'+' || bytes[idx] == b'-') {
-            idx += 1;
-        }
-        let exp_start = idx;
-        while idx < len && bytes[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if exp_start == idx {
-            return false;
-        }
-    }
-
-    idx == len
-}
-
 fn format_trunc(value: f64) -> String {
     let text = value.to_string();
     truncate_decimal_text(&text).unwrap_or(text)
@@ -1301,7 +1216,7 @@ fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError>
         Value::Int(v) => exact_i64_to_f64(*v),
         Value::Float(v) => Ok(*v),
         _ => value_text(catalog, value)
-            .and_then(parse_number)
+            .and_then(parse_number_literal)
             .ok_or_else(bad_operand),
     }
 }
@@ -1355,7 +1270,7 @@ fn looks_like_currency_literal(value: &str) -> bool {
     if code.len() != 3 || !code.chars().all(|ch| ch.is_ascii_uppercase()) {
         return false;
     }
-    parse_number(number).is_some()
+    parse_number_literal(number).is_some()
 }
 
 fn format_offset(
@@ -1367,10 +1282,10 @@ fn format_offset(
     let preserve_plus = value_text(catalog, value).is_some_and(|raw| raw.starts_with('+'));
     let add = options
         .get(BuiltinOptionKey::Add)
-        .map(|raw| parse_number(&raw));
+        .map(|raw| parse_number_literal(&raw));
     let subtract = options
         .get(BuiltinOptionKey::Subtract)
-        .map(|raw| parse_number(&raw));
+        .map(|raw| parse_number_literal(&raw));
 
     if add.is_none() && subtract.is_none() {
         return Err(bad_option());
@@ -1390,7 +1305,7 @@ fn format_offset(
         number
     };
     let sign_display = if preserve_plus {
-        BuiltinSignDisplay::Always
+        SignDisplay::Always
     } else {
         parse_sign_display(options)
     };
@@ -1403,13 +1318,13 @@ fn parse_offset_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatE
         Value::Float(v) => Ok(*v),
         _ => {
             let raw = value_text(catalog, value).ok_or_else(bad_operand)?;
-            if let Some(parsed) = parse_number(raw) {
+            if let Some(parsed) = parse_number_literal(raw) {
                 return Ok(parsed);
             }
             let Some(stripped) = raw.strip_prefix('+') else {
                 return Err(bad_operand());
             };
-            parse_number(stripped).ok_or_else(bad_operand)
+            parse_number_literal(stripped).ok_or_else(bad_operand)
         }
     }
 }
@@ -1818,10 +1733,6 @@ fn datetime_field_set(date_style: Length, time_style: Length) -> fieldsets::YMDT
     }
 }
 
-fn format_signed_number(sign_display: BuiltinSignDisplay, value: f64) -> String {
-    format_signed_string(sign_display, value.to_string())
-}
-
 fn format_number_default_locale(value: f64, locale: &Locale) -> String {
     let mut rendered = value.to_string();
     let locale_tag = locale.to_string();
@@ -1829,26 +1740,6 @@ fn format_number_default_locale(value: f64, locale: &Locale) -> String {
         rendered = rendered.replace('.', ",");
     }
     rendered
-}
-
-fn format_signed_string(sign_display: BuiltinSignDisplay, value: String) -> String {
-    match sign_display {
-        BuiltinSignDisplay::Auto => value,
-        BuiltinSignDisplay::Always => {
-            if value.starts_with('-') || value.starts_with('+') {
-                value
-            } else {
-                format!("+{value}")
-            }
-        }
-        BuiltinSignDisplay::Never => {
-            if let Some(stripped) = value.strip_prefix('-').or_else(|| value.strip_prefix('+')) {
-                stripped.to_string()
-            } else {
-                value
-            }
-        }
-    }
 }
 
 fn format_float_with_min_fraction_digits(value: f64, min: usize) -> String {

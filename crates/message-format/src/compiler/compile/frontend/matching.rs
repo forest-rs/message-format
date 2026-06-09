@@ -5,8 +5,8 @@ use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
 use core::ops::Range;
 
 use super::*;
+use crate::common::text::parse_number_literal;
 use crate::compiler::semantic::{SelectorExpr, SourceSpan};
-use crate::compiler::syntax::literal::parse_number_literal;
 
 #[derive(Clone)]
 pub(super) struct MatchKey {

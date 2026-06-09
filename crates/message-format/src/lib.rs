@@ -87,6 +87,7 @@ mod args;
 mod catalog;
 #[cfg(feature = "compile")]
 mod catalog_compile;
+mod common;
 mod formatter;
 pub use args::MessageArgs;
 pub use catalog::{CatalogBundle, LocalizedCatalog, LookupError};
