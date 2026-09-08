@@ -274,6 +274,8 @@ enum SelectorValue<'a> {
         view: ValueView<'a>,
         str_id: Option<u32>,
     },
+    /// Message-local selector resolved lazily for each case comparison.
+    Local(usize),
     InvalidBorrowed,
     Owned(Value),
 }
@@ -282,6 +284,7 @@ enum SelectorValue<'a> {
 enum CaseMatch {
     No,
     Exact,
+    #[cfg(feature = "icu4x")]
     Category,
 }
 
@@ -339,7 +342,21 @@ impl<'a> SelectorValue<'a> {
         }
     }
 
-    fn case_match(&self, case_str_id: u32, catalog: &Catalog) -> Result<CaseMatch, FormatError> {
+    fn case_match(
+        &self,
+        locals: &[Value],
+        case_str_id: u32,
+        catalog: &Catalog,
+    ) -> Result<CaseMatch, FormatError> {
+        if let Self::Local(slot) = self {
+            let value = locals
+                .get(*slot)
+                .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
+            let case = catalog
+                .string(case_str_id)
+                .map_err(|_| FormatError::Trap(Trap::InvalidCaseStringId))?;
+            return Ok(value_case_match(value, case, catalog));
+        }
         if self.fast_str_id().is_some_and(|id| id == case_str_id) {
             return Ok(CaseMatch::Exact);
         }
@@ -349,6 +366,7 @@ impl<'a> SelectorValue<'a> {
             .map_err(|_| FormatError::Trap(Trap::InvalidCaseStringId))?;
         Ok(match self {
             Self::Borrowed { view, .. } => view.case_match(case),
+            Self::Local(_) => unreachable!("local selectors are handled above"),
             Self::InvalidBorrowed => CaseMatch::No,
             Self::Owned(value) => value_case_match(value, case, catalog),
         })
@@ -357,6 +375,7 @@ impl<'a> SelectorValue<'a> {
     fn fast_str_id(&self) -> Option<u32> {
         match self {
             Self::Borrowed { str_id, .. } => *str_id,
+            Self::Local(_) => None,
             Self::InvalidBorrowed => None,
             Self::Owned(Value::StrRef(id)) => Some(*id),
             Self::Owned(_) => None,
@@ -576,6 +595,13 @@ where
                     .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
                 stack.push(value);
             }
+            Opcode::CheckSelector => {
+                let slot = local_slot(code, base)?;
+                let value = locals
+                    .get(slot)
+                    .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
+                check_selector_value(value, &mut diagnostics);
+            }
             Opcode::OutLit
             | Opcode::OutSlice
             | Opcode::OutExpr
@@ -595,12 +621,14 @@ where
             }
             Opcode::SelectArg
             | Opcode::SelectBegin
+            | Opcode::SelectLocal
             | Opcode::CaseStr
             | Opcode::CaseDefault
             | Opcode::SelectEnd => {
                 if let Some(jump_pc) = handle_select_instruction(
                     args,
                     stack,
+                    locals,
                     &mut selector,
                     catalog,
                     &mut diagnostics,
@@ -655,6 +683,18 @@ fn record_diagnostic(diagnostics: &mut Option<&mut dyn DiagnosticsSink>, error: 
     }
 }
 
+fn check_selector_value(value: &Value, diagnostics: &mut Option<&mut dyn DiagnosticsSink>) {
+    #[cfg(feature = "icu4x")]
+    if matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid) {
+        // The declaration already reported the option error. The local
+        // selector contributes only its own selector diagnostic.
+        record_bad_selector(diagnostics, None);
+    }
+    if matches!(value, Value::Fallback(_)) {
+        record_bad_selector(diagnostics, None);
+    }
+}
+
 fn handle_output_instruction<H: Host, S>(
     sink: &mut S,
     host: &mut H,
@@ -701,6 +741,7 @@ where
 fn handle_select_instruction<'a>(
     args: &'a dyn Args,
     stack: &mut Vec<Value>,
+    locals: &[Value],
     selector: &mut Option<SelectorValue<'a>>,
     catalog: &'a Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
@@ -718,20 +759,19 @@ fn handle_select_instruction<'a>(
             *selector = Some(load_selector_value(args, catalog, key_id, diagnostics));
             Ok(None)
         }
+        Opcode::SelectLocal => {
+            *deferred_case = None;
+            let slot = local_slot(code, base)?;
+            if locals.get(slot).is_none() {
+                return Err(FormatError::Trap(Trap::InvalidLocalSlot));
+            }
+            *selector = Some(SelectorValue::Local(slot));
+            Ok(None)
+        }
         Opcode::SelectBegin => {
             *deferred_case = None;
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-            #[cfg(feature = "icu4x")]
-            if matches!(&value, Value::Number(number) if number.selection == NumberSelection::Invalid)
-            {
-                // The failed declaration already reported the option error;
-                // selecting its stored value contributes only the selector
-                // diagnostic and must not duplicate that source error.
-                record_bad_selector(diagnostics, None);
-            }
-            if matches!(&value, Value::Fallback(_)) {
-                record_bad_selector(diagnostics, None);
-            }
+            check_selector_value(&value, diagnostics);
             *selector = Some(SelectorValue::Owned(value));
             Ok(None)
         }
@@ -740,12 +780,13 @@ fn handle_select_instruction<'a>(
                 .as_ref()
                 .ok_or(FormatError::Trap(Trap::CaseStringWithoutSelector))?;
             let case_str_id = read_u32(code, base + 1)?;
-            match selector.case_match(case_str_id, catalog)? {
+            match selector.case_match(locals, case_str_id, catalog)? {
                 CaseMatch::Exact => {
                     *deferred_case = None;
                     let rel = read_i32(code, base + 5)?;
                     apply_rel_jump(pc, next_pc, rel).map(Some)
                 }
+                #[cfg(feature = "icu4x")]
                 CaseMatch::Category => {
                     let rel = read_i32(code, base + 5)?;
                     *deferred_case = Some(apply_rel_jump(pc, next_pc, rel)?);
@@ -1891,6 +1932,41 @@ mod tests {
             vec![FormatError::BadSelector {
                 source: Some(Box::new(FormatError::MissingArg("sel".to_string()))),
             }]
+        );
+    }
+
+    #[test]
+    fn checked_local_selector_reports_fallback_once() {
+        let code = TestOps::new()
+            .load_arg(1)
+            .expr_fallback(3)
+            .store_local(0)
+            .check_selector(0)
+            .select_local(0)
+            .case_str(2, "hit")
+            .case_default("fallback")
+            .label("hit")
+            .out_slice(0, 1)
+            .jmp("end")
+            .label("fallback")
+            .out_slice(1, 1)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
+        let catalog = catalog_for_test(&["main", "missing", "hit", "{$missing}"], "HF", &code);
+        let mut formatter = formatter_noop(&catalog);
+        let mut sink = String::new();
+        let errors = formatter
+            .format_to_for_test_by_id("main", &[], &mut sink)
+            .expect("formatted");
+        assert_eq!(sink, "F");
+        assert_eq!(
+            errors,
+            vec![
+                FormatError::MissingArg("missing".to_string()),
+                FormatError::BadSelector { source: None },
+            ]
         );
     }
 

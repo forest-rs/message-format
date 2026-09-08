@@ -369,9 +369,13 @@ pub(super) fn builtin_numeric_selector_mode(
         SelectorExpr::Call { func, .. } => builtin_numeric_selector_mode_for_func(func),
         SelectorExpr::Local {
             func: Some(func), ..
+        }
+        | SelectorExpr::CheckedLocal {
+            func: Some(func), ..
         } => builtin_numeric_selector_mode_for_func(func),
         SelectorExpr::Var(_)
         | SelectorExpr::Local { func: None, .. }
+        | SelectorExpr::CheckedLocal { func: None, .. }
         | SelectorExpr::Literal(_) => None,
     }
 }
@@ -502,6 +506,9 @@ fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSele
         // considered, without re-running the function call.
         SelectorExpr::Local {
             func: Some(func), ..
+        }
+        | SelectorExpr::CheckedLocal {
+            func: Some(func), ..
         } => match builtin_numeric_selector_mode_for_func(func)? {
             BuiltinNumericSelectorMode::Plural | BuiltinNumericSelectorMode::Ordinal => {
                 Some(NumericSelectorLoweringPlan {
@@ -513,6 +520,7 @@ fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSele
         },
         SelectorExpr::Var(_)
         | SelectorExpr::Local { func: None, .. }
+        | SelectorExpr::CheckedLocal { func: None, .. }
         | SelectorExpr::Literal(_) => None,
     }
 }

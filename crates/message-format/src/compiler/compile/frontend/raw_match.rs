@@ -60,7 +60,21 @@ pub(super) fn lower_raw_match_ir(
 
     let (line, _) = ctx.location(source, 0);
     let candidates = (0..arms.len()).collect::<Vec<_>>();
-    build_nested_match_ir(&selectors.parts, &arms, 0, &candidates, None, line)
+    let mut dispatch_selectors = selectors.parts;
+    let mut checks = Vec::new();
+    for selector in &mut dispatch_selectors {
+        let SelectorExpr::Local { slot, func } = selector else {
+            continue;
+        };
+        let slot = *slot;
+        let func = func.clone();
+        checks.push(Part::CheckSelector(slot));
+        *selector = SelectorExpr::CheckedLocal { slot, func };
+    }
+    let mut dispatch =
+        build_nested_match_ir(&dispatch_selectors, &arms, 0, &candidates, None, line)?;
+    checks.append(&mut dispatch);
+    Ok(checks)
 }
 
 fn annotate_match_key_origins(

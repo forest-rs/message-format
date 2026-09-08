@@ -293,7 +293,10 @@ pub(super) fn rewrite_selector_expr_from_locals(
 ) {
     let (operand, func) = match selector {
         SelectorExpr::Call { operand, func } => (operand, func),
-        SelectorExpr::Var(_) | SelectorExpr::Local { .. } | SelectorExpr::Literal(_) => return,
+        SelectorExpr::Var(_)
+        | SelectorExpr::Local { .. }
+        | SelectorExpr::CheckedLocal { .. }
+        | SelectorExpr::Literal(_) => return,
     };
     for option in &mut func.options {
         let FunctionOptionValue::Var(var) = &option.value else {

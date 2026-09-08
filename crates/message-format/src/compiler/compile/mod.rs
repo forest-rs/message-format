@@ -1010,7 +1010,8 @@ fn collect_builtin_part_errors(parts: &[Part], message: &Message, errors: &mut V
             | Part::Text(_)
             | Part::Literal(_)
             | Part::Var(_)
-            | Part::Local(_) => {}
+            | Part::Local(_)
+            | Part::CheckSelector(_) => {}
         }
     }
 }
@@ -1141,7 +1142,11 @@ fn collect_manifest_part_errors(
                 }
                 collect_manifest_part_errors(default, manifest, message, errors);
             }
-            Part::Text(_) | Part::Literal(_) | Part::Var(_) | Part::Local(_) => {}
+            Part::Text(_)
+            | Part::Literal(_)
+            | Part::Var(_)
+            | Part::Local(_)
+            | Part::CheckSelector(_) => {}
             Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
                 collect_markup_manifest_errors_into(name, options, manifest, message, errors);
             }
@@ -1267,6 +1272,9 @@ fn collect_selector_manifest_errors(
             (Some(operand), Some(func))
         }
         crate::compiler::semantic::SelectorExpr::Local {
+            func: Some(func), ..
+        } => (None, Some(func)),
+        crate::compiler::semantic::SelectorExpr::CheckedLocal {
             func: Some(func), ..
         } => (None, Some(func)),
         _ => (None, None),

@@ -2068,6 +2068,33 @@ fn raw_match_with_numeric_local_selector_falls_back_to_plural_category() {
 
 #[cfg(feature = "icu4x")]
 #[test]
+fn raw_match_rechecks_each_source_local_selector_once() {
+    let source =
+        ".input {$n :number} .match $n $n 1 1 {{exact}} one one {{category}} * * {{fallback}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut sink = String::new();
+    let mut diagnostics = Vec::new();
+    formatter
+        .format_to(message, &[], &mut sink, Some(&mut diagnostics))
+        .expect("formatted");
+    assert_eq!(sink, "fallback");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::MissingArg("n".to_string()),
+            crate::runtime::FormatError::BadSelector { source: None },
+            crate::runtime::FormatError::BadSelector { source: None },
+        ]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
 fn raw_match_with_offset_numeric_local_selector_falls_back_to_plural_category() {
     let source = ".local $n = {2 :number} .local $m = {$n :offset subtract=1} .input {$s :string} .match $m $s 1 a {{exact-a}} one b {{plural-b}} * * {{fallback}}";
     let bytes = compile_str(source).expect("compiled");
@@ -2164,8 +2191,8 @@ fn raw_match_with_dynamic_select_option_uses_default_arm() {
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let code = opcodes(&catalog);
     assert!(code.contains(&schema::Opcode::StoreLocal));
-    assert!(code.contains(&schema::Opcode::LoadLocal));
-    assert!(code.contains(&schema::Opcode::SelectBegin));
+    assert!(code.contains(&schema::Opcode::CheckSelector));
+    assert!(code.contains(&schema::Opcode::SelectLocal));
     let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())

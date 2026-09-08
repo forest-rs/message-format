@@ -137,8 +137,58 @@ pub(super) fn lower_parts(
     literals: &mut LiteralPool,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
+    let mut state = LoweringState::default();
+    lower_parts_inner(parts, string_map, func_map, literals, code, &mut state).map(|_| ())
+}
+
+struct DefaultContinuation<'a> {
+    parts: &'a [Part],
+    depth: usize,
+    jump_sites: Vec<usize>,
+}
+
+#[derive(Default)]
+struct LoweringState<'a> {
+    defaults: Vec<DefaultContinuation<'a>>,
+    depth: usize,
+}
+
+fn lower_parts_inner<'a>(
+    parts: &'a [Part],
+    string_map: &BTreeMap<String, u32>,
+    func_map: &BTreeMap<FunctionCatalogKey, u16>,
+    literals: &mut LiteralPool,
+    code: &mut Vec<u8>,
+    state: &mut LoweringState<'a>,
+) -> Result<bool, CompileError> {
+    if let Some((default_index, continuation)) = state
+        .defaults
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, continuation)| continuation.parts == parts)
+    {
+        let unwind = state
+            .depth
+            .checked_sub(continuation.depth)
+            .ok_or(CompileError::internal(
+                "default continuation outside selector scope",
+            ))?;
+        for _ in 0..unwind {
+            code.push(schema::Opcode::SelectEnd as u8);
+        }
+        code.push(schema::Opcode::Jmp as u8);
+        let rel_pos = code.len();
+        code.extend_from_slice(&0_i32.to_le_bytes());
+        state.defaults[default_index].jump_sites.push(rel_pos);
+        return Ok(true);
+    }
     for part in parts {
         match part {
+            Part::CheckSelector(slot) => {
+                code.push(schema::Opcode::CheckSelector as u8);
+                code.extend_from_slice(&slot.to_le_bytes());
+            }
             Part::Text(value) => {
                 let (off, len) = literals.intern(value)?;
                 code.push(schema::Opcode::OutSlice as u8);
@@ -192,7 +242,7 @@ pub(super) fn lower_parts(
                 );
             }
             Part::Select(select) => {
-                lower_select(select, string_map, func_map, literals, code)?;
+                lower_select(select, string_map, func_map, literals, code, state)?;
             }
             Part::Bind {
                 slot,
@@ -211,7 +261,7 @@ pub(super) fn lower_parts(
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 fn emit_value_part(
@@ -242,6 +292,7 @@ fn emit_value_part(
         }
         Part::Call(call) => emit_call(call, string_map, func_map, code)?,
         Part::Bind { .. }
+        | Part::CheckSelector(_)
         | Part::Text(_)
         | Part::Select(_)
         | Part::MarkupOpen { .. }
@@ -295,12 +346,13 @@ fn emit_markup_options(
     Ok(())
 }
 
-fn lower_select(
-    select: &SelectExpr,
+fn lower_select<'a>(
+    select: &'a SelectExpr,
     string_map: &BTreeMap<String, u32>,
     func_map: &BTreeMap<FunctionCatalogKey, u16>,
     literals: &mut LiteralPool,
     code: &mut Vec<u8>,
+    state: &mut LoweringState<'a>,
 ) -> Result<(), CompileError> {
     emit_selector_start(&select.selector, string_map, func_map, code)?;
 
@@ -320,25 +372,41 @@ fn lower_select(
     let default_rel_pos = code.len();
     code.extend_from_slice(&0_i32.to_le_bytes());
 
+    state.defaults.push(DefaultContinuation {
+        parts: &select.default,
+        depth: state.depth + 1,
+        jump_sites: Vec::new(),
+    });
+    state.depth += 1;
     let mut arm_starts = vec![0_u32; select.arms.len()];
     let mut end_jump_patch_positions = Vec::new();
 
     for (arm_idx, arm) in select.arms.iter().enumerate() {
         arm_starts[arm_idx] = u32::try_from(code.len())
             .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
-        lower_parts(&arm.parts, string_map, func_map, literals, code)?;
-        code.push(schema::Opcode::Jmp as u8);
-        let rel_pos = code.len();
-        code.extend_from_slice(&0_i32.to_le_bytes());
-        end_jump_patch_positions.push(rel_pos);
+        let forwarded = lower_parts_inner(&arm.parts, string_map, func_map, literals, code, state)?;
+        if !forwarded {
+            code.push(schema::Opcode::Jmp as u8);
+            let rel_pos = code.len();
+            code.extend_from_slice(&0_i32.to_le_bytes());
+            end_jump_patch_positions.push(rel_pos);
+        }
     }
 
     let default_start = u32::try_from(code.len())
         .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
-    lower_parts(&select.default, string_map, func_map, literals, code)?;
+    let current_default = state
+        .defaults
+        .pop()
+        .expect("select continuation is registered before its arms");
+    for rel_pos in current_default.jump_sites {
+        patch_rel32(code, rel_pos, default_start)?;
+    }
+    lower_parts_inner(&select.default, string_map, func_map, literals, code, state)?;
     let end_pc = u32::try_from(code.len())
         .map_err(|_| CompileError::size_overflow("bytecode program counter"))?;
     code.push(schema::Opcode::SelectEnd as u8);
+    state.depth -= 1;
 
     for (rel_pos, arm_idx) in dispatch_patches {
         patch_rel32(code, rel_pos, arm_starts[arm_idx])?;
@@ -362,6 +430,11 @@ fn emit_selector_start(
             code.push(schema::Opcode::LoadLocal as u8);
             code.extend_from_slice(&slot.to_le_bytes());
             code.push(schema::Opcode::SelectBegin as u8);
+            Ok(())
+        }
+        SelectorExpr::CheckedLocal { slot, .. } => {
+            code.push(schema::Opcode::SelectLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
             Ok(())
         }
         SelectorExpr::Var(name) => {
@@ -403,6 +476,9 @@ fn lower_selector(
             code.extend_from_slice(&slot.to_le_bytes());
             Ok(())
         }
+        SelectorExpr::CheckedLocal { .. } => Err(CompileError::internal(
+            "checked local selector requires selector-start lowering",
+        )),
         SelectorExpr::Var(name) => {
             emit_operand(&Operand::Var(name.clone()), string_map, func_map, code)?;
             Ok(())
@@ -569,4 +645,98 @@ fn patch_rel32(code: &mut [u8], rel_pos: usize, target_pc: u32) -> Result<(), Co
     let rel_i32 = i32::try_from(rel).map_err(|_| CompileError::size_overflow("jump offset"))?;
     code[rel_pos..rel_pos + 4].copy_from_slice(&rel_i32.to_le_bytes());
     Ok(())
+}
+
+#[cfg(all(test, feature = "icu4x"))]
+mod tests {
+    use super::*;
+    use crate::compiler::compile_str;
+    use crate::runtime::{BuiltinHost, Catalog, Formatter, Value};
+
+    fn opcode_count(catalog: &Catalog) -> usize {
+        let mut pc = 0;
+        let mut count = 0;
+        while pc < catalog.code().len() {
+            pc += schema::Opcode::try_from(catalog.code()[pc])
+                .expect("valid opcode")
+                .bytes();
+            count += 1;
+        }
+        count
+    }
+
+    fn numeric_match(exacts: usize, keywords: usize) -> Catalog {
+        let mut source = String::from(".input {$a :number}\n.input {$b :number}\n.match $a $b\n");
+        for n in 0..exacts {
+            source.push_str(&format!("{n} {n} {{{{exact{n}}}}}\n"));
+        }
+        for key in ["one", "two", "few"].into_iter().take(keywords) {
+            source.push_str(&format!("{key} {key} {{{{{key}}}}}\n"));
+        }
+        source.push_str("* * {{fallback}}");
+        let bytes = compile_str(&source).expect("compiled");
+        Catalog::from_bytes(&bytes).expect("shared defaults verify")
+    }
+
+    fn format_numbers(catalog: &Catalog, args: &[(&str, i64)]) -> String {
+        let locale = "ru".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(catalog, host).expect("formatter");
+        let handle = formatter.resolve("main").expect("handle");
+        let args = args
+            .iter()
+            .map(|(name, value)| {
+                (
+                    catalog.string_id(name).expect("argument id"),
+                    Value::Int(*value),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut output = String::new();
+        let mut errors = Vec::new();
+        formatter
+            .format_to(handle, &args, &mut output, Some(&mut errors))
+            .expect("formatted");
+        assert!(errors.is_empty(), "{errors:?}");
+        output
+    }
+
+    #[test]
+    fn shared_defaults_keep_two_selector_bytecode_linear() {
+        for keywords in [1, 3] {
+            let counts = [3, 6, 12].map(|exacts| opcode_count(&numeric_match(exacts, keywords)));
+            // Previously 134/246 instructions for just three exact keys.
+            assert!(counts[0] <= 100, "{keywords} keyword arms: {counts:?}");
+            assert!(counts[1] - counts[0] <= 36, "{counts:?}");
+            assert!(counts[2] - counts[1] <= 72, "{counts:?}");
+            let catalog = numeric_match(3, keywords);
+            assert_eq!(format_numbers(&catalog, &[("a", 1), ("b", 1)]), "exact1");
+            // The second selector rejects the exact branch; retry the first
+            // selector's plural category instead of going straight to '*'.
+            assert_eq!(format_numbers(&catalog, &[("a", 1), ("b", 21)]), "one");
+            assert_eq!(format_numbers(&catalog, &[("a", 1), ("b", 2)]), "fallback");
+            if keywords == 3 {
+                assert_eq!(format_numbers(&catalog, &[("a", 2), ("b", 22)]), "few");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_defaults_unwind_three_selector_levels() {
+        let source = ".input {$a :number}\n.input {$b :number}\n.input {$c :number}\n.match $a $b $c\n1 1 0 {{exact}}\none one one {{category}}\n* * * {{fallback}}";
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("shared defaults verify");
+        assert_eq!(
+            format_numbers(&catalog, &[("a", 1), ("b", 1), ("c", 0)]),
+            "exact"
+        );
+        assert_eq!(
+            format_numbers(&catalog, &[("a", 1), ("b", 21), ("c", 31)]),
+            "category"
+        );
+        assert_eq!(
+            format_numbers(&catalog, &[("a", 1), ("b", 21), ("c", 2)]),
+            "fallback"
+        );
+    }
 }
