@@ -60,6 +60,9 @@ pub enum Opcode {
     StoreLocal = 0x12,
     /// Load a cloned value from a message-local slot.
     LoadLocal = 0x13,
+    /// Load an argument by string-pool id, falling back to a string-pool id
+    /// when the argument is missing.
+    LoadOptionArg = 0x14,
     /// Validate a message-local selector value without consuming it.
     CheckSelector = 0x15,
     /// Output pool string by id.
@@ -106,6 +109,7 @@ impl Opcode {
             Self::JmpIfFalse => 5,
             Self::PushConst => 5,
             Self::LoadArg => 5,
+            Self::LoadOptionArg => 9,
             Self::CheckSelector | Self::StoreLocal | Self::LoadLocal | Self::SelectLocal => 5,
             Self::OutLit => 5,
             Self::OutSlice => 9,
@@ -136,6 +140,7 @@ impl TryFrom<u8> for Opcode {
             0x02 => Ok(Self::JmpIfFalse),
             0x10 => Ok(Self::PushConst),
             0x11 => Ok(Self::LoadArg),
+            0x14 => Ok(Self::LoadOptionArg),
             0x15 => Ok(Self::CheckSelector),
             0x12 => Ok(Self::StoreLocal),
             0x13 => Ok(Self::LoadLocal),
