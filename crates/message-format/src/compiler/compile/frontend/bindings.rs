@@ -128,9 +128,7 @@ pub(super) fn collect_declaration_bindings(
 }
 
 fn bindings_input_needs_slot(functions: &BTreeMap<String, DeclFunction>, name: &str) -> bool {
-    functions.get(name).is_some_and(|function| {
-        !(function.func.name == "string" && function.func.options.is_empty())
-    })
+    functions.contains_key(name)
 }
 
 fn collect_input_declarations(
@@ -254,7 +252,11 @@ fn evaluate_local_value(
             };
             // Numeric calls and calls over a non-literal declaration remain
             // runtime values; folding them would lose exact payload/options.
-            if matches!(func.name.as_str(), "number" | "integer" | "offset") || base.is_none() {
+            if matches!(
+                func.name.as_str(),
+                "string" | "number" | "integer" | "offset"
+            ) || base.is_none()
+            {
                 Some(LocalValue::Call)
             } else {
                 let Some(Operand::Literal { value, .. }) = base else {

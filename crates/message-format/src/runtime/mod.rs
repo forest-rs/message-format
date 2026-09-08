@@ -177,14 +177,20 @@
 //! [`UnsupportedOperation::NumericMagnitude`] when checked storage limits
 //! are exceeded.
 //!
+//! `Value::String` carries a resolved string payload and direction metadata.
+//! Use `ResolvedString::text` for semantic text and
+//! [`Host::format_default`] when rendering so direction metadata is applied at
+//! output. Exhaustive `Value` matches must account for this resolved variant.
+//!
 //! Catalog loading now rejects local loads without prior initialization on
 //! every reachable path, and stores that skip a local slot. Exhaustive
 //! [`CatalogError`] matches must handle [`CatalogError::InvalidLocalSlot`].
 //!
-//! Recompile catalogs to use separate `CheckSelector`/`SelectLocal` instructions.
-//! Structured compiler inputs gain `Part::CheckSelector` and
-//! `SelectorExpr::CheckedLocal`; exhaustive semantic matches must handle these
-//! variants. The check belongs before dispatch, once per source selector.
+//! Recompile catalogs to use eager string declarations and the separate
+//! `CheckSelector`/`SelectLocal` instructions. Structured compiler inputs gain
+//! `Part::CheckSelector` and `SelectorExpr::CheckedLocal`; exhaustive semantic
+//! matches must handle these variants. The check belongs before dispatch,
+//! once per source selector, including repeated uses of the same local.
 
 #[cfg(feature = "icu4x")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
@@ -202,9 +208,9 @@ pub use error::{
 };
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
-#[cfg(feature = "icu4x")]
-pub use value::ResolvedNumber;
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, StrId, Value};
+#[cfg(feature = "icu4x")]
+pub use value::{ResolvedNumber, ResolvedString};
 pub use vm::{FormatOption, FormatSink, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.

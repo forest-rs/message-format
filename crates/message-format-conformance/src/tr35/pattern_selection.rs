@@ -139,11 +139,17 @@ fn literal_key_quoted_unquoted_equal() {
 /// E-7/SEL-5 — Selector with missing arg: only catch-all matches.
 #[test]
 fn selector_missing_arg_falls_to_catchall() {
-    assert_format_with_error(
+    let output = format_output(
         ".input { $x :string }\n.match $x\na {{A}}\n* {{CATCHALL}}",
         &[], // no args → selector can't resolve
-        "CATCHALL",
-        bad_selector_with_source(missing_arg("x")),
+    );
+    assert_eq!(output.value, "CATCHALL");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            FormatError::MissingArg("x".into()),
+            FormatError::BadSelector { source: None },
+        ],
     );
 }
 

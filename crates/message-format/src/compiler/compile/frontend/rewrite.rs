@@ -56,20 +56,6 @@ pub(super) fn lower_declaration_prelude(
             continue;
         };
         let mut value = lower_expression_node_to_part(source, expression, ctx, function_origin)?;
-        if let Part::Call(CallExpr {
-            operand: Operand::Var(var),
-            func,
-            ..
-        }) = &value
-            && declarations
-                .inputs
-                .iter()
-                .any(|decl| decl.canonical == name)
-            && func.name == "string"
-            && func.options.is_empty()
-        {
-            value = Part::Var(var.clone());
-        }
         if let Part::Call(call) = &mut value {
             call.fallback = Some(format!("{{${name}}}"));
         }

@@ -302,8 +302,6 @@ enum ExprStatePendingErrors {
 
 struct ExprState {
     fallback_id: Option<u32>,
-    failed_fallback_id: Option<u32>,
-    call_failed: bool,
     pending_errors: ExprStatePendingErrors,
 }
 
@@ -387,8 +385,6 @@ impl ExprState {
     fn new(diagnostics: &Option<&mut dyn DiagnosticsSink>) -> Self {
         Self {
             fallback_id: None,
-            failed_fallback_id: None,
-            call_failed: false,
             pending_errors: match diagnostics {
                 Some(_) => ExprStatePendingErrors::All(Vec::new()),
                 None => ExprStatePendingErrors::Minimal { any: false },
@@ -408,23 +404,10 @@ impl ExprState {
     }
 
     fn should_skip_call(&self) -> bool {
-        self.call_failed
-            || match &self.pending_errors {
-                ExprStatePendingErrors::Minimal { any } => *any,
-                ExprStatePendingErrors::All(errors) => !errors.is_empty(),
-            }
-    }
-
-    fn mark_call_failed(&mut self) {
-        self.call_failed = true;
-    }
-
-    fn clear_call_failed(&mut self) {
-        self.call_failed = false;
-    }
-
-    fn clear_failed_fallback(&mut self) {
-        self.failed_fallback_id = None;
+        match &self.pending_errors {
+            ExprStatePendingErrors::Minimal { any } => *any,
+            ExprStatePendingErrors::All(errors) => !errors.is_empty(),
+        }
     }
 
     fn clear_fallback(&mut self) {
@@ -441,7 +424,6 @@ impl ExprState {
         catalog: &Catalog,
     ) -> Result<(), FormatError> {
         let fallback_id = self.fallback_id.take();
-        self.failed_fallback_id = fallback_id;
         push_expr_fallback(stack, catalog, fallback_id)
     }
 
@@ -470,9 +452,7 @@ impl ExprState {
         catalog: &Catalog,
         diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     ) -> Result<Value, FormatError> {
-        let failed = self.should_skip_call()
-            || self.failed_fallback_id.is_some()
-            || matches!(value, Value::Fallback(_));
+        let failed = self.should_skip_call() || matches!(value, Value::Fallback(_));
         if let Some(pending_errors) = self.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
@@ -480,11 +460,7 @@ impl ExprState {
         }
 
         let value = if failed {
-            if let Some(fallback_id) = self
-                .fallback_id
-                .take()
-                .or_else(|| self.failed_fallback_id.take())
-            {
+            if let Some(fallback_id) = self.fallback_id.take() {
                 catalog
                     .string(fallback_id)
                     .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
@@ -496,9 +472,7 @@ impl ExprState {
             value
         };
 
-        self.clear_call_failed();
         self.clear_fallback();
-        self.failed_fallback_id = None;
         Ok(value)
     }
 }
@@ -538,17 +512,6 @@ where
         }
 
         let (base, opcode, next_pc) = decode_opcode_and_next_pc(code, pc)?;
-
-        // A failed function call leaves its fallback marker live until the
-        // declaration's StoreLocal consumes it. For an ordinary expression,
-        // the following instruction (usually OutVal) ends that expression;
-        // clear the marker before it can affect a later call.
-        if opcode != Opcode::StoreLocal {
-            expr_state.clear_call_failed();
-            if opcode != Opcode::ExprFallback {
-                expr_state.clear_failed_fallback();
-            }
-        }
 
         match opcode {
             Opcode::Halt => break,
@@ -1004,7 +967,6 @@ fn handle_call_instruction<H: Host>(
             stack.push(Value::Null);
         } else {
             expr_state.push_fallback(stack, catalog)?;
-            expr_state.mark_call_failed();
         }
         return Ok(());
     }
@@ -1059,7 +1021,6 @@ fn handle_call_instruction<H: Host>(
             } else if expr_state.has_fallback() {
                 record_diagnostic(diagnostics, err);
                 expr_state.clear_pending_errors();
-                expr_state.mark_call_failed();
                 expr_state.push_fallback(stack, catalog)
             } else {
                 Err(err)
@@ -1077,7 +1038,7 @@ fn push_expr_fallback(
         catalog
             .string(fb_id)
             .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
-        stack.push(Value::StrRef(fb_id));
+        stack.push(Value::Fallback(fb_id));
     } else {
         stack.push(Value::Null);
     }
@@ -1146,6 +1107,8 @@ enum ValueView<'a> {
     Int(i64),
     Float(f64),
     Text(&'a str),
+    #[cfg(feature = "icu4x")]
+    ExactText(&'a str),
     Fallback(&'a str),
     ResolvedSelect(&'a str),
     #[cfg(feature = "icu4x")]
@@ -1160,6 +1123,8 @@ impl<'a> ValueView<'a> {
             Value::Int(v) => Some(Self::Int(*v)),
             Value::Float(v) => Some(Self::Float(*v)),
             Value::Str(v) => Some(Self::Text(v)),
+            #[cfg(feature = "icu4x")]
+            Value::String(v) => Some(Self::ExactText(v.text())),
             Value::StrRef(id) => catalog.pool_string_opt(*id).map(Self::Text),
             Value::Fallback(id) => catalog.pool_string_opt(*id).map(Self::Fallback),
             Value::LitRef { off, len } => catalog.literal_opt(*off, *len).map(Self::Text),
@@ -1179,6 +1144,8 @@ impl<'a> ValueView<'a> {
             }
             Self::Float(v) => sink.expression(&v.to_string()),
             Self::Text(v) => sink.expression(v),
+            #[cfg(feature = "icu4x")]
+            Self::ExactText(v) => sink.expression(v),
             Self::Fallback(v) => sink.expression(v),
             Self::ResolvedSelect(v) => sink.expression(v),
             #[cfg(feature = "icu4x")]
@@ -1196,6 +1163,8 @@ impl<'a> ValueView<'a> {
             Self::Int(v) => Cow::Owned(v.to_string()),
             Self::Float(v) => Cow::Owned(v.to_string()),
             Self::Text(v) => Cow::Borrowed(v),
+            #[cfg(feature = "icu4x")]
+            Self::ExactText(v) => Cow::Borrowed(v),
             Self::Fallback(v) => Cow::Borrowed(v),
             Self::ResolvedSelect(v) => Cow::Borrowed(v),
             #[cfg(feature = "icu4x")]
@@ -1234,6 +1203,14 @@ impl<'a> ValueView<'a> {
             }
             Self::Text(v) => {
                 if string_value_matches_case(v, case) {
+                    CaseMatch::Exact
+                } else {
+                    CaseMatch::No
+                }
+            }
+            #[cfg(feature = "icu4x")]
+            Self::ExactText(v) => {
+                if v == case {
                     CaseMatch::Exact
                 } else {
                     CaseMatch::No
@@ -1287,6 +1264,8 @@ impl<'a> ValueView<'a> {
             Self::Int(v) => v == 0,
             Self::Float(v) => v == 0.0,
             Self::Text(v) => v.is_empty(),
+            #[cfg(feature = "icu4x")]
+            Self::ExactText(v) => v.is_empty(),
             Self::Fallback(v) => v.is_empty(),
             Self::ResolvedSelect(v) => v == "0",
             #[cfg(feature = "icu4x")]
@@ -1896,13 +1875,64 @@ mod tests {
     }
 
     #[test]
+    fn propagated_fallback_skips_nested_call_after_option_operands() {
+        let code = TestOps::new()
+            .load_arg(1)
+            .expr_fallback(2)
+            .store_local(0)
+            .load_local(0)
+            .push_const(4)
+            .push_const(5)
+            .expr_fallback(3)
+            .call_func(0, 1, 1)
+            .out_val()
+            .halt()
+            .build();
+        let catalog = catalog_for_test(
+            &[
+                "main",
+                "missing",
+                "{$missing}",
+                "{$outer}",
+                "option",
+                "value",
+            ],
+            "",
+            &code,
+        );
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_, _, _| panic!("propagated fallback must not call the host")),
+        )
+        .expect("host");
+        let mut sink = String::new();
+        let errors = formatter
+            .format_to_for_test_by_id("main", &[], &mut sink)
+            .expect("formatted");
+        assert_eq!(sink, "{$outer}");
+        assert_eq!(errors, vec![FormatError::MissingArg("missing".to_string())]);
+
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_, _, _| panic!("propagated fallback must not call the host")),
+        )
+        .expect("host");
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &[])
+                .expect("formatted"),
+            "{$outer}"
+        );
+    }
+
+    #[test]
     fn expr_fallback_uses_strref_when_catalog_string_exists() {
         let catalog = catalog_for_test(&["main", "{$name}"], "", &[Opcode::Halt as u8]);
         let mut stack = Vec::new();
 
         push_expr_fallback(&mut stack, &catalog, Some(1)).expect("fallback");
 
-        assert_eq!(stack, vec![Value::StrRef(1)]);
+        assert_eq!(stack, vec![Value::Fallback(1)]);
     }
 
     #[test]

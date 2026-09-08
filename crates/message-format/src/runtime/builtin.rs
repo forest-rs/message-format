@@ -32,7 +32,7 @@ use crate::runtime::{
     },
     value::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
-        ResolvedNumber, ResolvedSelect, Value,
+        ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
     vm::Host,
 };
@@ -351,7 +351,7 @@ impl BuiltinHost {
         validate_builtin_option_values(entry.func, &options)?;
 
         match entry.func {
-            BuiltinFn::String => Ok(Value::Str(format_string(catalog, raw_arg, &options))),
+            BuiltinFn::String => Ok(Value::String(format_string(catalog, raw_arg, &options))),
             BuiltinFn::Number | BuiltinFn::Integer => {
                 let integer_only = entry.func == BuiltinFn::Integer;
                 if opts.iter().any(|(key_id, _)| {
@@ -613,6 +613,14 @@ impl Host for BuiltinHost {
         match value {
             Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
             Value::Number(number) => render_resolved_number(catalog, number),
+            Value::String(value) => Some(apply_bidi_dir(
+                Cow::Borrowed(value.text()),
+                Some(match value.direction {
+                    StringDirection::Auto => "auto",
+                    StringDirection::Ltr => "ltr",
+                    StringDirection::Rtl => "rtl",
+                }),
+            )),
             _ => None,
         }
     }
@@ -627,6 +635,7 @@ fn plain_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Cow<'a, str> {
         Value::Int(v) => Cow::Owned(v.to_string()),
         Value::Float(v) => Cow::Owned(v.to_string()),
         Value::Str(v) => Cow::Borrowed(v.as_str()),
+        Value::String(v) => Cow::Borrowed(v.text()),
         Value::StrRef(id) => catalog
             .pool_string_opt(*id)
             .map(Cow::Borrowed)
@@ -658,9 +667,22 @@ fn parse_static_select_mode(
     }
 }
 
-fn format_string(catalog: &Catalog, value: &Value, options: &EffectiveOptions<'_>) -> String {
+fn format_string(
+    catalog: &Catalog,
+    value: &Value,
+    options: &EffectiveOptions<'_>,
+) -> ResolvedString {
     let dir = options.get(BuiltinOptionKey::UDir);
-    apply_bidi_dir(plain_text(catalog, value), dir.as_deref())
+    let text = plain_text(catalog, value).into_owned();
+    let direction = match dir.as_deref() {
+        Some("ltr") => StringDirection::Ltr,
+        Some("rtl") => StringDirection::Rtl,
+        _ => StringDirection::Auto,
+    };
+    ResolvedString {
+        text: text.into_boxed_str(),
+        direction,
+    }
 }
 
 fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
@@ -669,6 +691,7 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
         Value::StrRef(id) => catalog.pool_string_opt(*id),
         Value::LitRef { off, len } => catalog.literal_opt(*off, *len),
         Value::ResolvedSelect(value) => Some(value.text()),
+        Value::String(value) => Some(value.text()),
         _ => None,
     }
 }
@@ -2547,6 +2570,13 @@ mod tests {
         assert_eq!(rendered, expected);
     }
 
+    fn assert_string_resolved(value: Value, expected_text: &str) {
+        match value {
+            Value::String(value) => assert_eq!(value.text(), expected_text),
+            other => panic!("expected resolved string, got {other:?}"),
+        }
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "builtin host must only surface function-shaped errors")]
@@ -2928,21 +2958,19 @@ mod tests {
             (
                 "string u:dir=ltr",
                 "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}",
-                "\u{2066}\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}\u{2069}",
             ),
-            ("string u:dir=rtl", "hello", "\u{2067}hello\u{2069}"),
+            ("string u:dir=rtl", "hello"),
             (
                 "string u:dir=auto",
                 "\u{05E9}\u{05DC}\u{05D5}\u{05DD} world",
-                "\u{2068}\u{05E9}\u{05DC}\u{05D5}\u{05DD} world\u{2069}",
             ),
         ];
-        for (func, input, expected) in cases {
+        for (func, input) in cases {
             let mut host = builtin_host(&[func]);
             let out = host
                 .call(0, &[Value::Str(input.to_string())], &[])
                 .expect("formatted");
-            assert_eq!(out, Value::Str(expected.to_string()));
+            assert_string_resolved(out, input);
         }
     }
 
@@ -2952,7 +2980,7 @@ mod tests {
         let out = host
             .call(0, &[Value::Str("abc".to_string())], &[])
             .expect("formatted");
-        assert_eq!(out, Value::Str("\u{2067}abc\u{2069}".to_string()));
+        assert_string_resolved(out, "abc");
     }
 
     #[test]
@@ -2967,7 +2995,7 @@ mod tests {
         let mut host = builtin_host(&["string u:dir=auto"]);
         let input = Value::Str("\u{2066}world\u{2069}".to_string());
         let out = host.call(0, &[input], &[]).expect("formatted");
-        assert_eq!(out, Value::Str("\u{2066}world\u{2069}".to_string()));
+        assert_string_resolved(out, "\u{2066}world\u{2069}");
     }
 
     #[test]
@@ -2979,7 +3007,7 @@ mod tests {
         let string_out = host
             .call(0, &[Value::StrRef(hello_id)], &[])
             .expect("formatted");
-        assert_eq!(string_out, Value::Str("\u{2068}hello\u{2069}".to_string()));
+        assert_string_resolved(string_out, "hello");
 
         let number_out = host
             .call(1, &[Value::StrRef(number_id)], &[])
@@ -2994,7 +3022,7 @@ mod tests {
         let string_out = host
             .call(0, &[Value::LitRef { off: 0, len: 5 }], &[])
             .expect("formatted");
-        assert_eq!(string_out, Value::Str("\u{2068}hello\u{2069}".to_string()));
+        assert_string_resolved(string_out, "hello");
 
         let number_out = host
             .call(1, &[Value::LitRef { off: 5, len: 4 }], &[])

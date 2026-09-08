@@ -33,6 +33,9 @@ pub enum Value {
     Float(f64),
     /// Owned UTF-8 string.
     Str(String),
+    /// String resolved by the `string` function, retaining direction metadata.
+    #[cfg(feature = "icu4x")]
+    String(ResolvedString),
     /// Reference to a catalog string-pool entry.
     StrRef(StrId),
     /// Fallback expression text from the catalog string pool.
@@ -59,6 +62,37 @@ pub enum Value {
     ResolvedSelect(Box<ResolvedSelect>),
 }
 
+/// String payload resolved by the `string` function.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedString {
+    /// Raw resolved text without bidi isolation controls.
+    pub(crate) text: Box<str>,
+    /// Direction requested by the string function.
+    pub(crate) direction: StringDirection,
+}
+
+/// Direction metadata retained on a resolved string.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StringDirection {
+    /// Automatic direction selection.
+    Auto,
+    /// Left-to-right isolation.
+    Ltr,
+    /// Right-to-left isolation.
+    Rtl,
+}
+
+#[cfg(feature = "icu4x")]
+impl ResolvedString {
+    /// Return the raw resolved text without direction isolation controls.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 /// Value produced by the test-only `test:select` function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSelect {
@@ -66,6 +100,7 @@ pub struct ResolvedSelect {
 }
 
 impl ResolvedSelect {
+    #[cfg(feature = "icu4x")]
     pub(crate) fn new(text: String) -> Self {
         Self { text }
     }
