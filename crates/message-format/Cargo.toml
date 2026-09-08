@@ -34,23 +34,23 @@ profiling = ["dep:profiling"]
 [dependencies]
 # always-on (runtime)
 bitvec = { default-features = false, features = ["alloc"], version = "1.0.1" }
-icu_locale_core = { default-features = false, version = "2.1.1" }
+icu_locale_core = { default-features = false, version = "2.3.0" }
 profiling = { optional = true, workspace = true }
 
 # icu4x (optional, runtime)
-fixed_decimal = { default-features = false, optional = true, version = "0.7.1" }
+fixed_decimal = { default-features = false, optional = true, version = "0.7.2" }
 icu_calendar = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.1.1" }
+], optional = true, version = "2.3.0" }
 icu_datetime = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.1.1" }
+], optional = true, version = "2.3.0" }
 icu_locale = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.1.1" }
+], optional = true, version = "2.3.1" }
 icu_plurals = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.1.1" }
+], optional = true, version = "2.3.0" }
 
 # compile (optional)
 hashbrown = { default-features = false, features = [
@@ -59,7 +59,7 @@ hashbrown = { default-features = false, features = [
 ], optional = true, version = "0.17.0" }
 icu_normalizer = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.1.1" }
+], optional = true, version = "2.3.0" }
 libm = { optional = true, version = "0.2" }
 serde = { default-features = false, features = [
     "alloc",
