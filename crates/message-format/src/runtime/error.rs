@@ -31,6 +31,13 @@ pub enum CatalogError {
         /// Invalid program counter.
         pc: u32,
     },
+    /// Bytecode accessed a local slot before it was initialized or skipped a slot.
+    InvalidLocalSlot {
+        /// Program counter of the offending instruction.
+        pc: u32,
+        /// Referenced local slot.
+        slot: u32,
+    },
     /// A jump target did not land on an instruction boundary.
     BadJump {
         /// Source instruction program counter.
@@ -152,6 +159,8 @@ pub enum UnsupportedOperation {
     TimeFormattingForLocale,
     /// Datetime formatting is unavailable for the active locale.
     DateTimeFormattingForLocale,
+    /// Numeric offset arithmetic exceeded the implementation's checked range.
+    NumericMagnitude,
 }
 
 /// Implementation-defined message-function failures.
@@ -259,6 +268,8 @@ pub enum Trap {
     InvalidFallbackStringId,
     /// A program counter computation overflowed the runtime range.
     ProgramCounterOverflow,
+    /// A local slot was uninitialized or outside the dense slot range.
+    InvalidLocalSlot,
     /// A multi-formatter catalog slot index was out of range.
     InvalidCatalogIndex,
 }
@@ -292,6 +303,9 @@ impl fmt::Display for CatalogError {
             Self::MissingChunk(tag) => write!(f, "required catalog chunk {tag} was missing"),
             Self::InvalidUtf8 => f.write_str("catalog string data was not valid UTF-8"),
             Self::BadPc { pc } => write!(f, "catalog message entry pointed at invalid pc {pc}"),
+            Self::InvalidLocalSlot { pc, slot } => {
+                write!(f, "invalid local slot {slot} at pc {pc}")
+            }
             Self::BadJump { from_pc, to_pc } => {
                 write!(
                     f,
@@ -417,6 +431,9 @@ impl fmt::Display for UnsupportedOperation {
             Self::DateTimeFormattingForLocale => f.write_str(
                 "unsupported operation: datetime formatting is not supported for this locale",
             ),
+            Self::NumericMagnitude => {
+                f.write_str("unsupported operation: numeric magnitude is out of range")
+            }
         }
     }
 }
@@ -465,6 +482,7 @@ impl fmt::Display for Trap {
             Self::MarkupOptionKeyWrongType => "MARKUP option key must be int/strref",
             Self::InvalidFallbackStringId => "invalid fallback str id",
             Self::ProgramCounterOverflow => "program counter overflow",
+            Self::InvalidLocalSlot => "invalid local slot",
             Self::InvalidCatalogIndex => "invalid catalog index",
         })
     }

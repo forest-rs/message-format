@@ -143,7 +143,14 @@ pub(super) fn build_nested_match_ir(
     };
 
     if exact_keys.is_empty() {
-        return Ok(default);
+        // A selector is still evaluated when every arm is a default arm. Its
+        // function may report a diagnostic even though dispatch cannot change
+        // the selected pattern.
+        return Ok(vec![Part::Select(SelectExpr {
+            selector: selectors[level].clone(),
+            arms: Vec::new(),
+            default,
+        })]);
     }
 
     let mut lowered_arms = Vec::new();
@@ -205,7 +212,13 @@ fn build_numeric_match_ir(
     }
 
     if exact_keys.is_empty() && keyword_keys.is_empty() {
-        return Ok(default);
+        // Keep selector evaluation observable for a catch-all match. In
+        // particular, an invalid selector must still produce BadSelector.
+        return Ok(vec![Part::Select(SelectExpr {
+            selector: selectors[level].clone(),
+            arms: Vec::new(),
+            default,
+        })]);
     }
 
     let keyword_fallback = if keyword_keys.is_empty() {
@@ -277,7 +290,11 @@ fn build_leaf_match_ir(
             .ok_or(CompileError::invalid_expr(line))?
     };
     if exact_keys.is_empty() {
-        return Ok(default);
+        return Ok(vec![Part::Select(SelectExpr {
+            selector: selectors[level].clone(),
+            arms: Vec::new(),
+            default,
+        })]);
     }
 
     let mut lowered_arms = Vec::with_capacity(exact_keys.len());
@@ -342,10 +359,15 @@ pub(super) enum BuiltinNumericSelectorMode {
 pub(super) fn builtin_numeric_selector_mode(
     selector: &SelectorExpr,
 ) -> Option<BuiltinNumericSelectorMode> {
-    let SelectorExpr::Call { func, .. } = selector else {
-        return None;
-    };
-    builtin_numeric_selector_mode_for_func(func)
+    match selector {
+        SelectorExpr::Call { func, .. } => builtin_numeric_selector_mode_for_func(func),
+        SelectorExpr::Local {
+            func: Some(func), ..
+        } => builtin_numeric_selector_mode_for_func(func),
+        SelectorExpr::Var(_)
+        | SelectorExpr::Local { func: None, .. }
+        | SelectorExpr::Literal(_) => None,
+    }
 }
 
 pub(super) fn builtin_selector_variant_key_expectation(
@@ -390,7 +412,11 @@ fn builtin_numeric_selector_mode_for_func(
         has_select_option = true;
         match &option.value {
             FunctionOptionValue::Literal(value) => select_literal = Some(value.as_str()),
-            FunctionOptionValue::Var(_) => return Some(BuiltinNumericSelectorMode::Dynamic),
+            FunctionOptionValue::Var(_)
+            | FunctionOptionValue::ResolvedVar { .. }
+            | FunctionOptionValue::LocalVar { .. } => {
+                return Some(BuiltinNumericSelectorMode::Dynamic);
+            }
         }
     }
 
@@ -436,13 +462,11 @@ fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSele
             exact_selector: clone_numeric_selector_with_select(operand.clone(), func, "exact"),
             keyword_selector: clone_numeric_selector_with_select(operand.clone(), func, "ordinal"),
         }),
-        BuiltinNumericSelectorMode::Dynamic => Some(NumericSelectorLoweringPlan {
-            exact_selector: clone_numeric_selector_with_select(operand.clone(), func, "exact"),
-            keyword_selector: SelectorExpr::Call {
-                operand: operand.clone(),
-                func: func.clone(),
-            },
-        }),
+        // A variable (or otherwise unknown) select mode must remain part of
+        // the runtime selector call. Synthesizing `select=exact` here would
+        // bypass an invalid dynamic option and could select an exact arm even
+        // though the original selector is required to report BadSelector.
+        BuiltinNumericSelectorMode::Dynamic => None,
     }
 }
 

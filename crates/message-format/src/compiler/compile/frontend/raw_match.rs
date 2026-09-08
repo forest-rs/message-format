@@ -8,18 +8,17 @@ use crate::compiler::semantic::SelectorExpr;
 use crate::compiler::syntax::span::byte_to_line_col;
 
 use super::bindings::{DeclFunction, DeclarationBindings, LocalValue};
-use super::local_eval::{resolve_alias, selector_chain_is_unstable};
+use super::local_eval::resolve_alias;
 use super::matching::{
     LoweredMatchArm, MatchArm, build_nested_match_ir, builtin_selector_accepts_variant_key,
     builtin_selector_variant_key_expectation, lower_match_declaration_prelude,
 };
 use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
-use super::rewrite::lower_parts_with_declaration_bindings;
+use super::rewrite::{lower_parts_with_declaration_bindings, rewrite_selector_expr_from_locals};
 
 struct AnalyzedSelectors {
     parts: Vec<SelectorExpr>,
     compile_time_values: Option<Vec<String>>,
-    has_unstable_chain: bool,
 }
 
 pub(super) fn lower_raw_match_ir(
@@ -54,10 +53,6 @@ pub(super) fn lower_raw_match_ir(
         &arms,
         &parsed_match.duplicate_keys,
     )?;
-
-    if selectors.has_unstable_chain {
-        return default_arm_parts(source, ctx, &arms);
-    }
 
     if let Some(selector_values) = selectors.compile_time_values.as_ref() {
         return resolve_compile_time_arm(source, ctx, selector_values, &arms);
@@ -100,11 +95,9 @@ fn analyze_selectors(
     let mut parts = Vec::with_capacity(selectors.len());
     let mut compile_time_values = Vec::with_capacity(selectors.len());
     let mut all_compile_time = true;
-    let mut has_unstable_chain = false;
 
     for selector in selectors {
         let analyzed = analyze_selector(source, ctx, selector, bindings)?;
-        has_unstable_chain |= analyzed.is_unstable;
         all_compile_time &= analyzed.compile_time_value.is_some();
         compile_time_values.push(analyzed.compile_time_value.unwrap_or_default());
         parts.push(analyzed.part);
@@ -113,14 +106,12 @@ fn analyze_selectors(
     Ok(AnalyzedSelectors {
         parts,
         compile_time_values: all_compile_time.then_some(compile_time_values),
-        has_unstable_chain,
     })
 }
 
 struct AnalyzedSelector {
     part: SelectorExpr,
     compile_time_value: Option<String>,
-    is_unstable: bool,
 }
 
 fn analyze_selector(
@@ -135,13 +126,34 @@ fn analyze_selector(
         .get(&name)
         .and_then(LocalValue::as_literal)
         .map(ToOwned::to_owned);
-    let part = bindings
+    let mut part = bindings
         .local_functions
         .get(&name)
         .cloned()
         .or_else(|| bindings.input_functions.get(&name).cloned())
         .map(selector_expr_from_decl_function)
         .unwrap_or_else(|| SelectorExpr::Var(name.clone()));
+    if let Some(slot) = bindings.slots.get(&name).copied()
+        && !bindings
+            .locals
+            .get(&name)
+            .is_some_and(|value| value.as_literal().is_some())
+    {
+        if let Some(function) = bindings
+            .local_functions
+            .get(&name)
+            .or_else(|| bindings.input_functions.get(&name))
+        {
+            part = SelectorExpr::Local {
+                slot,
+                func: Some(function.func.clone()),
+            };
+        } else {
+            part = SelectorExpr::Local { slot, func: None };
+        }
+    } else {
+        rewrite_selector_expr_from_locals(&mut part, &bindings.locals, &bindings.slots);
+    }
     if matches!(part, SelectorExpr::Var(_)) {
         let (line, col) = ctx.location(source, 0);
         return Err(CompileError::missing_selector_annotation_detail(
@@ -153,7 +165,6 @@ fn analyze_selector(
     }
     Ok(AnalyzedSelector {
         compile_time_value: literal.filter(|value| value.is_ascii()),
-        is_unstable: selector_chain_is_unstable(&name, &bindings.local_functions),
         part,
     })
 }
@@ -168,6 +179,11 @@ fn selector_expr_from_decl_function(function: DeclFunction) -> SelectorExpr {
             operand: Operand::Literal { value, kind },
             func: function.func,
         },
+        Operand::Call(call) => SelectorExpr::Call {
+            operand: Operand::Call(call),
+            func: function.func,
+        },
+        Operand::Local(slot) => SelectorExpr::Local { slot, func: None },
     }
 }
 
@@ -237,20 +253,6 @@ fn validate_builtin_selector_variant_keys(
         }
     }
     Ok(())
-}
-
-fn default_arm_parts(
-    source: &str,
-    ctx: SourceContext,
-    arms: &[LoweredMatchArm],
-) -> Result<Vec<Part>, CompileError> {
-    arms.iter()
-        .find(|arm| arm.is_default())
-        .map(|arm| arm.parts.clone())
-        .ok_or_else(|| {
-            let (line, _) = ctx.location(source, 0);
-            CompileError::missing_default_arm(line)
-        })
 }
 
 fn resolve_compile_time_arm(

@@ -176,6 +176,21 @@ pub(super) fn assert_format_with_error(
     );
 }
 
+/// Assert that formatting reports exactly the expected diagnostic multiset.
+pub(super) fn assert_errors_multiset(actual: &[FormatError], expected: &[FormatError]) {
+    let mut remaining = expected.to_vec();
+    for error in actual {
+        let Some(index) = remaining.iter().position(|candidate| candidate == error) else {
+            panic!("unexpected diagnostic {error:?}; expected {expected:?}");
+        };
+        remaining.remove(index);
+    }
+    assert!(
+        remaining.is_empty(),
+        "missing diagnostics {remaining:?}; actual {actual:?}"
+    );
+}
+
 /// Assert compilation succeeds (no panic, no error).
 #[allow(
     dead_code,
