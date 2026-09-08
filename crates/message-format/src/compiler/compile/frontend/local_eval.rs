@@ -14,6 +14,9 @@ use crate::common::text::{
 };
 
 pub(super) fn local_function_may_fail_select(function_spec: &FunctionSpec) -> bool {
+    if function_spec_has_dynamic_select_option(function_spec) {
+        return true;
+    }
     match function_spec.name.as_str() {
         "test:format" => true,
         "test:select" => function_spec.options.iter().any(|option| {
@@ -40,43 +43,24 @@ pub(super) fn normalize_local_function_expression(
     expression: DeclFunction,
     input_functions: &BTreeMap<String, DeclFunction>,
 ) -> DeclFunction {
-    let Some((operand, local_name, _local_has_options)) = function_signature(&expression) else {
+    let Operand::Var(operand) = &expression.operand else {
         return expression;
     };
-    let Some(input_expression) = input_functions.get(&operand) else {
+    let Some(input_expression) = input_functions.get(operand) else {
         return expression;
     };
-    let Some((_input_operand, input_name, input_has_options)) =
-        function_signature(input_expression)
-    else {
-        return expression;
-    };
-    if local_name == input_name && input_has_options {
-        input_expression.clone()
-    } else {
-        expression
+    // Keep the local annotation as the outer call while making the input
+    // declaration's resolved value and options its structured operand. This
+    // preserves option override semantics when both annotations use the same
+    // builtin (an earlier implementation discarded the outer options).
+    DeclFunction {
+        operand: Operand::Call(Box::new(CallExpr {
+            operand: input_expression.operand.clone(),
+            func: input_expression.func.clone(),
+            fallback: None,
+        })),
+        func: expression.func,
     }
-}
-
-pub(super) fn selector_chain_is_unstable(
-    name: &str,
-    local_functions: &BTreeMap<String, DeclFunction>,
-) -> bool {
-    let Some(expr) = local_functions.get(name) else {
-        return false;
-    };
-    if function_has_dynamic_select_option(expr) {
-        return true;
-    }
-    let Some((operand, func_name, _has_options)) = function_signature(expr) else {
-        return false;
-    };
-    if func_name != "number" && func_name != "integer" {
-        return false;
-    }
-    local_functions
-        .get(&operand)
-        .is_some_and(function_has_select_option)
 }
 
 pub(super) fn resolve_alias(
@@ -93,31 +77,16 @@ pub(super) fn resolve_alias(
     Err(CompileError::alias_resolution_overflow(name))
 }
 
-fn function_signature(function: &DeclFunction) -> Option<(String, String, bool)> {
-    let Operand::Var(var) = &function.operand else {
-        return None;
-    };
-    Some((
-        canonicalize_identifier(var),
-        function.func.name.clone(),
-        !function.func.options.is_empty(),
-    ))
-}
-
-fn function_has_select_option(function: &DeclFunction) -> bool {
-    function
-        .func
-        .options
-        .iter()
-        .any(|option| option.key == "select")
-}
-
-fn function_has_dynamic_select_option(function: &DeclFunction) -> bool {
-    function
-        .func
-        .options
-        .iter()
-        .any(|option| option.key == "select" && matches!(option.value, FunctionOptionValue::Var(_)))
+fn function_spec_has_dynamic_select_option(function: &FunctionSpec) -> bool {
+    function.options.iter().any(|option| {
+        option.key == "select"
+            && matches!(
+                option.value,
+                FunctionOptionValue::Var(_)
+                    | FunctionOptionValue::ResolvedVar { .. }
+                    | FunctionOptionValue::LocalVar { .. }
+            )
+    })
 }
 
 pub(super) fn apply_literal_function(
@@ -192,7 +161,7 @@ pub(super) fn apply_literal_function(
             }
         }
         _ => {
-            return LocalValue::UnknownFunction(function_spec.name.clone());
+            return LocalValue::UnknownFunction;
         }
     }
 

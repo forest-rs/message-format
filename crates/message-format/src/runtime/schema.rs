@@ -56,6 +56,10 @@ pub enum Opcode {
     PushConst = 0x10,
     /// Load argument by string-pool id.
     LoadArg = 0x11,
+    /// Store the top stack value in a message-local slot.
+    StoreLocal = 0x12,
+    /// Load a cloned value from a message-local slot.
+    LoadLocal = 0x13,
     /// Output pool string by id.
     OutLit = 0x20,
     /// Output literal slice by offset and length.
@@ -98,6 +102,7 @@ impl Opcode {
             Self::JmpIfFalse => 5,
             Self::PushConst => 5,
             Self::LoadArg => 5,
+            Self::StoreLocal | Self::LoadLocal => 5,
             Self::OutLit => 5,
             Self::OutSlice => 9,
             Self::OutVal => 1,
@@ -127,6 +132,8 @@ impl TryFrom<u8> for Opcode {
             0x02 => Ok(Self::JmpIfFalse),
             0x10 => Ok(Self::PushConst),
             0x11 => Ok(Self::LoadArg),
+            0x12 => Ok(Self::StoreLocal),
+            0x13 => Ok(Self::LoadLocal),
             0x20 => Ok(Self::OutLit),
             0x21 => Ok(Self::OutSlice),
             0x22 => Ok(Self::OutVal),
@@ -351,6 +358,20 @@ impl TestOps {
     pub fn load_arg(mut self, str_id: u32) -> Self {
         self.code.push(Opcode::LoadArg as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    /// Store the top stack value in a message-local slot.
+    pub fn store_local(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::StoreLocal as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
+        self
+    }
+
+    /// Load a message-local slot onto the stack.
+    pub fn load_local(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::LoadLocal as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
         self
     }
 

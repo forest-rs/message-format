@@ -316,6 +316,31 @@ fn build_many_segments_catalog() -> Catalog {
     Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
 }
 
+fn build_repeated_local_catalog() -> Catalog {
+    let strings = ["main", "value"];
+    let mut code = Vec::new();
+    for slot in 0_u32..16 {
+        code.push(vm::Opcode::PushConst as u8);
+        code.extend_from_slice(&1_u32.to_le_bytes());
+        code.push(vm::Opcode::StoreLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+        code.push(vm::Opcode::LoadLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+        code.push(vm::Opcode::OutVal as u8);
+    }
+    code.push(vm::Opcode::Halt as u8);
+    let bytes = build_catalog(
+        &strings,
+        "",
+        &[MessageEntry {
+            name_str_id: 0,
+            entry_pc: 0,
+        }],
+        &code,
+    );
+    Catalog::from_bytes(&bytes).expect("valid repeated-local benchmark catalog")
+}
+
 fn build_markup_catalog() -> Catalog {
     // MARKUP_OPEN "b"(1) optc=0, OUT_SLICE "Hello "(0,6), LOAD_ARG "name"(2), OUT_VAL,
     // MARKUP_CLOSE "b"(1) optc=0, HALT
@@ -605,6 +630,7 @@ fn bench_formatting(c: &mut Criterion) {
     let call_catalog_no_opts = build_call_catalog_no_opts();
     let call_catalog_with_opts = build_call_catalog_with_opts();
     let many_segments_catalog = build_many_segments_catalog();
+    let repeated_local_catalog = build_repeated_local_catalog();
     let markup_catalog = build_markup_catalog();
     let markup_option_literal_catalog = build_markup_option_literal_catalog();
     let markup_option_variable_catalog = build_markup_option_variable_catalog();
@@ -671,6 +697,17 @@ fn bench_formatting(c: &mut Criterion) {
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&default_args))
+                .expect("format");
+            black_box(out);
+        });
+    });
+
+    group.bench_function("repeated_local_storage", |b| {
+        let mut formatter = Formatter::new(&repeated_local_catalog, NoopHost).expect("formatter");
+        let empty_args: Vec<(u32, Value)> = Vec::new();
+        b.iter(|| {
+            let out = formatter
+                .format_by_id_for_bench("main", black_box(&empty_args))
                 .expect("format");
             black_box(out);
         });

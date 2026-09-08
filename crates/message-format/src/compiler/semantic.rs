@@ -9,7 +9,7 @@
 //! data, but should treat it as a low-level compiler input boundary rather than
 //! a long-term calm public IR.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 /// Parsed catalog message definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,10 +176,21 @@ pub enum Part {
     Literal(String),
     /// Variable interpolation from caller args.
     Var(String),
+    /// Previously evaluated declaration value.
+    Local(u32),
     /// Function call on one operand.
     Call(CallExpr),
     /// Select expression with case arms and a required default arm.
     Select(SelectExpr),
+    /// Evaluate and store one declaration value in a local slot.
+    Bind {
+        /// Dense declaration slot.
+        slot: u32,
+        /// Source expression used when declaration evaluation fails.
+        fallback: String,
+        /// Declaration expression.
+        value: Box<Self>,
+    },
     /// Markup open tag, e.g. `{#bold}` or `{#link href=$url}`.
     MarkupOpen {
         /// Tag name.
@@ -251,6 +262,13 @@ impl Part {
 pub enum SelectorExpr {
     /// Variable selector.
     Var(String),
+    /// Previously evaluated declaration value.
+    Local {
+        /// Dense declaration slot.
+        slot: u32,
+        /// Original selector annotation for compile-time validation.
+        func: Option<FunctionSpec>,
+    },
     /// Function call selector.
     Call {
         /// Selector operand.
@@ -287,6 +305,8 @@ impl SelectorExpr {
 pub enum Operand {
     /// Variable operand.
     Var(String),
+    /// Previously evaluated declaration value.
+    Local(u32),
     /// Literal operand.
     Literal {
         /// Decoded literal text.
@@ -294,6 +314,12 @@ pub enum Operand {
         /// Source-level literal classification.
         kind: OperandLiteralKind,
     },
+    /// Nested function call operand produced by declaration lowering.
+    ///
+    /// Keeping the call structured lets runtime hosts receive the resolved
+    /// value and options of an earlier declaration call before applying the
+    /// outer annotation.
+    Call(Box<CallExpr>),
 }
 
 /// Literal classification for function/select operands.
@@ -335,7 +361,7 @@ impl Operand {
     pub fn literal_value(&self) -> Option<&str> {
         match self {
             Self::Literal { value, .. } => Some(value.as_str()),
-            Self::Var(_) => None,
+            Self::Var(_) | Self::Local(_) | Self::Call(_) => None,
         }
     }
 
@@ -344,7 +370,7 @@ impl Operand {
     pub fn literal_kind(&self) -> Option<OperandLiteralKind> {
         match self {
             Self::Literal { kind, .. } => Some(*kind),
-            Self::Var(_) => None,
+            Self::Var(_) | Self::Local(_) | Self::Call(_) => None,
         }
     }
 }
@@ -527,6 +553,25 @@ pub enum FunctionOptionValue {
     Literal(String),
     /// Dynamic variable option value.
     Var(String),
+    /// Dynamic variable option value with a compile-time-resolved payload.
+    ///
+    /// The variable name remains part of the semantic value so the option is
+    /// still lowered and validated as dynamic. The resolved payload lets the
+    /// compiler preserve a local declaration's value without requiring that
+    /// declaration to be exposed as a message input.
+    ResolvedVar {
+        /// Original dynamic variable name.
+        name: String,
+        /// Value resolved from the declaration during compilation.
+        value: String,
+    },
+    /// Dynamic variable option value loaded from a declaration slot.
+    LocalVar {
+        /// Original dynamic variable name.
+        name: String,
+        /// Dense declaration slot.
+        slot: u32,
+    },
 }
 
 /// One select case arm.

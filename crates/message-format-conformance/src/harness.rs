@@ -140,7 +140,7 @@ fn cases() -> Vec<Case> {
             args: Vec::new(),
             expected: include_str!("../../../fixtures/expected/raw_match_integer_exact.txt")
                 .trim_end(),
-            host_mode: HostMode::Noop,
+            host_mode: HostMode::Builtin { locale: "en-US" },
         },
         Case {
             source: include_str!("../../../fixtures/mf2/raw_match_offset_selector.mf2"),
@@ -148,7 +148,7 @@ fn cases() -> Vec<Case> {
             args: Vec::new(),
             expected: include_str!("../../../fixtures/expected/raw_match_offset_selector.txt")
                 .trim_end(),
-            host_mode: HostMode::Noop,
+            host_mode: HostMode::Builtin { locale: "en-US" },
         },
         Case {
             source: include_str!("../../../fixtures/mf2/raw_match_two_locals.mf2"),

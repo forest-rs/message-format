@@ -1,8 +1,12 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#[cfg(feature = "icu4x")]
+use crate::runtime::BuiltinHost;
 use crate::runtime::schema;
 use crate::runtime::{Catalog, Formatter, HostFn, NoopHost, Value};
+use alloc::rc::Rc;
+use core::cell::Cell;
 
 use crate::compiler::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionOptionValueKind, FunctionSchema,
@@ -40,6 +44,17 @@ fn arg_id(catalog: &Catalog, name: &str) -> u32 {
 
 fn arg(catalog: &Catalog, name: &str, value: Value) -> (u32, Value) {
     (arg_id(catalog, name), value)
+}
+
+fn opcodes(catalog: &Catalog) -> Vec<schema::Opcode> {
+    let mut result = Vec::new();
+    let mut pc = 0;
+    while pc < catalog.code().len() {
+        let opcode = schema::Opcode::try_from(catalog.code()[pc]).expect("valid opcode");
+        result.push(opcode);
+        pc += opcode.bytes();
+    }
+    result
 }
 
 fn chunk_len(bytes: &[u8], tag: [u8; 4]) -> u32 {
@@ -664,6 +679,18 @@ fn compile_str_rejects_invalid_builtin_number_use_grouping_literal() {
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[test]
+fn compile_str_rejects_invalid_builtin_option_in_nested_local_call() {
+    let err =
+        compile_str(".local $n = {1 :number signDisplay=bogus} .local $m = {$n :number} {{{$m}}}")
+            .expect_err("must fail");
+    assert!(matches!(
+        err,
+        CompileError::InvalidBuiltinOptionValue { function, option, .. }
+            if function == "number" && option == "signDisplay"
+    ));
 }
 
 #[test]
@@ -1612,6 +1639,30 @@ fn compiles_and_formats_call() {
 }
 
 #[test]
+fn local_declaration_is_evaluated_once_when_interpolated_twice() {
+    let bytes = compile_str(
+        ".local $n = {seed :test:format} .match $n called {{hit {$n} {$n}}} * {{miss}}",
+    )
+    .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let calls = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&calls);
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(move |_fn_id, _args, _opts| {
+            observed.set(observed.get() + 1);
+            Ok(Value::Str("called".to_string()))
+        }),
+    )
+    .expect("formatter");
+    let output = formatter
+        .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
+        .expect("formatted");
+    assert_eq!(output, "hit called called");
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
 fn invalid_expr_fails() {
     let err = compile_str("{}").expect_err("must fail");
     assert!(matches!(err, CompileError::InvalidExpr { .. }));
@@ -1998,11 +2049,14 @@ fn alias_cycle_reports_resolution_overflow() {
     assert!(matches!(err, CompileError::AliasResolutionOverflow { .. }));
 }
 
+#[cfg(feature = "icu4x")]
 #[test]
 fn local_integer_function_is_evaluated() {
     let bytes = compile_str(".local $x = {4.2 :integer} {{X={$x}}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -2027,6 +2081,10 @@ fn raw_match_with_dynamic_select_option_uses_default_arm() {
         ".input {$mode} .local $x = {1 :test:select select=$mode} .match $x 1 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let code = opcodes(&catalog);
+    assert!(code.contains(&schema::Opcode::StoreLocal));
+    assert!(code.contains(&schema::Opcode::LoadLocal));
+    assert!(code.contains(&schema::Opcode::SelectBegin));
     let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
@@ -2104,24 +2162,30 @@ fn raw_match_with_escaped_quoted_key_selects_expected_arm() {
     assert_eq!(out_default, "other");
 }
 
+#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_with_integer_select_exact_formats_literal_arm() {
     let source = ".local $sel = {1 :integer select=exact} .match $sel 1 {{literal select {$sel}}} * {{OTHER}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
     assert_eq!(out, "literal select 1");
 }
 
+#[cfg(feature = "icu4x")]
 #[test]
 fn local_offset_result_can_be_used_in_match_selector() {
     let source = ".local $x = {10 :integer} .local $y = {$x :offset subtract=6} .match $y 10 {{=10}} 4 {{=4}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
