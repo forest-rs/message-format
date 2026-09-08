@@ -86,9 +86,10 @@ impl ResolvedSelect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedNumber {
     pub(crate) value: NumberValue,
-    pub(crate) options: BTreeMap<String, String>,
     pub(crate) format: NumberFormatOptions,
     pub(crate) selection: NumberSelection,
+    /// Whether a `select` option was explicitly resolved for this value.
+    pub(crate) has_explicit_select: bool,
     /// Category computed when this value was resolved by the locale-aware
     /// built-in host. Stored values can therefore be matched without
     /// re-running their function call.
@@ -120,6 +121,18 @@ pub(crate) struct NumberFormatOptions {
     pub(crate) sign_display: NumberSignDisplay,
     pub(crate) notation_scientific: bool,
     pub(crate) grouping: NumberGrouping,
+}
+
+#[cfg(feature = "icu4x")]
+impl NumberFormatOptions {
+    pub(crate) const DEFAULT: Self = Self {
+        minimum_fraction_digits: None,
+        maximum_fraction_digits: None,
+        minimum_integer_digits: None,
+        sign_display: NumberSignDisplay::Auto,
+        notation_scientific: false,
+        grouping: NumberGrouping::Auto,
+    };
 }
 
 #[cfg(feature = "icu4x")]
@@ -160,15 +173,15 @@ pub(crate) enum NumberSelection {
 impl ResolvedNumber {
     pub(crate) fn new(
         value: NumberValue,
-        options: BTreeMap<String, String>,
         format: NumberFormatOptions,
         selection: NumberSelection,
+        has_explicit_select: bool,
     ) -> Self {
         Self {
             value,
-            options,
             format,
             selection,
+            has_explicit_select,
             selection_category: None,
         }
     }
