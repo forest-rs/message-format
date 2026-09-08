@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! CLI for running WG JSON tests and printing pass/fail scoreboard rows.
+//!
+//! The process exits with status 1 when any test fails, so a scoreboard cannot
+//! accidentally make a failing conformance run look successful to CI.
 
 use std::path::PathBuf;
 
@@ -37,4 +40,7 @@ fn main() {
     }
 
     println!("SUMMARY\tpassed={passed}\tfailed={failed}\ttotal={total}");
+    if failed != 0 {
+        std::process::exit(1);
+    }
 }

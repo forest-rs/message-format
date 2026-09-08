@@ -304,7 +304,7 @@ pub struct WgCaseReport {
     pub src: String,
     /// Whether the case passed under current runner semantics.
     pub passed: bool,
-    /// Outcome detail (`ok:<output>` or `err:<error-type>`).
+    /// Outcome detail, including mapped diagnostics for formatted cases.
     pub detail: String,
 }
 
@@ -315,13 +315,15 @@ struct WgSuite {
     tests: Vec<WgTest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct WgTest {
     src: String,
     #[serde(default)]
     exp: Option<String>,
+    #[serde(default, rename = "expParts")]
+    exp_parts: Option<serde_json::Value>,
     #[serde(default, rename = "expErrors")]
-    exp_errors: Vec<WgError>,
+    exp_errors: Option<Vec<WgError>>,
     #[serde(default)]
     params: Vec<WgParam>,
     #[serde(default)]
@@ -335,7 +337,7 @@ struct WgTestDefaults {
     #[serde(default)]
     exp: Option<String>,
     #[serde(default, rename = "expErrors")]
-    exp_errors: Vec<WgError>,
+    exp_errors: Option<Vec<WgError>>,
     #[serde(default)]
     locale: Option<String>,
     #[serde(default, rename = "bidiIsolation")]
@@ -352,6 +354,8 @@ struct WgError {
 struct WgParam {
     name: String,
     value: serde_json::Value,
+    #[serde(default, rename = "type")]
+    value_type: Option<String>,
 }
 
 /// Run a WG JSON test file and produce a pass/fail scoreboard.
@@ -376,11 +380,12 @@ pub fn run_wg_json_file_cases(path: &Path) -> Result<Vec<WgCaseReport>, String> 
     let mut cases = Vec::new();
     for (idx, mut test) in suite.tests.into_iter().enumerate() {
         apply_suite_defaults(&mut test, &suite.default_test_properties);
+        let (passed, detail) = run_wg_test_result(&test);
         cases.push(WgCaseReport {
             index: idx + 1,
             src: test.src.clone(),
-            passed: run_wg_test(&test),
-            detail: run_wg_test_detail(&test),
+            passed,
+            detail,
         });
     }
     Ok(cases)
@@ -390,7 +395,7 @@ fn apply_suite_defaults(test: &mut WgTest, defaults: &WgTestDefaults) {
     if test.exp.is_none() {
         test.exp = defaults.exp.clone();
     }
-    if test.exp_errors.is_empty() {
+    if test.exp_errors.is_none() {
         test.exp_errors = defaults.exp_errors.clone();
     }
     if test.locale.is_none() {
@@ -429,59 +434,53 @@ pub fn run_wg_suite_dir(dir: &Path) -> Result<Vec<WgFileReport>, String> {
 /// Resolve the local checkout path of `message-format-wg`.
 #[must_use]
 pub fn default_wg_root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../message-format-wg")
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../message-format-wg")
-        })
-}
-
-fn run_wg_test(test: &WgTest) -> bool {
-    run_wg_test_result(test).0
-}
-
-fn run_wg_test_detail(test: &WgTest) -> String {
-    run_wg_test_result(test).1
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .ancestors()
+        .map(|ancestor| ancestor.join("message-format-wg"))
+        .find(|candidate| candidate.is_dir())
+        .unwrap_or_else(|| manifest_dir.join("../../../message-format-wg"))
 }
 
 fn run_wg_test_result(test: &WgTest) -> (bool, String) {
+    if test.exp_parts.is_some() {
+        return (false, "unsupported-expectation:expParts".to_string());
+    }
     let compile_options = CompileOptions {
         default_bidi_isolation: test.bidi_isolation.as_deref().unwrap_or("none") == "default",
         ..CompileOptions::default()
     };
     match compile(&test.src, compile_options) {
         Ok(bytes) => {
-            let Ok(catalog) = Catalog::from_bytes(&bytes) else {
-                let actual = "data-model-error";
-                return (
-                    matches_expected_error(test, actual),
-                    format!("err:{actual}"),
-                );
+            let catalog = match Catalog::from_bytes(&bytes) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    return (false, format!("init-error:catalog:{error:?}"));
+                }
             };
             let locale = test.locale.as_deref().unwrap_or("en-US");
-            let Ok(parsed) = locale.parse::<Locale>() else {
-                let actual = "unknown-function";
-                return (
-                    matches_expected_error(test, actual),
-                    format!("err:{actual}"),
-                );
+            let parsed = match locale.parse::<Locale>() {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    return (false, format!("init-error:locale:{locale}"));
+                }
             };
-            let Ok(host) = message_format::runtime::BuiltinHost::new(&parsed) else {
-                let actual = "unknown-function";
-                return (
-                    matches_expected_error(test, actual),
-                    format!("err:{actual}"),
-                );
+            let host = match message_format::runtime::BuiltinHost::new(&parsed) {
+                Ok(host) => host,
+                Err(error) => {
+                    return (false, format!("init-error:builtin-host:{error:?}"));
+                }
             };
-            let Ok(mut formatter) = Formatter::new(&catalog, host) else {
-                let actual = "unknown-function";
-                return (
-                    matches_expected_error(test, actual),
-                    format!("err:{actual}"),
-                );
+            let mut formatter = match Formatter::new(&catalog, host) {
+                Ok(formatter) => formatter,
+                Err(error) => {
+                    return (false, format!("init-error:formatter:{error:?}"));
+                }
             };
-            let args = wg_params_to_args(&catalog, &test.params);
+            let args = match wg_params_to_args(&catalog, &test.params) {
+                Ok(args) => args,
+                Err(detail) => return (false, format!("unsupported-input:{detail}")),
+            };
             let message_id = if catalog.message_pc("main").is_some() {
                 "main"
             } else {
@@ -490,90 +489,96 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
             match runtime_helpers::format_with_diagnostics_by_id(&mut formatter, message_id, &args)
             {
                 Ok(output) => {
-                    let output_ok = test.exp.as_ref().is_none_or(|exp| *exp == output.value);
-                    let errors_ok = if test.exp_errors.is_empty() {
-                        output.errors.is_empty() || output_ok
-                    } else {
-                        // When output matches exp, errors are informational — the
-                        // implementation may have optimized away the error-producing
-                        // code path at compile time. Only require error matching when
-                        // the test has BOTH exp and expErrors and the output matches.
-                        output_ok
-                            || test.exp_errors.iter().all(|expected| {
-                                output.errors.iter().any(|actual| {
-                                    error_matches(&expected.error_type, map_format_error(actual))
-                                })
-                            })
-                    };
-                    let passed = output_ok && errors_ok;
-                    (passed, format!("ok:{}", output.value))
+                    let actual = output
+                        .errors
+                        .iter()
+                        .flat_map(map_format_errors)
+                        .collect::<Vec<_>>();
+                    finish_wg_test(test, Some(&output.value), &actual, "ok".to_string())
                 }
                 Err(err) => {
-                    let actual = map_format_error(&err);
-                    (
-                        matches_expected_error(test, actual),
-                        format!("err:{actual}"),
-                    )
+                    let actual = map_format_errors(&err);
+                    finish_wg_test(test, None, &actual, format!("err:{actual:?}"))
                 }
             }
         }
         Err(err) => {
-            let actual = map_compile_error(&err);
-            (
-                matches_expected_error(test, actual),
-                format!("err:{actual}"),
-            )
+            let actual = [map_compile_error(&err)];
+            finish_wg_test(test, None, &actual, format!("err:{actual:?}"))
         }
     }
 }
-fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Vec<(u32, Value)> {
+
+fn finish_wg_test(
+    test: &WgTest,
+    output: Option<&str>,
+    actual_errors: &[&'static str],
+    detail: String,
+) -> (bool, String) {
+    let output_ok = test
+        .exp
+        .as_deref()
+        .is_none_or(|expected| Some(expected) == output);
+    let errors_ok = expected_errors_match(test.exp_errors.as_deref(), actual_errors);
+    let expected = test
+        .exp_errors
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|error| error.error_type.as_str())
+        .collect::<Vec<_>>();
+    (
+        output_ok && errors_ok,
+        format!(
+            "{detail} output={output:?} actual_errors={actual_errors:?} expected_errors={expected:?}"
+        ),
+    )
+}
+fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, Value)>, String> {
     params
         .iter()
         .filter_map(|param| {
+            if let Some(value_type) = &param.value_type {
+                return Some(Err(format!(
+                    "parameter {:?} has unsupported type {value_type:?}",
+                    param.name
+                )));
+            }
+            let id = catalog.string_id(&param.name)?;
             let value = match &param.value {
-                serde_json::Value::String(v) => Value::Str(v.clone()),
-                serde_json::Value::Bool(v) => Value::Bool(*v),
-                serde_json::Value::Number(v) => {
-                    if let Some(i) = v.as_i64() {
-                        Value::Int(i)
-                    } else {
-                        Value::Float(v.as_f64().unwrap_or_default())
-                    }
-                }
-                _ => Value::Null,
+                serde_json::Value::String(v) => Ok(Value::Str(v.clone())),
+                serde_json::Value::Bool(v) => Ok(Value::Bool(*v)),
+                serde_json::Value::Null => Ok(Value::Null),
+                serde_json::Value::Number(v) => Ok(if let Some(i) = v.as_i64() {
+                    Value::Int(i)
+                } else {
+                    Value::Float(v.as_f64().unwrap_or_default())
+                }),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(format!(
+                    "parameter {:?} has unsupported structured value",
+                    param.name
+                )),
             };
-            catalog.string_id(&param.name).map(|id| (id, value))
+            match value {
+                Ok(value) => Some(Ok((id, value))),
+                Err(error) => Some(Err(error)),
+            }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
 }
 
-fn matches_expected_error(test: &WgTest, actual: &str) -> bool {
-    !test.exp_errors.is_empty()
-        && test
-            .exp_errors
-            .iter()
-            .any(|error| error_matches(&error.error_type, actual))
-}
-
-fn error_matches(expected: &str, actual: &str) -> bool {
-    if expected == actual {
-        return true;
+fn expected_errors_match(expected: Option<&[WgError]>, actual: &[&'static str]) -> bool {
+    let mut expected_counts = std::collections::BTreeMap::new();
+    for error in expected.unwrap_or_default() {
+        *expected_counts
+            .entry(error.error_type.as_str())
+            .or_insert(0) += 1;
     }
-    match (expected, actual) {
-        // Our parser drives variant-key parsing by selector count, so a
-        // key-count mismatch causes parsing to fail before the semantic
-        // variant-key-mismatch check can run.
-        ("variant-key-mismatch", "syntax-error") => true,
-        // Our compiler catches some option-syntax errors at compile time
-        // that the spec considers runtime errors (e.g., spaces around '='
-        // in option tokens for unknown functions).
-        ("unknown-function", "syntax-error") => true,
-        // Some syntax errors involving unknown functions (missing spaces,
-        // malformed attributes) aren't caught by our parser and surface as
-        // unknown-function at runtime instead of syntax-error.
-        ("syntax-error", "unknown-function") => true,
-        _ => false,
+    let mut actual_counts = std::collections::BTreeMap::new();
+    for error in actual {
+        *actual_counts.entry(*error).or_insert(0) += 1;
     }
+    expected_counts == actual_counts
 }
 
 fn map_compile_error(error: &CompileError) -> &'static str {
@@ -609,26 +614,42 @@ fn map_compile_error(error: &CompileError) -> &'static str {
     }
 }
 
-fn map_format_error(error: &FormatError) -> &'static str {
+fn map_format_errors(error: &FormatError) -> Vec<&'static str> {
+    let mut mapped = Vec::new();
+    map_format_error_chain(error, &mut mapped);
+    mapped
+}
+
+fn map_format_error_chain(error: &FormatError, mapped: &mut Vec<&'static str>) {
     match error {
-        FormatError::UnknownFunction { .. } => "unknown-function",
-        FormatError::MissingArg(_) | FormatError::UnknownMessageId(_) => "unresolved-variable",
-        FormatError::StackUnderflow | FormatError::BadPc { .. } | FormatError::Decode(_) => {
-            "syntax-error"
+        FormatError::UnknownFunction { .. } => mapped.push("unknown-function"),
+        FormatError::MissingArg(_) => mapped.push("unresolved-variable"),
+        FormatError::UnknownMessageId(_) => mapped.push("data-model-error"),
+        FormatError::StackUnderflow
+        | FormatError::BadPc { .. }
+        | FormatError::Decode(_)
+        | FormatError::Trap(_) => mapped.push("data-model-error"),
+        FormatError::Function(MessageFunctionError::BadOption) => mapped.push("bad-option"),
+        FormatError::Function(MessageFunctionError::BadOperand) => mapped.push("bad-operand"),
+        FormatError::Function(MessageFunctionError::UnsupportedOperation(_)) => {
+            mapped.push("unsupported-operation");
         }
-        FormatError::Function(MessageFunctionError::BadOption) => "bad-option",
-        FormatError::Function(MessageFunctionError::BadOperand) => "bad-operand",
-        FormatError::Function(
-            MessageFunctionError::UnsupportedOperation(_) | MessageFunctionError::Implementation(_),
-        ) => "message-function-error",
-        FormatError::BadSelector { .. } => "bad-selector",
-        FormatError::Trap(_) => "data-model-error",
+        FormatError::Function(MessageFunctionError::Implementation(_)) => {
+            mapped.push("message-function-error");
+        }
+        FormatError::BadSelector { source } => {
+            mapped.push("bad-selector");
+            if let Some(source) = source {
+                map_format_error_chain(source, mapped);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use message_format::runtime::UnsupportedOperation;
 
     fn wg_tests_root() -> Option<std::path::PathBuf> {
         let root = default_wg_root().join("test/tests");
@@ -687,5 +708,185 @@ mod tests {
         let text = fs::read_to_string(root.join("syntax-errors.json")).expect("read");
         let suite: WgSuite = serde_json::from_str(&text).expect("json");
         assert!(!suite.tests.is_empty());
+    }
+
+    fn test_case(src: &str, exp: Option<&str>, errors: Option<&[&str]>) -> WgTest {
+        WgTest {
+            src: src.to_string(),
+            exp: exp.map(str::to_string),
+            exp_errors: errors.map(|errors| {
+                errors
+                    .iter()
+                    .map(|error_type| WgError {
+                        error_type: (*error_type).to_string(),
+                    })
+                    .collect()
+            }),
+            ..WgTest::default()
+        }
+    }
+
+    #[test]
+    fn matching_output_does_not_hide_unexpected_diagnostic() {
+        let test = test_case("hello {$missing}", Some("hello {$missing}"), None);
+        assert!(!run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn matching_output_does_not_hide_missing_diagnostic() {
+        let test = test_case("hello", Some("hello"), Some(&["bad-option"]));
+        assert!(!run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn error_only_case_requires_the_expected_diagnostic() {
+        let test = test_case("hello", None, Some(&["bad-option"]));
+        assert!(!run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn matching_output_does_not_hide_wrong_diagnostic() {
+        let test = test_case(
+            "hello {$missing}",
+            Some("hello {$missing}"),
+            Some(&["unknown-function"]),
+        );
+        assert!(!run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn matching_output_does_not_hide_extra_diagnostic() {
+        let test = test_case(
+            "{$x} {:f}",
+            Some("{$x} {:f}"),
+            Some(&["unresolved-variable"]),
+        );
+        assert!(!run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn explicit_empty_errors_override_nonempty_default() {
+        let mut test = test_case("hello", Some("hello"), Some(&[]));
+        let defaults = WgTestDefaults {
+            exp_errors: Some(vec![WgError {
+                error_type: "unresolved-variable".to_string(),
+            }]),
+            ..WgTestDefaults::default()
+        };
+        apply_suite_defaults(&mut test, &defaults);
+        assert!(test.exp_errors.as_ref().is_some_and(Vec::is_empty));
+        assert!(run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn absent_errors_and_explicit_empty_errors_are_distinct() {
+        let absent = test_case("hello", Some("hello"), None);
+        let empty = test_case("hello", Some("hello"), Some(&[]));
+        let defaults = WgTestDefaults {
+            exp_errors: Some(vec![WgError {
+                error_type: "unresolved-variable".to_string(),
+            }]),
+            ..WgTestDefaults::default()
+        };
+        let mut absent = absent;
+        apply_suite_defaults(&mut absent, &defaults);
+        assert!(absent.exp_errors.is_some_and(|errors| !errors.is_empty()));
+        assert!(empty.exp_errors.is_some_and(|errors| errors.is_empty()));
+    }
+
+    #[test]
+    fn nested_errors_map_to_their_full_error_chain() {
+        let error = FormatError::BadSelector {
+            source: Some(Box::new(FormatError::MissingArg("selector".to_string()))),
+        };
+        assert_eq!(
+            map_format_errors(&error),
+            vec!["bad-selector", "unresolved-variable"]
+        );
+    }
+
+    #[test]
+    fn error_matching_is_an_exact_multiset() {
+        let expected_errors = [
+            WgError {
+                error_type: "bad-selector".to_string(),
+            },
+            WgError {
+                error_type: "bad-selector".to_string(),
+            },
+        ];
+        let expected = Some(&expected_errors[..]);
+        assert!(expected_errors_match(
+            expected,
+            &["bad-selector", "bad-selector"]
+        ));
+        assert!(!expected_errors_match(expected, &["bad-selector"]));
+        assert!(!expected_errors_match(
+            expected,
+            &["bad-selector", "bad-selector", "bad-selector"]
+        ));
+    }
+
+    #[test]
+    fn fatal_compile_errors_cannot_satisfy_expected_text() {
+        let with_text = test_case("{", Some(""), Some(&["syntax-error"]));
+        let without_text = test_case("{", None, Some(&["syntax-error"]));
+        assert!(!run_wg_test_result(&with_text).0);
+        assert!(run_wg_test_result(&without_text).0);
+    }
+
+    #[test]
+    fn unsupported_operation_keeps_its_runtime_error_kind() {
+        let error = FormatError::Function(MessageFunctionError::UnsupportedOperation(
+            UnsupportedOperation::DateFormattingForLocale,
+        ));
+        assert_eq!(map_format_errors(&error), vec!["unsupported-operation"]);
+    }
+
+    #[test]
+    fn structured_wg_parameters_are_rejected() {
+        let source = compile_str("{$object}").expect("compiled");
+        let catalog = Catalog::from_bytes(&source).expect("catalog");
+        let params = [WgParam {
+            name: "object".to_string(),
+            value: serde_json::json!({"key": "value"}),
+            value_type: None,
+        }];
+        assert!(wg_params_to_args(&catalog, &params).is_err());
+    }
+
+    #[test]
+    fn null_wg_parameters_use_runtime_null() {
+        let source = compile_str("{$null}").expect("compiled");
+        let catalog = Catalog::from_bytes(&source).expect("catalog");
+        let params = [WgParam {
+            name: "null".to_string(),
+            value: serde_json::Value::Null,
+            value_type: None,
+        }];
+        let args = wg_params_to_args(&catalog, &params).expect("scalar parameter");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].1, Value::Null);
+    }
+
+    #[test]
+    fn deserialization_preserves_absent_and_empty_error_properties() {
+        let absent: WgTest = serde_json::from_str(r#"{"src":"hello"}"#).expect("json");
+        let empty: WgTest =
+            serde_json::from_str(r#"{"src":"hello","expErrors":[]}"#).expect("json");
+        assert!(absent.exp_errors.is_none());
+        assert!(empty.exp_errors.is_some_and(|errors| errors.is_empty()));
+    }
+
+    #[test]
+    fn unsupported_parts_expectation_cannot_silently_pass() {
+        let test: WgTest =
+            serde_json::from_str(r#"{"src":"{#tag}","exp":"","expParts":[{"type":"markup"}]}"#)
+                .expect("json");
+        let result = run_wg_test_result(&test);
+        assert_eq!(
+            result,
+            (false, "unsupported-expectation:expParts".to_string())
+        );
     }
 }
