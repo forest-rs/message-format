@@ -404,6 +404,10 @@ impl ExprState {
         self.call_failed = false;
     }
 
+    fn clear_failed_fallback(&mut self) {
+        self.failed_fallback_id = None;
+    }
+
     fn clear_fallback(&mut self) {
         self.fallback_id = None;
     }
@@ -447,7 +451,9 @@ impl ExprState {
         catalog: &Catalog,
         diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     ) -> Result<Value, FormatError> {
-        let failed = self.should_skip_call();
+        let failed = self.should_skip_call()
+            || self.failed_fallback_id.is_some()
+            || matches!(value, Value::Fallback(_));
         if let Some(pending_errors) = self.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
@@ -456,9 +462,9 @@ impl ExprState {
 
         let value = if failed {
             if let Some(fallback_id) = self
-                .failed_fallback_id
+                .fallback_id
                 .take()
-                .or_else(|| self.fallback_id.take())
+                .or_else(|| self.failed_fallback_id.take())
             {
                 catalog
                     .string(fallback_id)
@@ -520,6 +526,9 @@ where
         // clear the marker before it can affect a later call.
         if opcode != Opcode::StoreLocal {
             expr_state.clear_call_failed();
+            if opcode != Opcode::ExprFallback {
+                expr_state.clear_failed_fallback();
+            }
         }
 
         match opcode {
@@ -932,7 +941,14 @@ fn handle_call_instruction<H: Host>(
     // If a missing variable was loaded as an operand for this function call,
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
     // TR35 §16.
-    if expr_state.should_skip_call() {
+    // A fallback can be propagated from a previously resolved local without
+    // leaving a pending error in this expression. Such an operand still
+    // short-circuits function resolution per MF2 formatting §16.1.
+    if expr_state.should_skip_call()
+        || call_args
+            .first()
+            .is_some_and(|value| matches!(value, Value::Fallback(_)))
+    {
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             let mut pending_errors = pending_errors.into_iter();
             if opcode == Opcode::CallSelect {
@@ -1815,6 +1831,32 @@ mod tests {
             .expect("formatted");
         assert_eq!(sink, "{$name}");
         assert_eq!(errors, vec![FormatError::MissingArg("name".to_string())]);
+    }
+
+    #[test]
+    fn propagated_local_fallback_skips_reannotation() {
+        let code = TestOps::new()
+            .load_arg(1)
+            .expr_fallback(2)
+            .store_local(0)
+            .load_local(0)
+            .expr_fallback(3)
+            .call_func(0, 1, 0)
+            .out_val()
+            .halt()
+            .build();
+        let catalog = catalog_for_test(&["main", "missing", "{$missing}", "{$a}"], "", &code);
+        let mut formatter = Formatter::new(
+            &catalog,
+            HostFn(|_, _, _| panic!("fallback operand must not call the host")),
+        )
+        .expect("host");
+        let mut sink = String::new();
+        let errors = formatter
+            .format_to_for_test_by_id("main", &[], &mut sink)
+            .expect("formatted");
+        assert_eq!(sink, "{$a}");
+        assert_eq!(errors, vec![FormatError::MissingArg("missing".to_string())]);
     }
 
     #[test]

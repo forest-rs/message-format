@@ -200,13 +200,11 @@ pub(super) fn lower_parts(
                 value,
             } => {
                 emit_value_part(value, string_map, func_map, literals, code)?;
-                if matches!(&**value, Part::Var(_) | Part::Local(_)) {
-                    let fallback_id = *string_map
-                        .get(fallback)
-                        .ok_or(CompileError::internal("missing declaration fallback"))?;
-                    code.push(schema::Opcode::ExprFallback as u8);
-                    code.extend_from_slice(&fallback_id.to_le_bytes());
-                }
+                let fallback_id = *string_map
+                    .get(fallback)
+                    .ok_or(CompileError::internal("missing declaration fallback"))?;
+                code.push(schema::Opcode::ExprFallback as u8);
+                code.extend_from_slice(&fallback_id.to_le_bytes());
                 code.push(schema::Opcode::StoreLocal as u8);
                 code.extend_from_slice(&slot.to_le_bytes());
             }
