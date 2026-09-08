@@ -1463,6 +1463,30 @@ fn compile_inputs_with_manifest_reports_precise_source() {
 }
 
 #[test]
+fn compile_inputs_with_manifest_reports_declaration_function_origin() {
+    let source = ".input { $value :custom:unknown }\n{{Hello}}";
+    let err = expect_first_error(compile_inputs_with_manifest(
+        [CompileInput {
+            name: "bad.mf2",
+            message_id: "main",
+            source,
+            kind: SourceKind::MessageFormat,
+        }],
+        CompileOptions::default(),
+        &FunctionManifest::new(),
+    ));
+
+    match *err.error {
+        CompileError::UnknownFunction { origin, .. } => {
+            let origin = origin.expect("function origin");
+            assert_eq!(origin.byte_start, source.find(":custom").expect("function"));
+            assert_eq!(origin.byte_end, source.find(" }").expect("function end"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
 fn render_with_source_highlights_unknown_function_annotation() {
     let err = compile_with_manifest(
         "main = { $value :custom:unknown }",
