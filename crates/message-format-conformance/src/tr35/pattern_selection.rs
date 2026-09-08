@@ -182,3 +182,26 @@ fn selector_with_multiple_missing_inputs_reports_all_missing_args() {
         ],
     );
 }
+
+/// A fallback propagated through a local is re-annotated using the current
+/// variable's fallback representation, without invoking the function host.
+#[test]
+fn local_fallback_reannotation_uses_current_variable_name() {
+    let output = format_output(
+        ".local $a = {$missing}\n.local $b = {$a :number}\n{{{$b}}}",
+        &[],
+    );
+    assert_eq!(output.value, "{$b}");
+    assert_errors_multiset(&output.errors, &[missing_arg("missing")]);
+}
+
+/// Plain local aliases retain their own fallback identity when rendered.
+#[test]
+fn local_fallback_aliases_use_each_variable_name() {
+    let output = format_output(
+        ".local $a = {$missing}\n.local $b = {$a}\n{{{$a} {$b}}}",
+        &[],
+    );
+    assert_eq!(output.value, "{$a} {$b}");
+    assert_errors_multiset(&output.errors, &[missing_arg("missing")]);
+}
