@@ -145,12 +145,6 @@ impl Catalog {
         validate_message_table(bytes, &strings, &strings_bytes, &messages)?;
         validate_func_table(&strings, &funcs)?;
 
-        let code = &bytes[code_bytes.clone()];
-        let literal_len = lits_range
-            .as_ref()
-            .map_or(0, |range| range.end.saturating_sub(range.start));
-        verify_code(code, &messages, strings.len(), literal_len, funcs.len())?;
-
         let bytes = bytes.to_vec();
         let catalog = Self {
             bytes,
@@ -162,6 +156,14 @@ impl Catalog {
             code_bytes,
         };
         catalog.verify_strings_utf8()?;
+        let literals = catalog.literals();
+        verify_code(
+            &catalog.bytes[catalog.code_bytes.clone()],
+            &catalog.messages,
+            catalog.strings.len(),
+            literals,
+            catalog.funcs.len(),
+        )?;
         Ok(catalog)
     }
 
@@ -220,10 +222,7 @@ impl Catalog {
 
     /// Resolve a literal slice from the `LITS` chunk.
     pub fn literal(&self, off: u32, len: u32) -> Result<&str, CatalogError> {
-        let slice = self.literal_slice(off, len)?;
-        // SAFETY: `Catalog::from_bytes` calls `verify_strings_utf8` before
-        // constructing `Catalog`, so the LITS byte range is valid UTF-8.
-        Ok(unsafe { str::from_utf8_unchecked(slice) })
+        self.literal_slice(off, len)
     }
 
     /// Return code bytes.
@@ -281,21 +280,31 @@ impl Catalog {
         Self::string_slice_from_parts(&self.bytes, &self.strings, &self.strings_bytes, id)
     }
 
-    fn literal_slice(&self, off: u32, len: u32) -> Result<&[u8], CatalogError> {
+    fn literal_slice(&self, off: u32, len: u32) -> Result<&str, CatalogError> {
         let lits = self
             .lits_bytes
             .as_ref()
             .ok_or(CatalogError::MissingChunk("LITS"))?;
-        let start = lits
-            .start
-            .checked_add(off as usize)
+        let offset = off as usize;
+        let length = len as usize;
+        let end_offset = offset
+            .checked_add(length)
             .ok_or(CatalogError::ChunkOutOfBounds)?;
-        let end = start
-            .checked_add(len as usize)
-            .ok_or(CatalogError::ChunkOutOfBounds)?;
-        self.bytes
-            .get(start..end)
-            .ok_or(CatalogError::ChunkOutOfBounds)
+        let lits_len = lits.end - lits.start;
+        if end_offset > lits_len {
+            return Err(CatalogError::ChunkOutOfBounds);
+        }
+        let literals = self.literals().ok_or(CatalogError::MissingChunk("LITS"))?;
+        literals
+            .get(offset..end_offset)
+            .ok_or(CatalogError::InvalidUtf8)
+    }
+
+    fn literals(&self) -> Option<&str> {
+        let range = self.lits_bytes.as_ref()?;
+        // SAFETY: `Catalog::from_bytes` verifies the complete LITS chunk as
+        // UTF-8 before calling this helper or returning the catalog.
+        Some(unsafe { str::from_utf8_unchecked(&self.bytes[range.clone()]) })
     }
 }
 
@@ -477,7 +486,7 @@ fn verify_code(
     code: &[u8],
     messages: &[MessageEntry],
     string_count: usize,
-    literal_len: usize,
+    literals: Option<&str>,
     func_count: usize,
 ) -> Result<(), CatalogError> {
     use bitvec::prelude::*;
@@ -498,7 +507,7 @@ fn verify_code(
         if decoded.next_pc as usize > code.len() {
             return Err(CatalogError::TruncatedInstruction { pc });
         }
-        validate_instruction_operands(code, decoded, string_count, literal_len, func_count)?;
+        validate_instruction_operands(code, decoded, string_count, literals, func_count)?;
 
         match decoded.opcode {
             Opcode::ExprFallback if !expr_fallback_pending => expr_fallback_pending = true,
@@ -562,7 +571,7 @@ fn validate_instruction_operands(
     code: &[u8],
     decoded: vm::Decoded,
     string_count: usize,
-    literal_len: usize,
+    literals: Option<&str>,
     func_count: usize,
 ) -> Result<(), CatalogError> {
     let base = decoded.pc as usize;
@@ -582,7 +591,7 @@ fn validate_instruction_operands(
         Opcode::OutSlice | Opcode::OutExpr => {
             let offset = read_u32(code, base + 1)?;
             let len = read_u32(code, base + 5)?;
-            validate_literal_ref(decoded.pc, offset, len, literal_len)?;
+            validate_literal_ref(decoded.pc, offset, len, literals)?;
         }
         Opcode::MarkupOpen | Opcode::MarkupClose => {
             let id = read_u32(code, base + 1)?;
@@ -608,13 +617,17 @@ fn validate_literal_ref(
     pc: u32,
     offset: u32,
     len: u32,
-    literal_len: usize,
+    literals: Option<&str>,
 ) -> Result<(), CatalogError> {
     let start = offset as usize;
     let Some(end) = start.checked_add(len as usize) else {
         return Err(CatalogError::InvalidLiteralRef { pc, offset, len });
     };
-    if end > literal_len {
+    let Some(literals) = literals else {
+        return Err(CatalogError::InvalidLiteralRef { pc, offset, len });
+    };
+    if end > literals.len() || !literals.is_char_boundary(start) || !literals.is_char_boundary(end)
+    {
         return Err(CatalogError::InvalidLiteralRef { pc, offset, len });
     }
     Ok(())
@@ -1279,6 +1292,107 @@ mod tests {
                 len: 4
             }
         );
+    }
+
+    #[test]
+    fn literal_refs_must_land_on_utf8_boundaries() {
+        for opcode in [Opcode::OutSlice, Opcode::OutExpr] {
+            for (offset, len) in [(2, 1), (1, 1), (2, 0)] {
+                let code = match opcode {
+                    Opcode::OutSlice => TestOps::new().out_slice(offset, len).halt().build(),
+                    Opcode::OutExpr => TestOps::new().out_expr(offset, len).halt().build(),
+                    _ => unreachable!(),
+                };
+                let bytes = build_catalog(
+                    &["main"],
+                    "aé中",
+                    &[MessageEntry {
+                        name_str_id: 0,
+                        entry_pc: 0,
+                    }],
+                    &code,
+                );
+                let err = Catalog::from_bytes(&bytes).expect_err("must reject invalid boundary");
+                assert!(matches!(err, CatalogError::InvalidLiteralRef { pc: 0, .. }));
+            }
+
+            for (offset, len, expected) in [(1, 2, "é"), (3, 0, "")] {
+                let code = match opcode {
+                    Opcode::OutSlice => TestOps::new().out_slice(offset, len).halt().build(),
+                    Opcode::OutExpr => TestOps::new().out_expr(offset, len).halt().build(),
+                    _ => unreachable!(),
+                };
+                let bytes = build_catalog(
+                    &["main"],
+                    "aé中",
+                    &[MessageEntry {
+                        name_str_id: 0,
+                        entry_pc: 0,
+                    }],
+                    &code,
+                );
+                let catalog = Catalog::from_bytes(&bytes).expect("valid boundary");
+                assert_eq!(catalog.literal(offset, len).expect("literal"), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn literal_refs_require_a_lits_chunk() {
+        let code = TestOps::new().out_slice(0, 0).halt().build();
+        let mut bytes = build_catalog(
+            &["main"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        bytes[chunk_entry_offset(1)..chunk_entry_offset(1) + 4].copy_from_slice(b"JUNK");
+        let err = Catalog::from_bytes(&bytes).expect_err("must reject missing LITS");
+        assert!(matches!(
+            err,
+            CatalogError::InvalidLiteralRef {
+                pc: 0,
+                offset: 0,
+                len: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn literal_accessor_checks_lits_bounds_and_utf8_boundaries() {
+        let code = [Opcode::Halt as u8];
+        let catalog = Catalog::from_bytes(&build_catalog(
+            &["main"],
+            "aé中",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        ))
+        .expect("valid catalog");
+
+        assert_eq!(catalog.literal(1, 2).expect("complete codepoint"), "é");
+        assert_eq!(catalog.literal(3, 0).expect("empty slice"), "");
+        assert!(matches!(
+            catalog.literal(2, 1),
+            Err(CatalogError::InvalidUtf8)
+        ));
+        assert!(matches!(
+            catalog.literal(1, 1),
+            Err(CatalogError::InvalidUtf8)
+        ));
+        assert!(matches!(
+            catalog.literal(6, 1),
+            Err(CatalogError::ChunkOutOfBounds)
+        ));
+        assert!(matches!(
+            catalog.literal(u32::MAX, 1),
+            Err(CatalogError::ChunkOutOfBounds)
+        ));
     }
 
     #[test]
