@@ -15,7 +15,7 @@ publish = false
 workspace = true
 
 [dependencies]
-icu_locale_core = { default-features = false, version = "2.1.1" }
+icu_locale_core = { default-features = false, version = "2.3.0" }
 message-format = { features = ["compile", "icu4x", "std"], workspace = true }
 
 [dev-dependencies]
