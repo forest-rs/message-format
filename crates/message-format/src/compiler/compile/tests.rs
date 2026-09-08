@@ -2027,6 +2027,63 @@ fn raw_match_with_local_alias_selector_uses_input() {
     assert_eq!(out, "Good evening");
 }
 
+#[cfg(feature = "icu4x")]
+#[test]
+fn raw_match_with_numeric_local_selector_falls_back_to_plural_category() {
+    for arms in [
+        "1 a {{exact-a}} one b {{plural-b}} * * {{fallback}}",
+        "* * {{fallback}} one b {{plural-b}} 1 a {{exact-a}}",
+        "* * {{fallback}} 1 a {{exact-a}} one b {{plural-b}}",
+    ] {
+        let source =
+            alloc::format!(".input {{$n :number}} .input {{$s :string}} .match $n $s {arms}");
+        let bytes = compile_str(&source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+        let args = vec![
+            arg(&catalog, "n", Value::Int(1)),
+            arg(&catalog, "s", Value::Str("b".to_string())),
+        ];
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &args)
+                .expect("formatted"),
+            "plural-b"
+        );
+
+        let exact_args = vec![
+            arg(&catalog, "n", Value::Int(1)),
+            arg(&catalog, "s", Value::Str("a".to_string())),
+        ];
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &exact_args)
+                .expect("formatted"),
+            "exact-a"
+        );
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn raw_match_with_offset_numeric_local_selector_falls_back_to_plural_category() {
+    let source = ".local $n = {2 :number} .local $m = {$n :offset subtract=1} .input {$s :string} .match $m $s 1 a {{exact-a}} one b {{plural-b}} * * {{fallback}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![arg(&catalog, "s", Value::Str("b".to_string()))];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "plural-b"
+    );
+}
+
 #[test]
 fn local_alias_is_substituted() {
     let bytes = compile_str(".local $a = {$name} {{Hello {$a}!}}").expect("compiled");
@@ -2214,6 +2271,21 @@ fn local_offset_result_can_be_used_in_match_selector() {
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
     assert_eq!(out, "=4");
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn raw_offset_result_defaults_to_plural_selection() {
+    let source = ".local $n = {2 :offset subtract=1} .match $n one {{one}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let out = formatter
+        .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
+        .expect("formatted");
+    assert_eq!(out, "one");
 }
 
 #[test]
