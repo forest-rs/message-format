@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use super::helpers::*;
-use message_format::runtime::Value;
+use message_format::runtime::{FormatError, MessageFunctionError, Value};
 
 // ---------------------------------------------------------------------------
 // TR35 §14 — :number function
@@ -220,8 +220,8 @@ fn numeric_local_dynamic_select_reports_both_diagnostics() {
     assert_errors_multiset(
         &output.errors,
         &[
-            function_error(message_format::runtime::MessageFunctionError::BadOption),
-            message_format::runtime::FormatError::BadSelector { source: None },
+            function_error(MessageFunctionError::BadOption),
+            FormatError::BadSelector { source: None },
         ],
     );
 }
@@ -302,8 +302,8 @@ fn number_selection_dynamic_mode_is_not_synthesized() {
     assert_errors_multiset(
         &output.errors,
         &[
-            function_error(message_format::runtime::MessageFunctionError::BadOption),
-            message_format::runtime::FormatError::BadSelector { source: None },
+            function_error(MessageFunctionError::BadOption),
+            FormatError::BadSelector { source: None },
         ],
     );
 }
@@ -485,6 +485,55 @@ fn number_bad_option() {
         "{ $x :number minimumFractionDigits=abc }",
         &[("x", Value::Int(1))],
         is_bad_option,
+    );
+}
+
+#[test]
+fn missing_direct_option_is_recoverable() {
+    let output = format_output(
+        "{$n :number minimumFractionDigits=$missing}",
+        &[("n", Value::Int(1))],
+    );
+    assert_eq!(output.value, "1");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("missing"),
+            function_error(MessageFunctionError::BadOption),
+        ],
+    );
+}
+
+#[test]
+fn missing_local_option_is_recoverable() {
+    let output = format_output(
+        ".local $bad = {$missing} {{{$n :number minimumFractionDigits=$bad}}}",
+        &[("n", Value::Int(1))],
+    );
+    assert_eq!(output.value, "1");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("missing"),
+            function_error(MessageFunctionError::BadOption),
+        ],
+    );
+}
+
+#[test]
+fn missing_dynamic_select_is_unselectable_but_formats() {
+    let output = format_output(
+        ".local $n = {1 :number select=$missing} .match $n 1 {{wrong}} one {{wrong}} * {{other {$n}}}",
+        &[],
+    );
+    assert_eq!(output.value, "other 1");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("missing"),
+            function_error(MessageFunctionError::BadOption),
+            FormatError::BadSelector { source: None },
+        ],
     );
 }
 

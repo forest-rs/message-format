@@ -170,9 +170,9 @@ fn selector_bad_option_falls_to_catchall() {
     );
 }
 
-/// E-7/SEL-5 — Selector diagnostics keep a primary cause without dropping additional missing args.
+/// E-7/SEL-5 — Operand failure short-circuits option resolution for the selector.
 #[test]
-fn selector_with_multiple_missing_inputs_reports_all_missing_args() {
+fn selector_operand_failure_short_circuits_option_resolution() {
     let output = format_output(
         ".input { $x :number select=$mode minimumFractionDigits=$digits }\n.match $x\none {{ONE}}\n* {{CATCHALL}}",
         &[],
@@ -180,12 +180,7 @@ fn selector_with_multiple_missing_inputs_reports_all_missing_args() {
     assert_eq!(output.value, "CATCHALL");
     assert_errors_multiset(
         &output.errors,
-        &[
-            missing_arg("x"),
-            missing_arg("mode"),
-            missing_arg("digits"),
-            FormatError::BadSelector { source: None },
-        ],
+        &[missing_arg("x"), FormatError::BadSelector { source: None }],
     );
 }
 

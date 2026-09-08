@@ -252,20 +252,13 @@ fn rewrite_call_options_from_locals(
             }
             continue;
         };
-        if option.key == "select" {
-            // Keep the option dynamic so invalid values are diagnosed by the
-            // builtin at runtime, while carrying the local payload because a
-            // local declaration is not a message argument.
-            option.value = FunctionOptionValue::ResolvedVar {
-                name: var.clone(),
-                value: local_value.to_string(),
-            };
-            continue;
-        }
-        // Function option literals are stored as decoded semantic text, not raw
-        // source tokens, so local substitution can stay allocation-light and
-        // avoid reintroducing a quoted-literal protocol here.
-        option.value = FunctionOptionValue::Literal(local_value.to_string());
+        // Preserve the variable origin while carrying the local payload;
+        // local declarations are not message arguments, but option values
+        // still need their dynamic fallback semantics.
+        option.value = FunctionOptionValue::ResolvedVar {
+            name: var.clone(),
+            value: local_value.to_string(),
+        };
     }
     if let Operand::Call(nested) = &mut call.operand {
         rewrite_call_options_from_locals(nested, locals, slots);
@@ -291,14 +284,10 @@ pub(super) fn rewrite_selector_expr_from_locals(
         let Some(local_value) = locals.get(var).and_then(LocalValue::as_literal) else {
             continue;
         };
-        if option.key == "select" {
-            option.value = FunctionOptionValue::ResolvedVar {
-                name: var.clone(),
-                value: local_value.to_string(),
-            };
-            continue;
-        }
-        option.value = FunctionOptionValue::Literal(local_value.to_string());
+        option.value = FunctionOptionValue::ResolvedVar {
+            name: var.clone(),
+            value: local_value.to_string(),
+        };
     }
     if let Operand::Call(nested) = operand {
         rewrite_call_options_from_locals(nested, locals, slots);
