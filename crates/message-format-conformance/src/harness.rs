@@ -325,7 +325,7 @@ struct WgTest {
     #[serde(default, rename = "expErrors")]
     exp_errors: Option<Vec<WgError>>,
     #[serde(default)]
-    params: Vec<WgParam>,
+    params: Option<Vec<WgParam>>,
     #[serde(default)]
     locale: Option<String>,
     #[serde(default, rename = "bidiIsolation")]
@@ -338,6 +338,10 @@ struct WgTestDefaults {
     exp: Option<String>,
     #[serde(default, rename = "expErrors")]
     exp_errors: Option<Vec<WgError>>,
+    #[serde(default, rename = "expParts")]
+    exp_parts: Option<serde_json::Value>,
+    #[serde(default)]
+    params: Option<Vec<WgParam>>,
     #[serde(default)]
     locale: Option<String>,
     #[serde(default, rename = "bidiIsolation")]
@@ -350,7 +354,7 @@ struct WgError {
     error_type: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WgParam {
     name: String,
     value: serde_json::Value,
@@ -397,6 +401,12 @@ fn apply_suite_defaults(test: &mut WgTest, defaults: &WgTestDefaults) {
     }
     if test.exp_errors.is_none() {
         test.exp_errors = defaults.exp_errors.clone();
+    }
+    if test.exp_parts.is_none() {
+        test.exp_parts = defaults.exp_parts.clone();
+    }
+    if test.params.is_none() {
+        test.params = defaults.params.clone();
     }
     if test.locale.is_none() {
         test.locale = defaults.locale.clone();
@@ -477,7 +487,7 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
                     return (false, format!("init-error:formatter:{error:?}"));
                 }
             };
-            let args = match wg_params_to_args(&catalog, &test.params) {
+            let args = match wg_params_to_args(&catalog, test.params.as_deref().unwrap_or(&[])) {
                 Ok(args) => args,
                 Err(detail) => return (false, format!("unsupported-input:{detail}")),
             };
@@ -544,7 +554,6 @@ fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, 
                     param.name
                 )));
             }
-            let id = catalog.string_id(&param.name)?;
             let value = match &param.value {
                 serde_json::Value::String(v) => Ok(Value::Str(v.clone())),
                 serde_json::Value::Bool(v) => Ok(Value::Bool(*v)),
@@ -559,8 +568,11 @@ fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, 
                     param.name
                 )),
             };
+            // Validate the value before filtering unknown names. Unsupported
+            // WG values remain invalid even when the message does not declare
+            // a parameter with that name.
             match value {
-                Ok(value) => Some(Ok((id, value))),
+                Ok(value) => catalog.string_id(&param.name).map(|id| Ok((id, value))),
                 Err(error) => Some(Err(error)),
             }
         })
@@ -856,6 +868,18 @@ mod tests {
     }
 
     #[test]
+    fn unused_structured_wg_parameters_are_rejected() {
+        let source = compile_str("hello").expect("compiled");
+        let catalog = Catalog::from_bytes(&source).expect("catalog");
+        let params = [WgParam {
+            name: "object".to_string(),
+            value: serde_json::json!({"key": "value"}),
+            value_type: None,
+        }];
+        assert!(wg_params_to_args(&catalog, &params).is_err());
+    }
+
+    #[test]
     fn null_wg_parameters_use_runtime_null() {
         let source = compile_str("{$null}").expect("compiled");
         let catalog = Catalog::from_bytes(&source).expect("catalog");
@@ -873,9 +897,66 @@ mod tests {
     fn deserialization_preserves_absent_and_empty_error_properties() {
         let absent: WgTest = serde_json::from_str(r#"{"src":"hello"}"#).expect("json");
         let empty: WgTest =
-            serde_json::from_str(r#"{"src":"hello","expErrors":[]}"#).expect("json");
+            serde_json::from_str(r#"{"src":"hello","expErrors":[],"expParts":[],"params":[]}"#)
+                .expect("json");
         assert!(absent.exp_errors.is_none());
         assert!(empty.exp_errors.is_some_and(|errors| errors.is_empty()));
+        assert!(absent.exp_parts.is_none());
+        assert!(empty.exp_parts.is_some());
+        assert!(absent.params.is_none());
+        assert!(empty.params.is_some_and(|params| params.is_empty()));
+    }
+
+    #[test]
+    fn suite_defaults_reject_inherited_unsupported_expectations() {
+        let defaults = WgTestDefaults {
+            exp_parts: Some(serde_json::json!([])),
+            ..WgTestDefaults::default()
+        };
+        let mut test = test_case("hello", Some("hello"), Some(&[]));
+        apply_suite_defaults(&mut test, &defaults);
+        assert_eq!(
+            run_wg_test_result(&test),
+            (false, "unsupported-expectation:expParts".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_empty_params_override_inherited_params() {
+        let defaults = WgTestDefaults {
+            params: Some(vec![WgParam {
+                name: "unused".to_string(),
+                value: serde_json::json!({"key": "value"}),
+                value_type: None,
+            }]),
+            ..WgTestDefaults::default()
+        };
+        let mut test = test_case("hello", Some("hello"), Some(&[]));
+        test.params = Some(Vec::new());
+        apply_suite_defaults(&mut test, &defaults);
+        assert!(run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn absent_params_inherit_and_reject_unsupported_values() {
+        let defaults = WgTestDefaults {
+            params: Some(vec![WgParam {
+                name: "unused".to_string(),
+                value: serde_json::json!([1, 2, 3]),
+                value_type: None,
+            }]),
+            ..WgTestDefaults::default()
+        };
+        let mut test = test_case("hello", Some("hello"), Some(&[]));
+        apply_suite_defaults(&mut test, &defaults);
+        assert_eq!(
+            run_wg_test_result(&test),
+            (
+                false,
+                "unsupported-input:parameter \"unused\" has unsupported structured value"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
