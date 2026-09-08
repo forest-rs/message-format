@@ -165,7 +165,7 @@ fn preprocess_single_message_parts(
         ctx,
         source_id.map(|source_id| FunctionOriginContext {
             source_id,
-            base_byte: pattern.as_ptr() as usize - source.as_ptr() as usize,
+            base_byte: 0,
         }),
     )?;
     declarations.append(&mut parts);
