@@ -182,6 +182,8 @@ pub enum Part {
     Call(CallExpr),
     /// Select expression with case arms and a required default arm.
     Select(SelectExpr),
+    /// Validate one local selector before generated match dispatch.
+    CheckSelector(u32),
     /// Evaluate and store one declaration value in a local slot.
     Bind {
         /// Dense declaration slot.
@@ -267,6 +269,14 @@ pub enum SelectorExpr {
         /// Dense declaration slot.
         slot: u32,
         /// Original selector annotation for compile-time validation.
+        func: Option<FunctionSpec>,
+    },
+    /// Previously evaluated local selector whose validity was checked once
+    /// before generated dispatch.
+    CheckedLocal {
+        /// Dense declaration slot.
+        slot: u32,
+        /// Original selector annotation for variant validation.
         func: Option<FunctionSpec>,
     },
     /// Function call selector.

@@ -49,7 +49,7 @@ pub(super) fn collect_strings(messages: &[Message], out: &mut BTreeSet<String>) 
 fn collect_parts_strings(parts: &[Part], out: &mut BTreeSet<String>) {
     for part in parts {
         match part {
-            Part::Text(_) | Part::Local(_) => {}
+            Part::Text(_) | Part::Local(_) | Part::CheckSelector(_) => {}
             Part::Literal(value) => {
                 out.insert(value.clone());
             }
@@ -187,7 +187,7 @@ fn collect_selector_strings(selector: &SelectorExpr, out: &mut BTreeSet<String>)
         SelectorExpr::Var(name) => {
             out.insert(name.clone());
         }
-        SelectorExpr::Local { .. } => {}
+        SelectorExpr::Local { .. } | SelectorExpr::CheckedLocal { .. } => {}
         SelectorExpr::Call { operand, func } => {
             collect_operand_strings(operand, out);
             collect_function_strings(func, out);
@@ -208,7 +208,10 @@ fn collect_selector_functions(
             collect_operand_functions(operand, func_map, entries)?;
             register_function(func, func_map, entries)
         }
-        SelectorExpr::Var(_) | SelectorExpr::Local { .. } | SelectorExpr::Literal(_) => Ok(()),
+        SelectorExpr::Var(_)
+        | SelectorExpr::Local { .. }
+        | SelectorExpr::CheckedLocal { .. }
+        | SelectorExpr::Literal(_) => Ok(()),
     }
 }
 

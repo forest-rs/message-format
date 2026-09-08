@@ -590,7 +590,7 @@ fn validate_instruction_operands(
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
-        Opcode::StoreLocal | Opcode::LoadLocal => {
+        Opcode::CheckSelector | Opcode::StoreLocal | Opcode::LoadLocal | Opcode::SelectLocal => {
             // The runtime validates dense-slot ordering because the valid
             // range depends on the execution path. Decoding still checks the
             // complete u32 operand here, including truncated instructions.
@@ -647,7 +647,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
         Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin | Opcode::StoreLocal => (1, 0),
         Opcode::PushConst | Opcode::LoadArg => (0, 1),
         Opcode::LoadLocal => (0, 1),
-        Opcode::OutArg | Opcode::SelectArg => (0, 0),
+        Opcode::CheckSelector | Opcode::OutArg | Opcode::SelectArg | Opcode::SelectLocal => (0, 0),
         Opcode::CallFunc | Opcode::CallSelect => {
             let arg_count = u32::from(code[base + 3]);
             let optc = u32::from(code[base + 4]);
@@ -757,7 +757,7 @@ impl AbstractExecutionVerifier {
 
                 let (pops, pushes) = stack_effect(code, decoded);
                 match decoded.opcode {
-                    Opcode::LoadLocal => {
+                    Opcode::CheckSelector | Opcode::LoadLocal | Opcode::SelectLocal => {
                         let slot = read_u32(code, pc as usize + 1)?;
                         if slot >= initialized_locals {
                             return Err(CatalogError::InvalidLocalSlot { pc, slot });
@@ -850,7 +850,7 @@ impl AbstractExecutionVerifier {
 
 fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<(), CatalogError> {
     match decoded.opcode {
-        Opcode::SelectArg | Opcode::SelectBegin => {
+        Opcode::SelectArg | Opcode::SelectLocal | Opcode::SelectBegin => {
             *select_depth =
                 select_depth
                     .checked_add(1)
@@ -1181,6 +1181,23 @@ mod tests {
     }
 
     #[test]
+    fn truncated_local_selector_operands_fail_decode() {
+        for opcode in [Opcode::CheckSelector, Opcode::SelectLocal] {
+            let bytes = build_catalog(
+                &["main"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &[opcode as u8, 0, 0],
+            );
+            let err = Catalog::from_bytes(&bytes).expect_err("must reject truncated operand");
+            assert!(matches!(err, CatalogError::TruncatedInstruction { pc: 0 }));
+        }
+    }
+
+    #[test]
     fn local_load_before_store_is_rejected() {
         let code = [Opcode::LoadLocal as u8, 0, 0, 0, 0, Opcode::Halt as u8];
         let bytes = build_catalog(
@@ -1196,6 +1213,26 @@ mod tests {
             Catalog::from_bytes(&bytes).expect_err("load must follow store"),
             CatalogError::InvalidLocalSlot { pc: 0, slot: 0 }
         );
+    }
+
+    #[test]
+    fn local_selector_before_store_is_rejected() {
+        for opcode in [Opcode::CheckSelector, Opcode::SelectLocal] {
+            let code = [opcode as u8, 0, 0, 0, 0, Opcode::Halt as u8];
+            let bytes = build_catalog(
+                &["main"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &code,
+            );
+            assert_eq!(
+                Catalog::from_bytes(&bytes).expect_err("selector must follow store"),
+                CatalogError::InvalidLocalSlot { pc: 0, slot: 0 }
+            );
+        }
     }
 
     #[test]

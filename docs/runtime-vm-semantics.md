@@ -41,6 +41,14 @@ independently and intersects initialization state at control-flow joins.
 Formatters reuse the local buffer's capacity, but clear its values before
 returning from execution on both success and error.
 
+The compiler emits `CheckSelector` once for each source selector, before variant
+dispatch. Each check reports `BadSelector` if the local is a fallback or an
+unselectable resolved number. `SelectLocal` then compares that local directly,
+without cloning it or repeating the diagnostic when generated branches retry
+exact and plural candidates. Both instructions require a definitely initialized
+slot. Repeated default subtrees share a target; jumps to an ancestor default
+close each intervening select scope with `SelectEnd`.
+
 ## Host Contract
 
 `Host::call` receives:
