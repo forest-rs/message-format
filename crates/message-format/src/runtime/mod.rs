@@ -180,6 +180,11 @@
 //! Catalog loading now rejects local loads without prior initialization on
 //! every reachable path, and stores that skip a local slot. Exhaustive
 //! [`CatalogError`] matches must handle [`CatalogError::InvalidLocalSlot`].
+//!
+//! Recompile catalogs to use separate `CheckSelector`/`SelectLocal` instructions.
+//! Structured compiler inputs gain `Part::CheckSelector` and
+//! `SelectorExpr::CheckedLocal`; exhaustive semantic matches must handle these
+//! variants. The check belongs before dispatch, once per source selector.
 
 #[cfg(feature = "icu4x")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
