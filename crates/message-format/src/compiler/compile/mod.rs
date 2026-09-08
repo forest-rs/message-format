@@ -984,17 +984,20 @@ fn collect_builtin_validation_errors(messages: &[Message]) -> Vec<CompileError> 
 fn collect_builtin_part_errors(parts: &[Part], message: &Message, errors: &mut Vec<CompileError>) {
     for part in parts {
         match part {
-            Part::Call(CallExpr {
-                operand: _, func, ..
-            }) => {
+            Part::Call(CallExpr { operand, func, .. }) => {
+                collect_builtin_operand_errors(operand, message, errors);
                 collect_builtin_function_errors(func, message, errors);
+            }
+            Part::Bind { value, .. } => {
+                collect_builtin_part_errors(core::slice::from_ref(value), message, errors);
             }
             Part::Select(SelectExpr {
                 selector,
                 arms,
                 default,
             }) => {
-                if let crate::compiler::semantic::SelectorExpr::Call { func, .. } = selector {
+                if let crate::compiler::semantic::SelectorExpr::Call { operand, func } = selector {
+                    collect_builtin_operand_errors(operand, message, errors);
                     collect_builtin_function_errors(func, message, errors);
                 }
                 for arm in arms {
@@ -1006,9 +1009,22 @@ fn collect_builtin_part_errors(parts: &[Part], message: &Message, errors: &mut V
             | Part::MarkupClose { .. }
             | Part::Text(_)
             | Part::Literal(_)
-            | Part::Var(_) => {}
+            | Part::Var(_)
+            | Part::Local(_) => {}
         }
     }
+}
+
+fn collect_builtin_operand_errors(
+    operand: &Operand,
+    message: &Message,
+    errors: &mut Vec<CompileError>,
+) {
+    let Operand::Call(call) = operand else {
+        return;
+    };
+    collect_builtin_operand_errors(&call.operand, message, errors);
+    collect_builtin_function_errors(&call.func, message, errors);
 }
 
 fn collect_builtin_function_errors(
@@ -1101,6 +1117,7 @@ fn collect_manifest_part_errors(
     for part in parts {
         match part {
             Part::Call(CallExpr { operand, func, .. }) => {
+                collect_operand_manifest_errors(operand, manifest, message, errors);
                 collect_function_spec_errors_into(
                     func,
                     Some(operand),
@@ -1109,6 +1126,9 @@ fn collect_manifest_part_errors(
                     message,
                     errors,
                 );
+            }
+            Part::Bind { value, .. } => {
+                collect_manifest_value_errors(value, manifest, message, errors);
             }
             Part::Select(SelectExpr {
                 selector,
@@ -1121,11 +1141,30 @@ fn collect_manifest_part_errors(
                 }
                 collect_manifest_part_errors(default, manifest, message, errors);
             }
-            Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}
+            Part::Text(_) | Part::Literal(_) | Part::Var(_) | Part::Local(_) => {}
             Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
                 collect_markup_manifest_errors_into(name, options, manifest, message, errors);
             }
         }
+    }
+}
+
+fn collect_manifest_value_errors(
+    value: &Part,
+    manifest: &FunctionManifest,
+    message: &Message,
+    errors: &mut Vec<CompileError>,
+) {
+    if let Part::Call(CallExpr { operand, func, .. }) = value {
+        collect_operand_manifest_errors(operand, manifest, message, errors);
+        collect_function_spec_errors_into(
+            func,
+            Some(operand),
+            FunctionUse::Select,
+            manifest,
+            message,
+            errors,
+        );
     }
 }
 
@@ -1181,7 +1220,9 @@ fn validate_markup_option(
     };
     let accepts = match option.value {
         FunctionOptionValue::Literal(_) => option_schema.value_kind.accepts_literal(),
-        FunctionOptionValue::Var(_) => option_schema.value_kind.accepts_variable(),
+        FunctionOptionValue::Var(_)
+        | FunctionOptionValue::ResolvedVar { .. }
+        | FunctionOptionValue::LocalVar { .. } => option_schema.value_kind.accepts_variable(),
     };
     if accepts {
         return Ok(());
@@ -1221,10 +1262,22 @@ fn collect_selector_manifest_errors(
     message: &Message,
     errors: &mut Vec<CompileError>,
 ) {
-    if let crate::compiler::semantic::SelectorExpr::Call { operand, func } = selector {
+    let (operand, func) = match selector {
+        crate::compiler::semantic::SelectorExpr::Call { operand, func } => {
+            (Some(operand), Some(func))
+        }
+        crate::compiler::semantic::SelectorExpr::Local {
+            func: Some(func), ..
+        } => (None, Some(func)),
+        _ => (None, None),
+    };
+    if let Some(func) = func {
+        if let Some(operand) = operand {
+            collect_operand_manifest_errors(operand, manifest, message, errors);
+        }
         collect_function_spec_errors_into(
             func,
-            Some(operand),
+            operand,
             FunctionUse::Select,
             manifest,
             message,
@@ -1239,6 +1292,26 @@ fn collect_selector_manifest_errors(
             }
         }
     }
+}
+
+fn collect_operand_manifest_errors(
+    operand: &Operand,
+    manifest: &FunctionManifest,
+    message: &Message,
+    errors: &mut Vec<CompileError>,
+) {
+    let Operand::Call(call) = operand else {
+        return;
+    };
+    collect_operand_manifest_errors(&call.operand, manifest, message, errors);
+    collect_function_spec_errors_into(
+        &call.func,
+        Some(&call.operand),
+        FunctionUse::Format,
+        manifest,
+        message,
+        errors,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1328,7 +1401,9 @@ fn validate_function_option(
     };
     let accepts = match option.value {
         FunctionOptionValue::Literal(_) => option_schema.value_kind.accepts_literal(),
-        FunctionOptionValue::Var(_) => option_schema.value_kind.accepts_variable(),
+        FunctionOptionValue::Var(_)
+        | FunctionOptionValue::ResolvedVar { .. }
+        | FunctionOptionValue::LocalVar { .. } => option_schema.value_kind.accepts_variable(),
     };
     if accepts {
         return Ok(());
@@ -1387,7 +1462,7 @@ fn validate_function_operand(
                     ))
                 };
             }
-            Some(Operand::Var(_)) | None => None,
+            Some(Operand::Var(_) | Operand::Local(_) | Operand::Call(_)) | None => None,
         },
         FunctionOperandKind::Number => match operand {
             Some(Operand::Literal { value, kind }) => {
@@ -1403,7 +1478,7 @@ fn validate_function_operand(
                     ))
                 };
             }
-            Some(Operand::Var(_)) | None => None,
+            Some(Operand::Var(_) | Operand::Local(_) | Operand::Call(_)) | None => None,
         },
     };
     let Some(operand) = operand else {

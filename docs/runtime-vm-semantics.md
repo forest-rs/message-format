@@ -34,6 +34,13 @@ Pipeline:
 - Unknown host functions are reported as `FormatError::UnknownFunction` unless host overrides behavior.
 - Missing arguments are reported as `FormatError::MissingArg` under default semantics.
 
+Local slots are private to one message execution. `StoreLocal` initializes the
+next dense slot or replaces an initialized slot; `LoadLocal` requires prior
+initialization on every reachable path. The verifier checks each entry point
+independently and intersects initialization state at control-flow joins.
+Formatters reuse the local buffer's capacity, but clear its values before
+returning from execution on both success and error.
+
 ## Host Contract
 
 `Host::call` receives:

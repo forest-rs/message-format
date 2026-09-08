@@ -102,6 +102,130 @@ fn integer_literal() {
     assert_format("{42 :integer}", &[], "42");
 }
 
+/// Resolved numeric locals retain exact integer payloads beyond the f64 safe
+/// integer range until the runtime renders them.
+#[test]
+fn numeric_local_preserves_exact_integer() {
+    assert_format(
+        ".local $n = {9007199254740993 :number useGrouping=never} {{{$n}}}",
+        &[],
+        "9007199254740993",
+    );
+}
+
+/// Re-annotating a resolved number overrides only the supplied options and
+/// retains inherited options from the local declaration.
+#[test]
+fn numeric_local_reannotation_inherits_options() {
+    assert_format(
+        ".local $n = {4.20 :number minimumFractionDigits=2 signDisplay=always} .local $m = {$n :number minimumFractionDigits=1} {{{$m}}}",
+        &[],
+        "+4.2",
+    );
+}
+
+/// Re-annotation of an input number also preserves its resolved options.
+#[test]
+fn numeric_input_reannotation_inherits_options() {
+    assert_format(
+        ".input {$n :number minimumFractionDigits=2 signDisplay=always} .local $m = {$n :number minimumFractionDigits=1} {{{$m}}}",
+        &[("n", Value::Float(4.2))],
+        "+4.2",
+    );
+}
+
+/// Offset applies to the exact resolved payload while retaining inherited
+/// number formatting options.
+#[test]
+fn numeric_local_offset_inherits_options() {
+    assert_format(
+        ".local $n = {4.2 :number minimumFractionDigits=2 signDisplay=always} .local $m = {$n :offset add=1} {{{$m}}}",
+        &[],
+        "+5.20",
+    );
+}
+
+/// Integer conversion truncates a resolved number and drops inherited digit
+/// and fraction formatting options.
+#[test]
+fn numeric_local_integer_drops_number_options() {
+    assert_format(
+        ".local $n = {4.2 :number minimumFractionDigits=2 signDisplay=always} .local $m = {$n :integer} {{{$m}}}",
+        &[],
+        "+4",
+    );
+}
+
+/// Exact matching uses the numeric payload even when grouped display options
+/// are inherited by the resolved local.
+#[test]
+fn numeric_local_match_uses_exact_payload() {
+    assert_format(
+        ".local $n = {1234 :number useGrouping=always} .match $n 1234 {{exact}} * {{other}}",
+        &[],
+        "exact",
+    );
+}
+
+/// Exact numeric matching takes precedence over the plural keyword arm.
+#[test]
+fn numeric_local_match_exact_precedes_keyword() {
+    assert_format(
+        ".local $n = {1 :number minimumFractionDigits=2} .match $n 1 {{exact}} one {{one}} * {{other}}",
+        &[],
+        "exact",
+    );
+}
+
+/// A resolved numeric local with no exact arm does not use its display text as
+/// a plural category selector.
+#[test]
+fn numeric_local_match_keyword_uses_plural_category() {
+    assert_format(
+        ".local $n = {1 :number minimumFractionDigits=2} .match $n one {{one}} * {{other}}",
+        &[],
+        "other",
+    );
+}
+
+/// Alias chains preserve the resolved numeric call and its inherited options.
+#[test]
+fn numeric_local_alias_chain_preserves_resolved_value() {
+    assert_format(
+        ".local $n = {4.2 :number minimumFractionDigits=2} .local $alias = {$n} .local $m = {$alias :number signDisplay=always} {{{$m}}}",
+        &[],
+        "+4.20",
+    );
+}
+
+/// A dynamic select option stays runtime-resolved: the invalid inner number
+/// annotation reports bad-option and the enclosing match reports bad-selector.
+#[test]
+fn numeric_local_dynamic_select_reports_both_diagnostics() {
+    let output = format_output(
+        ".local $bad = {exact} .local $n = {1 :number select=$bad} .match $n 1 {{one}} * {{other {$n}}}",
+        &[],
+    );
+    assert_eq!(output.value, "other 1");
+    assert_eq!(
+        output
+            .errors
+            .iter()
+            .filter(|error| is_bad_option(error))
+            .count(),
+        1,
+        "expected one bad-option diagnostic: {:?}",
+        output.errors
+    );
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            function_error(message_format::runtime::MessageFunctionError::BadOption),
+            message_format::runtime::FormatError::BadSelector { source: None },
+        ],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TR35 §14 — :number selection via select= option
 // ---------------------------------------------------------------------------
@@ -166,13 +290,21 @@ fn number_selection_ordinal() {
     );
 }
 
-/// TR35 §14 — dynamic numeric selector mode still prefers exact keys over keywords.
+/// Dynamic selector modes remain runtime options and therefore produce a bad
+/// selector instead of being rewritten to a synthesized exact selector.
 #[test]
-fn number_selection_dynamic_mode_prefers_exact_key() {
-    assert_format(
+fn number_selection_dynamic_mode_is_not_synthesized() {
+    let output = format_output(
         ".input { $mode }\n.input { $x :number select=$mode }\n.match $x\n1 {{EXACT}}\none {{ONE}}\n* {{OTHER}}",
         &[("mode", Value::Str("plural".into())), ("x", Value::Int(1))],
-        "EXACT",
+    );
+    assert_eq!(output.value, "OTHER");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            function_error(message_format::runtime::MessageFunctionError::BadOption),
+            message_format::runtime::FormatError::BadSelector { source: None },
+        ],
     );
 }
 

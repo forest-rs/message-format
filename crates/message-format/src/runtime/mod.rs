@@ -151,6 +151,9 @@
 //! - [`FormatError`] is returned while resolving/formatting messages.
 //! - [`HostCallError`] constrains host callbacks to unknown-function failures or
 //!   typed [`MessageFunctionError`] values.
+//! - [`Host::call`] and
+//!   [`Host::call_select`] can report a
+//!   recoverable function diagnostic while still returning a value.
 //! - [`MessageFunctionError`] carries spec-shaped function error categories, with
 //!   structured sub-enums for unsupported operations and implementation-defined
 //!   host failures.
@@ -162,6 +165,21 @@
 //! The runtime owns the executable catalog schema in [`schema`]. The compiler
 //! targets that shared schema when emitting binary catalogs, and the runtime
 //! verifier/VM interpret the same schema when loading and executing them.
+//!
+//! # Migration
+//!
+//! Host implementations must accept the `on_error` callback on `call` and
+//! `call_select`. With ICU4X enabled, numeric built-ins return a resolved
+//! numeric value internally; callers that inspect host results should render
+//! values through [`Host::format_default`], or inspect the exact value with
+//! the `ResolvedNumber::text` accessor. Exhaustive `Value` matches should
+//! handle the numeric, resolved-test-selector, and fallback variants. Offset arithmetic can report
+//! [`UnsupportedOperation::NumericMagnitude`] when checked storage limits
+//! are exceeded.
+//!
+//! Catalog loading now rejects local loads without prior initialization on
+//! every reachable path, and stores that skip a local slot. Exhaustive
+//! [`CatalogError`] matches must handle [`CatalogError::InvalidLocalSlot`].
 
 #[cfg(feature = "icu4x")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
@@ -179,7 +197,9 @@ pub use error::{
 };
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
-pub use value::{ArgNameError, Args, MessageArgs, StrId, Value};
+#[cfg(feature = "icu4x")]
+pub use value::ResolvedNumber;
+pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, StrId, Value};
 pub use vm::{FormatOption, FormatSink, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.

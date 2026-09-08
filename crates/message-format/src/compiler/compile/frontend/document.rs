@@ -12,7 +12,7 @@ use crate::compiler::syntax::span::{SourceContext, byte_to_line_col};
 use super::bindings::{DeclarationBindings, collect_declaration_bindings};
 use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
 use super::raw_match::lower_raw_match_ir;
-use super::rewrite::lower_parts_with_declaration_bindings;
+use super::rewrite::{lower_declaration_prelude, lower_parts_with_declaration_bindings};
 
 struct AnalyzedSingleMessage<'a> {
     declarations: crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'a>,
@@ -34,19 +34,31 @@ pub(super) fn parse_single_message(
             ctx,
         )?
     {
+        let mut parts = lower_raw_match_ir(
+            source,
+            ctx,
+            &analyzed.bindings,
+            match_prelude,
+            options,
+            source_id.map(|source_id| FunctionOriginContext {
+                source_id,
+                base_byte: 0,
+            }),
+        )?;
+        let mut declarations = lower_declaration_prelude(
+            source,
+            &analyzed.declarations,
+            &analyzed.bindings,
+            ctx,
+            source_id.map(|source_id| FunctionOriginContext {
+                source_id,
+                base_byte: 0,
+            }),
+        )?;
+        declarations.append(&mut parts);
         return Ok(Message {
             id: String::from("main"),
-            parts: lower_raw_match_ir(
-                source,
-                ctx,
-                &analyzed.bindings,
-                match_prelude,
-                options,
-                source_id.map(|source_id| FunctionOriginContext {
-                    source_id,
-                    base_byte: 0,
-                }),
-            )?,
+            parts: declarations,
             origin: source_id.map(|source_id| SourceSpan {
                 source_id,
                 byte_start: 0,
@@ -146,7 +158,18 @@ fn preprocess_single_message_parts(
         }),
     )?;
     lower_parts_with_declaration_bindings(&mut parts, &analyzed.bindings, has_declarations)?;
-    Ok(parts)
+    let mut declarations = lower_declaration_prelude(
+        source,
+        &analyzed.declarations,
+        &analyzed.bindings,
+        ctx,
+        source_id.map(|source_id| FunctionOriginContext {
+            source_id,
+            base_byte: pattern.as_ptr() as usize - source.as_ptr() as usize,
+        }),
+    )?;
+    declarations.append(&mut parts);
+    Ok(declarations)
 }
 
 fn pattern_context_for_subslice(source: &str, pattern: &str, ctx: SourceContext) -> SourceContext {

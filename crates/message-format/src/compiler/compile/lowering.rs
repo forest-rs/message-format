@@ -130,35 +130,6 @@ fn hash_str(builder: &DefaultHashBuilder, value: &str) -> u64 {
     builder.hash_one(value)
 }
 
-/// Compute the fallback string for a call part.
-fn compute_fallback(part: &Part) -> String {
-    match part {
-        Part::Call(CallExpr {
-            operand,
-            func,
-            fallback,
-        }) => fallback
-            .clone()
-            .unwrap_or_else(|| render_operand_fallback(operand, func)),
-        _ => String::new(),
-    }
-}
-
-/// Emit an `ExprFallback` instruction before a call in the output path.
-fn emit_expr_fallback(
-    part: &Part,
-    string_map: &BTreeMap<String, u32>,
-    code: &mut Vec<u8>,
-) -> Result<(), CompileError> {
-    let fb = compute_fallback(part);
-    let fb_str_id = *string_map
-        .get(&fb)
-        .ok_or(CompileError::internal("missing interned string"))?;
-    code.push(schema::Opcode::ExprFallback as u8);
-    code.extend_from_slice(&fb_str_id.to_le_bytes());
-    Ok(())
-}
-
 pub(super) fn lower_parts(
     parts: &[Part],
     string_map: &BTreeMap<String, u32>,
@@ -187,34 +158,13 @@ pub(super) fn lower_parts(
                 code.push(schema::Opcode::OutArg as u8);
                 code.extend_from_slice(&str_id.to_le_bytes());
             }
-            Part::Call(CallExpr { operand, func, .. }) => {
-                let func_key = function_catalog_key(func);
-                let fn_id = *func_map
-                    .get(&func_key)
-                    .ok_or(CompileError::internal("missing function entry"))?;
-                let dynamic_options = function_dynamic_options(func);
-
-                emit_operand(operand, string_map, code)?;
-                for (key, value) in dynamic_options.iter().copied() {
-                    let key_str_id = *string_map
-                        .get(key)
-                        .ok_or(CompileError::internal("missing interned string"))?;
-                    code.push(schema::Opcode::PushConst as u8);
-                    code.extend_from_slice(&key_str_id.to_le_bytes());
-                    let var_str_id = *string_map
-                        .get(value)
-                        .ok_or(CompileError::internal("missing interned variable"))?;
-                    code.push(schema::Opcode::LoadArg as u8);
-                    code.extend_from_slice(&var_str_id.to_le_bytes());
-                }
-                emit_expr_fallback(part, string_map, code)?;
-                code.push(schema::Opcode::CallFunc as u8);
-                code.extend_from_slice(&fn_id.to_le_bytes());
-                code.push(1);
-                code.push(
-                    u8::try_from(dynamic_options.len())
-                        .map_err(|_| CompileError::size_overflow("option count"))?,
-                );
+            Part::Local(slot) => {
+                code.push(schema::Opcode::LoadLocal as u8);
+                code.extend_from_slice(&slot.to_le_bytes());
+                code.push(schema::Opcode::OutVal as u8);
+            }
+            Part::Call(call) => {
+                emit_call(call, string_map, func_map, code)?;
                 code.push(schema::Opcode::OutVal as u8);
             }
             Part::MarkupOpen { name, options } => {
@@ -244,9 +194,64 @@ pub(super) fn lower_parts(
             Part::Select(select) => {
                 lower_select(select, string_map, func_map, literals, code)?;
             }
+            Part::Bind {
+                slot,
+                fallback,
+                value,
+            } => {
+                emit_value_part(value, string_map, func_map, literals, code)?;
+                if matches!(&**value, Part::Var(_) | Part::Local(_)) {
+                    let fallback_id = *string_map
+                        .get(fallback)
+                        .ok_or(CompileError::internal("missing declaration fallback"))?;
+                    code.push(schema::Opcode::ExprFallback as u8);
+                    code.extend_from_slice(&fallback_id.to_le_bytes());
+                }
+                code.push(schema::Opcode::StoreLocal as u8);
+                code.extend_from_slice(&slot.to_le_bytes());
+            }
         }
     }
 
+    Ok(())
+}
+
+fn emit_value_part(
+    part: &Part,
+    string_map: &BTreeMap<String, u32>,
+    func_map: &BTreeMap<FunctionCatalogKey, u16>,
+    literals: &mut LiteralPool,
+    code: &mut Vec<u8>,
+) -> Result<(), CompileError> {
+    match part {
+        Part::Literal(value) => {
+            let value_id = *string_map.get(value).ok_or(CompileError::internal(
+                "missing interned declaration literal",
+            ))?;
+            code.push(schema::Opcode::PushConst as u8);
+            code.extend_from_slice(&value_id.to_le_bytes());
+        }
+        Part::Var(name) => {
+            let value_id = *string_map.get(name).ok_or(CompileError::internal(
+                "missing interned declaration variable",
+            ))?;
+            code.push(schema::Opcode::LoadArg as u8);
+            code.extend_from_slice(&value_id.to_le_bytes());
+        }
+        Part::Local(slot) => {
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+        }
+        Part::Call(call) => emit_call(call, string_map, func_map, code)?,
+        Part::Bind { .. }
+        | Part::Text(_)
+        | Part::Select(_)
+        | Part::MarkupOpen { .. }
+        | Part::MarkupClose { .. } => {
+            return Err(CompileError::internal("non-scalar declaration expression"));
+        }
+    }
+    let _ = literals;
     Ok(())
 }
 
@@ -275,6 +280,17 @@ fn emit_markup_options(
                     .ok_or(CompileError::internal("missing interned variable"))?;
                 code.push(schema::Opcode::LoadArg as u8);
                 code.extend_from_slice(&var_str_id.to_le_bytes());
+            }
+            FunctionOptionValue::ResolvedVar { value, .. } => {
+                let value_str_id = *string_map
+                    .get(value)
+                    .ok_or(CompileError::internal("missing interned string"))?;
+                code.push(schema::Opcode::PushConst as u8);
+                code.extend_from_slice(&value_str_id.to_le_bytes());
+            }
+            FunctionOptionValue::LocalVar { slot, .. } => {
+                code.push(schema::Opcode::LoadLocal as u8);
+                code.extend_from_slice(&slot.to_le_bytes());
             }
         }
     }
@@ -344,6 +360,12 @@ fn emit_selector_start(
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
     match selector {
+        SelectorExpr::Local { slot, .. } => {
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+            code.push(schema::Opcode::SelectBegin as u8);
+            Ok(())
+        }
         SelectorExpr::Var(name) => {
             let str_id = *string_map
                 .get(name)
@@ -378,13 +400,18 @@ fn lower_selector(
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
     match selector {
+        SelectorExpr::Local { slot, .. } => {
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+            Ok(())
+        }
         SelectorExpr::Var(name) => {
-            emit_operand(&Operand::Var(name.clone()), string_map, code)?;
+            emit_operand(&Operand::Var(name.clone()), string_map, func_map, code)?;
             Ok(())
         }
         SelectorExpr::Call { operand, func } => {
             if func.name == "string" && func.options.is_empty() {
-                emit_operand(operand, string_map, code)?;
+                emit_operand(operand, string_map, func_map, code)?;
                 return Ok(());
             }
             let func_key = function_catalog_key(func);
@@ -392,18 +419,27 @@ fn lower_selector(
                 .get(&func_key)
                 .ok_or(CompileError::internal("missing function entry"))?;
             let dynamic_options = function_dynamic_options(func);
-            emit_operand(operand, string_map, code)?;
-            for (key, value) in dynamic_options.iter().copied() {
+            emit_operand(operand, string_map, func_map, code)?;
+            for (key, value, local, resolved) in dynamic_options.iter().copied() {
                 let key_str_id = *string_map
                     .get(key)
                     .ok_or(CompileError::internal("missing interned string"))?;
                 code.push(schema::Opcode::PushConst as u8);
                 code.extend_from_slice(&key_str_id.to_le_bytes());
-                let value_var_str_id = *string_map
-                    .get(value)
-                    .ok_or(CompileError::internal("missing interned variable"))?;
-                code.push(schema::Opcode::LoadArg as u8);
-                code.extend_from_slice(&value_var_str_id.to_le_bytes());
+                if let Some(slot) = local {
+                    code.push(schema::Opcode::LoadLocal as u8);
+                    code.extend_from_slice(&slot.to_le_bytes());
+                } else {
+                    let value_str_id = *string_map
+                        .get(resolved.unwrap_or(value))
+                        .ok_or(CompileError::internal("missing interned variable"))?;
+                    code.push(if resolved.is_some() {
+                        schema::Opcode::PushConst as u8
+                    } else {
+                        schema::Opcode::LoadArg as u8
+                    });
+                    code.extend_from_slice(&value_str_id.to_le_bytes());
+                }
             }
             // No ExprFallback for selectors — errors abort.
             code.push(schema::Opcode::CallSelect as u8);
@@ -429,6 +465,7 @@ fn lower_selector(
 fn emit_operand(
     operand: &Operand,
     string_map: &BTreeMap<String, u32>,
+    func_map: &BTreeMap<FunctionCatalogKey, u16>,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
     match operand {
@@ -439,6 +476,10 @@ fn emit_operand(
             code.push(schema::Opcode::LoadArg as u8);
             code.extend_from_slice(&var_str_id.to_le_bytes());
         }
+        Operand::Local(slot) => {
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+        }
         Operand::Literal { value, .. } => {
             let value_str_id = *string_map
                 .get(value)
@@ -446,15 +487,75 @@ fn emit_operand(
             code.push(schema::Opcode::PushConst as u8);
             code.extend_from_slice(&value_str_id.to_le_bytes());
         }
+        Operand::Call(call) => emit_call(call, string_map, func_map, code)?,
     }
+    Ok(())
+}
+
+fn emit_call(
+    call: &CallExpr,
+    string_map: &BTreeMap<String, u32>,
+    func_map: &BTreeMap<FunctionCatalogKey, u16>,
+    code: &mut Vec<u8>,
+) -> Result<(), CompileError> {
+    let func_key = function_catalog_key(&call.func);
+    let fn_id = *func_map
+        .get(&func_key)
+        .ok_or(CompileError::internal("missing function entry"))?;
+    let dynamic_options = function_dynamic_options(&call.func);
+    emit_operand(&call.operand, string_map, func_map, code)?;
+    for (key, value, local, resolved) in dynamic_options.iter().copied() {
+        let key_str_id = *string_map
+            .get(key)
+            .ok_or(CompileError::internal("missing interned string"))?;
+        code.push(schema::Opcode::PushConst as u8);
+        code.extend_from_slice(&key_str_id.to_le_bytes());
+        if let Some(slot) = local {
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+        } else {
+            let value_str_id = *string_map
+                .get(resolved.unwrap_or(value))
+                .ok_or(CompileError::internal("missing interned variable"))?;
+            code.push(if resolved.is_some() {
+                schema::Opcode::PushConst as u8
+            } else {
+                schema::Opcode::LoadArg as u8
+            });
+            code.extend_from_slice(&value_str_id.to_le_bytes());
+        }
+    }
+    // Fallback is needed for the outer expression; nested calls still leave
+    // their resolved value on the stack and use the same VM fallback path.
+    let fb = call
+        .fallback
+        .clone()
+        .unwrap_or_else(|| render_operand_fallback(&call.operand, &call.func));
+    let fb_str_id = *string_map
+        .get(&fb)
+        .ok_or(CompileError::internal("missing interned string"))?;
+    code.push(schema::Opcode::ExprFallback as u8);
+    code.extend_from_slice(&fb_str_id.to_le_bytes());
+    code.push(schema::Opcode::CallFunc as u8);
+    code.extend_from_slice(&fn_id.to_le_bytes());
+    code.push(1);
+    code.push(
+        u8::try_from(dynamic_options.len())
+            .map_err(|_| CompileError::size_overflow("option count"))?,
+    );
     Ok(())
 }
 
 fn render_operand_fallback(operand: &Operand, func: &FunctionSpec) -> String {
     match operand {
         Operand::Var(var) => format!("{{${var}}}"),
+        Operand::Local(slot) => format!("{{<local:{slot}>}}"),
         Operand::Literal { value, .. } if value.is_empty() => format!("{{:{}}}", func.name),
         Operand::Literal { value, .. } => format!("{{|{}|}}", escape_fallback_literal(value)),
+        Operand::Call(call) => call
+            .fallback
+            .clone()
+            .unwrap_or_else(|| render_operand_fallback(&call.operand, &call.func)),
     }
 }
 
