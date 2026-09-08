@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use alloc::{
+    collections::{BTreeMap, BTreeSet},
     format,
     string::{String, ToString},
     vec::Vec,
@@ -56,20 +57,6 @@ pub(super) fn lower_declaration_prelude(
             continue;
         };
         let mut value = lower_expression_node_to_part(source, expression, ctx, function_origin)?;
-        if let Part::Call(CallExpr {
-            operand: Operand::Var(var),
-            func,
-            ..
-        }) = &value
-            && declarations
-                .inputs
-                .iter()
-                .any(|decl| decl.canonical == name)
-            && func.name == "string"
-            && func.options.is_empty()
-        {
-            value = Part::Var(var.clone());
-        }
         if let Part::Call(call) = &mut value {
             call.fallback = Some(format!("{{${name}}}"));
         }
@@ -81,6 +68,209 @@ pub(super) fn lower_declaration_prelude(
         });
     }
     Ok(parts)
+}
+
+/// Remove declaration slots that are provably unobservable and then restore
+/// the dense slot numbering required by the catalog verifier.
+///
+/// Bare `:string` inputs used only for selection retain the direct `SelectArg`
+/// path, while aliases that no remaining expression reads do not consume VM
+/// storage. Calls other than the optionless built-in string identity remain
+/// observable because a host can report diagnostics from them.
+pub(super) fn compact_declaration_slots(
+    declarations: &mut Vec<Part>,
+    body: &mut [Part],
+) -> Result<(), CompileError> {
+    let mut live = BTreeSet::new();
+    collect_part_slots(body, &mut live);
+
+    let mut retain = vec![true; declarations.len()];
+    for (index, declaration) in declarations.iter().enumerate().rev() {
+        let Part::Bind { slot, value, .. } = declaration else {
+            continue;
+        };
+        if !live.contains(slot) && binding_is_elidable(declaration) {
+            retain[index] = false;
+            continue;
+        }
+        collect_part_slots(core::slice::from_ref(value.as_ref()), &mut live);
+    }
+
+    let mut remap = BTreeMap::new();
+    let mut next_slot = 0_u32;
+    for (declaration, keep) in declarations.iter().zip(&retain) {
+        if !keep {
+            continue;
+        }
+        if let Part::Bind { slot, .. } = declaration {
+            remap.insert(*slot, next_slot);
+            next_slot = next_slot
+                .checked_add(1)
+                .ok_or_else(|| CompileError::size_overflow("declaration slots"))?;
+        }
+    }
+
+    let mut index = 0_usize;
+    declarations.retain(|_| {
+        let keep = retain[index];
+        index += 1;
+        keep
+    });
+    remap_part_slots(declarations, &remap)?;
+    remap_part_slots(body, &remap)
+}
+
+fn binding_is_elidable(binding: &Part) -> bool {
+    let Part::Bind {
+        fallback, value, ..
+    } = binding
+    else {
+        return false;
+    };
+    match value.as_ref() {
+        Part::Local(_) => true,
+        Part::Call(CallExpr { operand, func, .. }) => {
+            matches!(operand, Operand::Var(var) if fallback == &format!("{{${var}}}"))
+                && func.name == "string"
+                && func.options.is_empty()
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn collect_part_slots(parts: &[Part], slots: &mut BTreeSet<u32>) {
+    for part in parts {
+        match part {
+            Part::Local(slot) | Part::CheckSelector(slot) => {
+                slots.insert(*slot);
+            }
+            Part::Call(call) => collect_call_slots(call, slots),
+            Part::Select(select) => {
+                collect_selector_slots(&select.selector, slots);
+                for arm in &select.arms {
+                    collect_part_slots(&arm.parts, slots);
+                }
+                collect_part_slots(&select.default, slots);
+            }
+            Part::Bind { value, .. } => collect_part_slots(core::slice::from_ref(value), slots),
+            Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => {
+                collect_option_slots(options, slots);
+            }
+            Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}
+        }
+    }
+}
+
+fn collect_selector_slots(selector: &SelectorExpr, slots: &mut BTreeSet<u32>) {
+    match selector {
+        SelectorExpr::Local { slot, .. } | SelectorExpr::CheckedLocal { slot, .. } => {
+            slots.insert(*slot);
+        }
+        SelectorExpr::Call { operand, func } => {
+            collect_operand_slots(operand, slots);
+            collect_option_slots(&func.options, slots);
+        }
+        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => {}
+    }
+}
+
+fn collect_call_slots(call: &CallExpr, slots: &mut BTreeSet<u32>) {
+    collect_operand_slots(&call.operand, slots);
+    collect_option_slots(&call.func.options, slots);
+}
+
+fn collect_operand_slots(operand: &Operand, slots: &mut BTreeSet<u32>) {
+    match operand {
+        Operand::Local(slot) => {
+            slots.insert(*slot);
+        }
+        Operand::Call(call) => collect_call_slots(call, slots),
+        Operand::Var(_) | Operand::Literal { .. } => {}
+    }
+}
+
+fn collect_option_slots(options: &[FunctionOption], slots: &mut BTreeSet<u32>) {
+    for option in options {
+        if let FunctionOptionValue::LocalVar { slot, .. } = &option.value {
+            slots.insert(*slot);
+        }
+    }
+}
+
+fn remap_part_slots(parts: &mut [Part], remap: &BTreeMap<u32, u32>) -> Result<(), CompileError> {
+    for part in parts {
+        match part {
+            Part::Local(slot) | Part::CheckSelector(slot) => remap_slot(slot, remap)?,
+            Part::Call(call) => remap_call_slots(call, remap)?,
+            Part::Select(select) => {
+                remap_selector_slots(&mut select.selector, remap)?;
+                for arm in &mut select.arms {
+                    remap_part_slots(&mut arm.parts, remap)?;
+                }
+                remap_part_slots(&mut select.default, remap)?;
+            }
+            Part::Bind { slot, value, .. } => {
+                remap_slot(slot, remap)?;
+                remap_part_slots(core::slice::from_mut(value), remap)?;
+            }
+            Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => {
+                remap_option_slots(options, remap)?;
+            }
+            Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn remap_selector_slots(
+    selector: &mut SelectorExpr,
+    remap: &BTreeMap<u32, u32>,
+) -> Result<(), CompileError> {
+    match selector {
+        SelectorExpr::Local { slot, .. } | SelectorExpr::CheckedLocal { slot, .. } => {
+            remap_slot(slot, remap)
+        }
+        SelectorExpr::Call { operand, func } => {
+            remap_operand_slots(operand, remap)?;
+            remap_option_slots(&mut func.options, remap)
+        }
+        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => Ok(()),
+    }
+}
+
+fn remap_call_slots(call: &mut CallExpr, remap: &BTreeMap<u32, u32>) -> Result<(), CompileError> {
+    remap_operand_slots(&mut call.operand, remap)?;
+    remap_option_slots(&mut call.func.options, remap)
+}
+
+fn remap_operand_slots(
+    operand: &mut Operand,
+    remap: &BTreeMap<u32, u32>,
+) -> Result<(), CompileError> {
+    match operand {
+        Operand::Local(slot) => remap_slot(slot, remap),
+        Operand::Call(call) => remap_call_slots(call, remap),
+        Operand::Var(_) | Operand::Literal { .. } => Ok(()),
+    }
+}
+
+fn remap_option_slots(
+    options: &mut [FunctionOption],
+    remap: &BTreeMap<u32, u32>,
+) -> Result<(), CompileError> {
+    for option in options {
+        if let FunctionOptionValue::LocalVar { slot, .. } = &mut option.value {
+            remap_slot(slot, remap)?;
+        }
+    }
+    Ok(())
+}
+
+fn remap_slot(slot: &mut u32, remap: &BTreeMap<u32, u32>) -> Result<(), CompileError> {
+    *slot = *remap
+        .get(slot)
+        .ok_or_else(|| CompileError::internal("reference to removed declaration slot"))?;
+    Ok(())
 }
 
 fn lower_part_with_bindings(

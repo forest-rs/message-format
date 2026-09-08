@@ -160,22 +160,6 @@ pub(super) fn assert_format_err(
     }
 }
 
-/// Assert that formatting returns the expected output and reports a matching error.
-pub(super) fn assert_format_with_error(
-    source: &str,
-    args: &[(&str, Value)],
-    expected: &str,
-    check: impl Fn(&FormatError) -> bool,
-) {
-    let output = format_output_with_locale(source, args, "en").expect("format failed");
-    assert_eq!(strip_bidi(&output.value), expected, "source: {source}");
-    assert!(
-        output.errors.iter().any(check),
-        "expected a matching format error for: {source}: {:?}",
-        output.errors
-    );
-}
-
 /// Assert that formatting reports exactly the expected diagnostic multiset.
 pub(super) fn assert_errors_multiset(actual: &[FormatError], expected: &[FormatError]) {
     let mut remaining = expected.to_vec();
@@ -292,14 +276,4 @@ pub(super) fn function_error(error: MessageFunctionError) -> FormatError {
 
 pub(super) fn missing_arg(name: &str) -> FormatError {
     FormatError::MissingArg(name.to_string())
-}
-
-pub(super) fn bad_selector_with_source(expected: FormatError) -> impl Fn(&FormatError) -> bool {
-    move |error| {
-        matches!(
-            error,
-            FormatError::BadSelector { source }
-                if source.as_deref() == Some(&expected)
-        )
-    }
 }

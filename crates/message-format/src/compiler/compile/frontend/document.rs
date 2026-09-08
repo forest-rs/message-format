@@ -12,7 +12,9 @@ use crate::compiler::syntax::span::{SourceContext, byte_to_line_col};
 use super::bindings::{DeclarationBindings, collect_declaration_bindings};
 use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
 use super::raw_match::lower_raw_match_ir;
-use super::rewrite::{lower_declaration_prelude, lower_parts_with_declaration_bindings};
+use super::rewrite::{
+    compact_declaration_slots, lower_declaration_prelude, lower_parts_with_declaration_bindings,
+};
 
 struct AnalyzedSingleMessage<'a> {
     declarations: crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'a>,
@@ -55,6 +57,7 @@ pub(super) fn parse_single_message(
                 base_byte: 0,
             }),
         )?;
+        compact_declaration_slots(&mut declarations, &mut parts)?;
         declarations.append(&mut parts);
         return Ok(Message {
             id: String::from("main"),
@@ -168,6 +171,7 @@ fn preprocess_single_message_parts(
             base_byte: 0,
         }),
     )?;
+    compact_declaration_slots(&mut declarations, &mut parts)?;
     declarations.append(&mut parts);
     Ok(declarations)
 }

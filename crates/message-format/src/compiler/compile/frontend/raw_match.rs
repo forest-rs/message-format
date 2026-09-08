@@ -36,8 +36,6 @@ pub(super) fn lower_raw_match_ir(
         function_origin.map(|origin| origin.source_id),
         &mut parsed_match.arms,
     );
-    let selectors = analyze_selectors(source, ctx, &parsed_match.selectors, bindings)?;
-
     let arms = lower_match_arm_patterns(
         source,
         parsed_match.arms,
@@ -46,6 +44,11 @@ pub(super) fn lower_raw_match_ir(
         options,
         function_origin,
     )?;
+    let mut body_slots = BTreeSet::new();
+    for arm in &arms {
+        rewrite::collect_part_slots(&arm.parts, &mut body_slots);
+    }
+    let selectors = analyze_selectors(source, ctx, &parsed_match.selectors, bindings, &body_slots)?;
     validate_match_arms(
         source,
         ctx,
@@ -105,13 +108,29 @@ fn analyze_selectors(
     ctx: SourceContext,
     selectors: &[String],
     bindings: &DeclarationBindings,
+    body_slots: &BTreeSet<u32>,
 ) -> Result<AnalyzedSelectors, CompileError> {
     let mut parts = Vec::with_capacity(selectors.len());
     let mut compile_time_values = Vec::with_capacity(selectors.len());
     let mut all_compile_time = true;
+    let mut selector_counts = BTreeMap::new();
 
     for selector in selectors {
-        let analyzed = analyze_selector(source, ctx, selector, bindings)?;
+        let name = resolve_alias(selector, &bindings.aliases)?;
+        *selector_counts.entry(name).or_insert(0_u32) += 1;
+    }
+
+    for selector in selectors {
+        let name = resolve_alias(selector, &bindings.aliases)?;
+        let direct_input_allowed = selector_counts.get(&name) == Some(&1);
+        let analyzed = analyze_selector(
+            source,
+            ctx,
+            selector,
+            bindings,
+            body_slots,
+            direct_input_allowed,
+        )?;
         all_compile_time &= analyzed.compile_time_value.is_some();
         compile_time_values.push(analyzed.compile_time_value.unwrap_or_default());
         parts.push(analyzed.part);
@@ -133,6 +152,8 @@ fn analyze_selector(
     ctx: SourceContext,
     selector: &str,
     bindings: &DeclarationBindings,
+    body_slots: &BTreeSet<u32>,
+    direct_input_allowed: bool,
 ) -> Result<AnalyzedSelector, CompileError> {
     let name = resolve_alias(selector, &bindings.aliases)?;
     let literal = bindings
@@ -140,6 +161,14 @@ fn analyze_selector(
         .get(&name)
         .and_then(LocalValue::as_literal)
         .map(ToOwned::to_owned);
+    let direct_input_selector = direct_input_allowed
+        && bindings
+            .slots
+            .get(&name)
+            .is_some_and(|slot| !body_slots.contains(slot))
+        && bindings.input_functions.get(&name).is_some_and(|function| {
+            function.func.name == "string" && function.func.options.is_empty()
+        });
     let mut part = bindings
         .local_functions
         .get(&name)
@@ -147,11 +176,12 @@ fn analyze_selector(
         .or_else(|| bindings.input_functions.get(&name).cloned())
         .map(selector_expr_from_decl_function)
         .unwrap_or_else(|| SelectorExpr::Var(name.clone()));
-    if let Some(slot) = bindings.slots.get(&name).copied()
-        && !bindings
+    if !direct_input_selector
+        && let Some(slot) = bindings.slots.get(&name).copied()
+        && bindings
             .locals
             .get(&name)
-            .is_some_and(|value| value.as_literal().is_some())
+            .is_none_or(|value| value.as_literal().is_none())
     {
         if let Some(function) = bindings
             .local_functions
@@ -168,7 +198,7 @@ fn analyze_selector(
     } else {
         rewrite_selector_expr_from_locals(&mut part, &bindings.locals, &bindings.slots);
     }
-    if matches!(part, SelectorExpr::Var(_)) {
+    if matches!(part, SelectorExpr::Var(_)) && !direct_input_selector {
         let (line, col) = ctx.location(source, 0);
         return Err(CompileError::missing_selector_annotation_detail(
             line,
