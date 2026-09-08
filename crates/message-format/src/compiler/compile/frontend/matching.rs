@@ -245,8 +245,14 @@ fn build_numeric_match_ir(
     let mut exact_arms = Vec::with_capacity(exact_keys.len());
     for key in exact_keys {
         let branch = exact_match_candidates(arms, candidates, level, &key.key);
-        let parts =
-            build_nested_match_ir(selectors, arms, level + 1, &branch, Some(&default), line)?;
+        let parts = build_nested_match_ir(
+            selectors,
+            arms,
+            level + 1,
+            &branch,
+            Some(&keyword_fallback),
+            line,
+        )?;
         exact_arms.push(select_arm_from_key(key, parts));
     }
 
@@ -399,6 +405,9 @@ pub(super) fn builtin_selector_accepts_variant_key(selector: &SelectorExpr, key:
 fn builtin_numeric_selector_mode_for_func(
     func: &FunctionSpec,
 ) -> Option<BuiltinNumericSelectorMode> {
+    if func.name == "offset" {
+        return Some(BuiltinNumericSelectorMode::Plural);
+    }
     if !matches!(func.name.as_str(), "number" | "integer") {
         return None;
     }
@@ -449,24 +458,62 @@ struct NumericSelectorLoweringPlan {
 }
 
 fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSelectorLoweringPlan> {
-    let SelectorExpr::Call { operand, func } = selector else {
-        return None;
-    };
-    match builtin_numeric_selector_mode_for_func(func)? {
-        BuiltinNumericSelectorMode::Exact => None,
-        BuiltinNumericSelectorMode::Plural => Some(NumericSelectorLoweringPlan {
-            exact_selector: clone_numeric_selector_with_select(operand.clone(), func, "exact"),
-            keyword_selector: clone_numeric_selector_with_select(operand.clone(), func, "plural"),
-        }),
-        BuiltinNumericSelectorMode::Ordinal => Some(NumericSelectorLoweringPlan {
-            exact_selector: clone_numeric_selector_with_select(operand.clone(), func, "exact"),
-            keyword_selector: clone_numeric_selector_with_select(operand.clone(), func, "ordinal"),
-        }),
-        // A variable (or otherwise unknown) select mode must remain part of
-        // the runtime selector call. Synthesizing `select=exact` here would
-        // bypass an invalid dynamic option and could select an exact arm even
-        // though the original selector is required to report BadSelector.
-        BuiltinNumericSelectorMode::Dynamic => None,
+    match selector {
+        SelectorExpr::Call { operand, func }
+            if matches!(func.name.as_str(), "number" | "integer") =>
+        {
+            match builtin_numeric_selector_mode_for_func(func)? {
+                BuiltinNumericSelectorMode::Exact => None,
+                BuiltinNumericSelectorMode::Plural => Some(NumericSelectorLoweringPlan {
+                    exact_selector: clone_numeric_selector_with_select(
+                        operand.clone(),
+                        func,
+                        "exact",
+                    ),
+                    keyword_selector: clone_numeric_selector_with_select(
+                        operand.clone(),
+                        func,
+                        "plural",
+                    ),
+                }),
+                BuiltinNumericSelectorMode::Ordinal => Some(NumericSelectorLoweringPlan {
+                    exact_selector: clone_numeric_selector_with_select(
+                        operand.clone(),
+                        func,
+                        "exact",
+                    ),
+                    keyword_selector: clone_numeric_selector_with_select(
+                        operand.clone(),
+                        func,
+                        "ordinal",
+                    ),
+                }),
+                // A variable (or otherwise unknown) select mode must remain part of
+                // the runtime selector call. Synthesizing `select=exact` here would
+                // bypass an invalid dynamic option and could select an exact arm even
+                // though the original selector is required to report BadSelector.
+                BuiltinNumericSelectorMode::Dynamic => None,
+            }
+        }
+        SelectorExpr::Call { .. } => None,
+        // A stored numeric value already contains both its exact text and
+        // plural/ordinal category. Reuse the one loaded local for both passes;
+        // the nested IR controls whether numeric keys or category keys are
+        // considered, without re-running the function call.
+        SelectorExpr::Local {
+            func: Some(func), ..
+        } => match builtin_numeric_selector_mode_for_func(func)? {
+            BuiltinNumericSelectorMode::Plural | BuiltinNumericSelectorMode::Ordinal => {
+                Some(NumericSelectorLoweringPlan {
+                    exact_selector: selector.clone(),
+                    keyword_selector: selector.clone(),
+                })
+            }
+            BuiltinNumericSelectorMode::Exact | BuiltinNumericSelectorMode::Dynamic => None,
+        },
+        SelectorExpr::Var(_)
+        | SelectorExpr::Local { func: None, .. }
+        | SelectorExpr::Literal(_) => None,
     }
 }
 

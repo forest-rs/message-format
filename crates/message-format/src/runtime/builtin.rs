@@ -1669,7 +1669,7 @@ fn resolve_offset(
         _ => (
             parse_number_value(value, catalog)?,
             BTreeMap::new(),
-            NumberSelection::None,
+            NumberSelection::Plural,
         ),
     };
     let mut merged = inherited;
