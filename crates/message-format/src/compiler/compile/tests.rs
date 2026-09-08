@@ -38,6 +38,10 @@ fn expect_errors(report: CompileReport) -> Vec<BuildError> {
     report.diagnostics
 }
 
+fn passthrough_host() -> impl crate::runtime::Host<CatalogIndex = ()> {
+    HostFn(|_, args: &[Value], _: &[(u32, Value)]| Ok(args.first().cloned().unwrap_or(Value::Null)))
+}
+
 fn arg_id(catalog: &Catalog, name: &str) -> u32 {
     catalog.string_id(name).expect("arg id")
 }
@@ -127,16 +131,91 @@ fn bare_interpolation_lowers_to_out_arg() {
 }
 
 #[test]
-fn simple_select_lowers_to_select_arg() {
+fn bare_string_input_selects_without_a_function_host() {
     let bytes =
         compile_str(".input { $kind :string }\n.match $kind\nformal {{Good evening}}\n* {{Hi}}")
             .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    assert_eq!(catalog.code()[0], schema::Opcode::SelectArg as u8);
-    assert!(
-        !catalog
-            .code()
-            .contains(&(schema::Opcode::SelectBegin as u8))
+    let code = opcodes(&catalog);
+    assert_eq!(code.first(), Some(&schema::Opcode::SelectArg));
+    assert!(!code.contains(&schema::Opcode::CallFunc));
+
+    let args = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "Good evening"
+    );
+}
+
+#[test]
+fn bare_string_input_uses_exact_text_for_non_string_values() {
+    let bytes =
+        compile_str(".input {$x :string} .match $x 1 {{integer}} 1.0 {{decimal}} * {{other}}")
+            .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let x = catalog.string_id("x").expect("argument id");
+    let decimal = catalog.string_id("1.0").expect("decimal key id");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &[(x, Value::Float(1.5))])
+            .expect("float selected"),
+        "other"
+    );
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &[(x, Value::StrRef(decimal))])
+            .expect("pool string selected"),
+        "decimal"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn direct_input_selector_compacts_later_live_slots() {
+    let source =
+        ".input {$kind :string} .input {$n :number} .match $kind formal {{n={$n}}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let code = opcodes(&catalog);
+    assert_eq!(
+        code.iter()
+            .filter(|opcode| **opcode == schema::Opcode::StoreLocal)
+            .count(),
+        1
+    );
+
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![
+        arg(&catalog, "kind", Value::Str("formal".to_string())),
+        arg(&catalog, "n", Value::Int(7)),
+    ];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "n=7"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn unused_runtime_alias_does_not_consume_a_slot() {
+    let source = ".input {$n :number} .local $alias = {$n} {{n={$n}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    assert_eq!(
+        opcodes(&catalog)
+            .iter()
+            .filter(|opcode| **opcode == schema::Opcode::StoreLocal)
+            .count(),
+        1
     );
 }
 
@@ -198,7 +277,7 @@ fn exact_match_beats_default_even_if_default_appears_first() {
         compile_str(".input { $kind :string }\n.match $kind\n* {{Hi}}\nformal {{Good evening}}")
             .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
 
     let out = formatter
         .format_by_id_for_test(
@@ -1974,7 +2053,7 @@ fn raw_match_statement_is_rewritten_and_formatted() {
         ".input {$kind :string} .match $kind formal {{Good evening}} casual {{Hi}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
 
     let args1 = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
     assert_eq!(
@@ -2002,11 +2081,11 @@ fn raw_match_statement_is_rewritten_and_formatted() {
 }
 
 #[test]
-fn raw_match_with_local_literal_selector_resolves_at_compile_time() {
+fn raw_match_with_local_literal_string_resolves_through_host() {
     let source = ".local $kind = {formal :string} .match $kind formal {{Good evening}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -2019,7 +2098,7 @@ fn raw_match_with_local_alias_selector_uses_input() {
         ".input {$kind :string} .local $k = {$kind} .match $k formal {{Good evening}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let args = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
     let out = formatter
         .format_by_id_for_test("main", &args)
@@ -2229,7 +2308,7 @@ fn raw_match_with_two_runtime_selectors_is_rewritten() {
     let source = ".input {$x :string} .input {$y :string} .match $x $y 1 1 {{1,1}} * * {{*,*}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let args_11 = vec![
         arg(&catalog, "x", Value::Int(1)),
         arg(&catalog, "y", Value::Int(1)),
@@ -2255,7 +2334,7 @@ fn raw_match_with_escaped_quoted_key_selects_expected_arm() {
     let source = ".input {$kind :string} .match $kind |a\\|b| {{pipe}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let args_hit = vec![arg(&catalog, "kind", Value::Str(String::from("a|b")))];
     let args_default = vec![arg(&catalog, "kind", Value::Str(String::from("x")))];
 
@@ -2465,6 +2544,30 @@ fn local_literal_option_values_are_substituted_as_semantic_text() {
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     assert!(catalog.string_id("fast path").is_some());
     assert!(catalog.string_id("|fast path|").is_none());
+}
+
+#[test]
+fn custom_host_evaluates_string_input_once_for_repeated_uses() {
+    let bytes = compile_str(".input {$x :string} {{A={$x} B={$x}}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let calls = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&calls);
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(move |_, _, _| {
+            observed.set(observed.get() + 1);
+            Ok(Value::Str("resolved".to_string()))
+        }),
+    )
+    .expect("formatter");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "A=resolved B=resolved"
+    );
+    assert_eq!(calls.get(), 1);
 }
 
 // ─── Attribute values (mf-1m8f) ──────────────────────────────────────

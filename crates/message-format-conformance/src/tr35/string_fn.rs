@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use super::helpers::*;
-use message_format::runtime::Value;
+use message_format::compiler::CompileOptions;
+use message_format::runtime::{FormatError, Value};
 
 // ---------------------------------------------------------------------------
 // TR35 §13 — :string function
@@ -78,6 +79,16 @@ fn string_selection_case_sensitive() {
     );
 }
 
+/// Resolved string selection compares raw text without numeric coercion.
+#[test]
+fn string_selection_does_not_match_numeric_text_canonically() {
+    assert_format(
+        ".input { $x :string }\n.match $x\n1 {{MATCH}}\n* {{OTHER}}",
+        &[("x", Value::Str("1.0".into()))],
+        "OTHER",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TR35 §13 — :string selection: no normalization (F-6)
 // ---------------------------------------------------------------------------
@@ -102,4 +113,51 @@ fn string_selection_no_normalization() {
 #[test]
 fn string_missing_operand() {
     assert_format_err("{ $x :string }", &[], is_missing_arg);
+}
+
+/// A string input is resolved once before a numeric reannotation consumes it.
+#[test]
+fn string_input_reannotates_to_number() {
+    assert_format(
+        ".input {$x :string} .local $y = {$x :number} {{value={$y}}}",
+        &[("x", Value::Int(1))],
+        "value=1",
+    );
+}
+
+/// A missing string input remains a recoverable missing-argument error.
+#[test]
+fn missing_string_input_reannotation_errors() {
+    let output = format_output(
+        ".input {$x :string} .local $y = {$x :number} {{value={$y}}}",
+        &[],
+    );
+    assert_eq!(output.value, "value={$y}");
+    assert_errors_multiset(&output.errors, &[FormatError::MissingArg("x".to_string())]);
+}
+
+/// Quoted string literals can be consumed by a numeric reannotation.
+#[test]
+fn string_literal_reannotates_to_number() {
+    assert_format(
+        ".local $s = {|1| :string} .local $y = {$s :number} {{value={$y}}}",
+        &[],
+        "value=1",
+    );
+}
+
+/// Direction metadata is applied when the resolved string is rendered.
+#[test]
+fn string_explicit_direction_is_applied_at_output() {
+    assert_eq!(
+        format_with_options_raw(
+            "{ $x :string u:dir=rtl }",
+            &[("x", Value::Str("hello".into()))],
+            CompileOptions {
+                default_bidi_isolation: false,
+                ..CompileOptions::default()
+            },
+        ),
+        "\u{2067}hello\u{2069}"
+    );
 }
