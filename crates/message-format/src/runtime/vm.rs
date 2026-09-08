@@ -1515,9 +1515,6 @@ fn bad_pc_from_pos(pos: usize) -> Result<u32, FormatError> {
 mod tests {
     use alloc::{string::String, vec, vec::Vec};
 
-    #[cfg(feature = "icu4x")]
-    use alloc::collections::BTreeMap;
-
     use super::*;
     use crate::runtime::Formatter;
     use crate::runtime::catalog::{
@@ -1526,9 +1523,7 @@ mod tests {
     use crate::runtime::error::{CatalogError, ImplementationFailure, MessageFunctionError};
     use crate::runtime::schema::TestOps;
     #[cfg(feature = "icu4x")]
-    use crate::runtime::value::{
-        NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
-    };
+    use crate::runtime::value::{NumberFormatOptions, NumberSelection, NumberValue};
 
     fn catalog_for_test(strings: &[&str], literals: &str, code: &[u8]) -> Catalog {
         let bytes = if let Some(func_count) = max_function_id(code).map(|id| usize::from(id) + 1) {
@@ -1922,16 +1917,9 @@ mod tests {
         let mut formatter = formatter_noop(&catalog);
         let value = Value::Number(Box::new(ResolvedNumber::new(
             NumberValue::Integer(1),
-            BTreeMap::new(),
-            NumberFormatOptions {
-                minimum_fraction_digits: None,
-                maximum_fraction_digits: None,
-                minimum_integer_digits: None,
-                sign_display: NumberSignDisplay::Auto,
-                notation_scientific: false,
-                grouping: NumberGrouping::Auto,
-            },
+            NumberFormatOptions::DEFAULT,
             NumberSelection::Invalid,
+            true,
         )));
         let args = vec![(arg_id(&catalog, "value"), value)];
         let mut sink = String::new();

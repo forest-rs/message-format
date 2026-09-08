@@ -12,7 +12,7 @@ use alloc::{
 use core::array;
 use core::str::FromStr;
 
-use fixed_decimal::Decimal;
+use fixed_decimal::{Decimal, SignedRoundingMode, UnsignedRoundingMode};
 use icu_calendar::Date;
 use icu_datetime::fieldsets;
 use icu_datetime::input::{DateTime, Time};
@@ -682,31 +682,24 @@ fn resolve_number(
     ordinal_rules: &PluralRules,
     on_error: &mut dyn FnMut(MessageFunctionError),
 ) -> Result<ResolvedNumber, FormatError> {
-    let (mut number, inherited, inherited_selection) = match value {
+    let (mut number, inherited_format, inherited_selection, inherited_select) = match value {
         Value::Number(number) => (
             number.value.clone(),
-            number.options.clone(),
+            number.format,
             number.selection,
+            number.has_explicit_select,
         ),
         _ => (
             parse_number_value(value, catalog)?,
-            BTreeMap::new(),
+            NumberFormatOptions::DEFAULT,
             NumberSelection::None,
+            false,
         ),
     };
-    let mut merged = inherited;
-    for key in number_option_keys() {
-        if let Some(value) = options.get_by_name(key) {
-            merged.insert(key.to_string(), value.into_owned());
-        }
-    }
     if integer_only {
         // Integer annotations intentionally discard precision inherited from a
         // preceding number annotation. The integer function itself emits no
         // fraction digits either.
-        merged.remove("minimumFractionDigits");
-        merged.remove("maximumFractionDigits");
-        merged.remove("minimumSignificantDigits");
         let integer_text = match &number {
             NumberValue::Integer(value) => value.to_string(),
             NumberValue::Decimal(value) => {
@@ -722,9 +715,8 @@ fn resolve_number(
             NumberValue::Decimal(Decimal::from_str(&integer_text).map_err(|_| bad_operand())?)
         };
     }
-    let format = resolve_number_format_options(&merged)?;
-    let inherited_select =
-        matches!(value, Value::Number(number) if number.options.contains_key("select"));
+    let format = resolve_number_format_options(inherited_format, options, integer_only)?;
+    let has_explicit_select = inherited_select || options.get(BuiltinOptionKey::Select).is_some();
     let selection = if inherited_select {
         if !options.has_runtime(BuiltinOptionKey::Select) {
             on_error(MessageFunctionError::BadOption);
@@ -749,7 +741,7 @@ fn resolve_number(
             selection => selection,
         }
     };
-    let mut resolved = ResolvedNumber::new(number, merged, format, selection);
+    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
     if matches!(
         selection,
         NumberSelection::Plural | NumberSelection::Ordinal
@@ -778,6 +770,11 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
         && !value.is_finite()
     {
         return Ok(NumberValue::NonFinite(*value));
+    }
+    if let Value::Float(value) = value
+        && let Some(value) = exact_integral_float(*value)
+    {
+        return Ok(NumberValue::Integer(value));
     }
     let text = match value {
         Value::Int(value) => return Ok(NumberValue::Integer(*value)),
@@ -812,44 +809,71 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
     Ok(NumberValue::Decimal(trim_decimal_end(decimal)))
 }
 
-fn number_option_keys() -> [&'static str; 10] {
-    [
-        "minimumFractionDigits",
-        "maximumFractionDigits",
-        "signDisplay",
-        "notation",
-        "useGrouping",
-        "minimumIntegerDigits",
-        "style",
-        "currency",
-        "select",
-        "u:dir",
-    ]
+/// Convert an integral float to an integer only while every integer in its
+/// range is exactly representable by `f64`. Larger integral floats retain the
+/// existing decimal parsing path so their shortest decimal representation is
+/// not changed by a narrowing conversion.
+fn exact_integral_float(value: f64) -> Option<i64> {
+    let limit = MAX_EXACT_I64_IN_F64 as f64;
+    if libm::trunc(value) == value && (-limit..=limit).contains(&value) {
+        // The range check above makes this cast exact and within i64 bounds.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the preceding exact range check proves this conversion is lossless"
+        )]
+        Some(value as i64)
+    } else {
+        None
+    }
 }
 
 fn resolve_number_format_options(
-    options: &BTreeMap<String, String>,
+    inherited: NumberFormatOptions,
+    options: &EffectiveOptions<'_>,
+    integer_only: bool,
 ) -> Result<NumberFormatOptions, FormatError> {
-    let minimum_fraction_digits =
-        parse_map_digit_option(options, "minimumFractionDigits", MAX_FRACTION_DIGITS)?;
-    let maximum_fraction_digits =
-        parse_map_digit_option(options, "maximumFractionDigits", MAX_FRACTION_DIGITS)?;
+    let minimum_fraction_digits = if integer_only {
+        None
+    } else {
+        parse_digit_option_or_inherited(
+            options,
+            BuiltinOptionKey::MinimumFractionDigits,
+            inherited.minimum_fraction_digits,
+            MAX_FRACTION_DIGITS,
+        )?
+    };
+    let maximum_fraction_digits = if integer_only {
+        None
+    } else {
+        parse_digit_option_or_inherited(
+            options,
+            BuiltinOptionKey::MaximumFractionDigits,
+            inherited.maximum_fraction_digits,
+            MAX_FRACTION_DIGITS,
+        )?
+    };
     validate_digit_range_relationship(minimum_fraction_digits, maximum_fraction_digits)?;
-    let minimum_integer_digits =
-        parse_map_digit_option(options, "minimumIntegerDigits", MAX_INTEGER_DIGITS)?;
-    let sign_display = match options.get("signDisplay").map(String::as_str) {
-        None | Some("auto") => NumberSignDisplay::Auto,
+    let minimum_integer_digits = parse_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MinimumIntegerDigits,
+        inherited.minimum_integer_digits,
+        MAX_INTEGER_DIGITS,
+    )?;
+    let sign_display = match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
+        None => inherited.sign_display,
+        Some("auto") => NumberSignDisplay::Auto,
         Some("always") => NumberSignDisplay::Always,
         Some("never") => NumberSignDisplay::Never,
         Some(_) => return Err(bad_option()),
     };
-    let notation_scientific = match options.get("notation").map(String::as_str) {
-        None => false,
+    let notation_scientific = match options.get(BuiltinOptionKey::Notation).as_deref() {
+        None => inherited.notation_scientific,
         Some("scientific") => true,
         Some(_) => return Err(bad_option()),
     };
-    let grouping = match options.get("useGrouping").map(String::as_str) {
-        None | Some("auto") => NumberGrouping::Auto,
+    let grouping = match options.get(BuiltinOptionKey::UseGrouping).as_deref() {
+        None => inherited.grouping,
+        Some("auto") => NumberGrouping::Auto,
         Some("always") => NumberGrouping::Always,
         Some("never") => NumberGrouping::Never,
         Some("min2") => NumberGrouping::Min2,
@@ -865,19 +889,20 @@ fn resolve_number_format_options(
     })
 }
 
-fn parse_map_digit_option(
-    options: &BTreeMap<String, String>,
-    key: &str,
+fn parse_digit_option_or_inherited(
+    options: &EffectiveOptions<'_>,
+    key: BuiltinOptionKey,
+    inherited: Option<usize>,
     max: usize,
 ) -> Result<Option<usize>, FormatError> {
-    let Some(value) = options.get(key) else {
-        return Ok(None);
-    };
-    let value = value.parse::<usize>().map_err(|_| bad_option())?;
-    if value > max {
-        return Err(bad_option());
+    if let Some(value) = options.get(key) {
+        let value = value.parse::<usize>().map_err(|_| bad_option())?;
+        if value > max {
+            return Err(bad_option());
+        }
+        return Ok(Some(value));
     }
-    Ok(Some(value))
+    Ok(inherited)
 }
 
 fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option<String> {
@@ -954,13 +979,6 @@ fn format_scientific_text(value: &str) -> String {
     format!("{sign}{mantissa}E{exponent}")
 }
 
-impl EffectiveOptions<'_> {
-    fn get_by_name(&self, key: &str) -> Option<Cow<'_, str>> {
-        let builtin = parse_builtin_option_key(key)?;
-        self.get(builtin)
-    }
-}
-
 fn format_int_or_decimal_with_min_fraction_digits(mut text: String, minimum: usize) -> String {
     let current = text
         .split_once('.')
@@ -994,10 +1012,11 @@ fn plural_category(
                 let decimal = Decimal::from_str(&v.to_string()).map_err(|_| bad_operand())?;
                 Ok(rules.category_for(&decimal))
             }
-            Value::Number(number) => {
-                let decimal = Decimal::from_str(&number.text()).map_err(|_| bad_operand())?;
-                Ok(rules.category_for(&decimal))
-            }
+            Value::Number(number) => match &number.value {
+                NumberValue::Integer(value) => Ok(rules.category_for(*value)),
+                NumberValue::Decimal(value) => Ok(rules.category_for(value)),
+                NumberValue::NonFinite(_) => Err(bad_operand()),
+            },
             _ => {
                 let text = value_text(catalog, value).ok_or_else(bad_operand)?;
                 let decimal = Decimal::from_str(text).map_err(|_| bad_operand())?;
@@ -1027,16 +1046,45 @@ fn resolved_plural_category(
     let minimum_fraction_digits = number.format.minimum_fraction_digits;
     let maximum_fraction_digits = number.format.maximum_fraction_digits;
     validate_digit_range_relationship(minimum_fraction_digits, maximum_fraction_digits)?;
-    let text = if minimum_fraction_digits.is_none() && maximum_fraction_digits.is_none() {
-        number.text()
-    } else {
-        let text = minimum_fraction_digits.map_or_else(
-            || number.text(),
-            |minimum| format_int_or_decimal_with_min_fraction_digits(number.text(), minimum),
-        );
-        apply_maximum_fraction_digits(text, maximum_fraction_digits)
+    if minimum_fraction_digits.is_none() && maximum_fraction_digits.is_none() {
+        return match &number.value {
+            NumberValue::Integer(value) => Ok(rules.category_for(*value)),
+            NumberValue::Decimal(value) => Ok(rules.category_for(value)),
+            NumberValue::NonFinite(_) => Err(bad_operand()),
+        };
+    }
+    let mut decimal = match &number.value {
+        NumberValue::Integer(value) => Decimal::from(*value),
+        NumberValue::Decimal(value) => value.clone(),
+        NumberValue::NonFinite(_) => return Err(bad_operand()),
     };
-    let decimal = Decimal::from_str(&text).map_err(|_| bad_operand())?;
+
+    if let Some(minimum) = minimum_fraction_digits {
+        // The supported option range is small, but keep the conversion
+        // checked because fixed-decimal positions are i16.
+        let minimum = i16::try_from(minimum)
+            .map_err(|_| bad_option())?
+            .checked_neg()
+            .ok_or_else(bad_option)?;
+        if *decimal.magnitude_range().start() > minimum {
+            decimal.pad_end(minimum);
+        }
+    }
+    if let Some(maximum) = maximum_fraction_digits {
+        let maximum = i16::try_from(maximum).map_err(|_| bad_option())?;
+        let current_fraction_digits = decimal
+            .magnitude_range()
+            .start()
+            .checked_neg()
+            .unwrap_or(i16::MAX)
+            .max(0);
+        if current_fraction_digits > maximum {
+            decimal.round_with_mode(
+                -maximum,
+                SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfExpand),
+            );
+        }
+    }
     Ok(rules.category_for(&decimal))
 }
 
@@ -1106,26 +1154,20 @@ fn parse_number_digit_option(
         BuiltinOptionKey::MaximumFractionDigits
     };
     if let Some(found) = options.get(key) {
-        return parse_digit_text(&found);
+        let value = found.parse::<usize>().map_err(|_| bad_option())?;
+        if value > MAX_FRACTION_DIGITS {
+            return Err(bad_option());
+        }
+        return Ok(Some(value));
     }
-    if let Value::Number(number) = value
-        && let Some(found) = number.options.get(if minimum {
-            "minimumFractionDigits"
+    if let Value::Number(number) = value {
+        return Ok(if minimum {
+            number.format.minimum_fraction_digits
         } else {
-            "maximumFractionDigits"
-        })
-    {
-        return parse_digit_text(found);
+            number.format.maximum_fraction_digits
+        });
     }
     Ok(None)
-}
-
-fn parse_digit_text(value: &str) -> Result<Option<usize>, FormatError> {
-    let value = value.parse::<usize>().map_err(|_| bad_option())?;
-    if value > MAX_FRACTION_DIGITS {
-        return Err(bad_option());
-    }
-    Ok(Some(value))
 }
 
 const CATEGORY_NAMES: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
@@ -1660,26 +1702,20 @@ fn resolve_offset(
     cardinal_rules: &PluralRules,
     ordinal_rules: &PluralRules,
 ) -> Result<ResolvedNumber, FormatError> {
-    let (mut number, inherited, selection) = match value {
+    let (mut number, inherited_format, selection, has_explicit_select) = match value {
         Value::Number(number) => (
             number.value.clone(),
-            number.options.clone(),
+            number.format,
             number.selection,
+            number.has_explicit_select,
         ),
         _ => (
             parse_number_value(value, catalog)?,
-            BTreeMap::new(),
+            NumberFormatOptions::DEFAULT,
             NumberSelection::Plural,
+            false,
         ),
     };
-    let mut merged = inherited;
-    for key in number_option_keys() {
-        if key != "select"
-            && let Some(value) = options.get_by_name(key)
-        {
-            merged.insert(key.to_string(), value.into_owned());
-        }
-    }
     let add = options
         .get(BuiltinOptionKey::Add)
         .map(|raw| parse_integer_adjustment(&raw).ok_or_else(bad_option))
@@ -1701,8 +1737,8 @@ fn resolve_offset(
     if let Some((adjustment, subtract)) = adjustment {
         number = checked_offset(number, adjustment, subtract)?;
     }
-    let format = resolve_number_format_options(&merged)?;
-    let mut resolved = ResolvedNumber::new(number, merged, format, selection);
+    let format = resolve_number_format_options(inherited_format, options, false)?;
+    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
     if matches!(
         selection,
         NumberSelection::Plural | NumberSelection::Ordinal
@@ -2725,6 +2761,40 @@ mod tests {
     }
 
     #[test]
+    fn builtin_host_keeps_exact_integral_float_payloads_integer() {
+        let mut host = builtin_host(&["number"]);
+        for (input, expected) in [
+            (MAX_EXACT_I64_IN_F64 as f64, MAX_EXACT_I64_IN_F64),
+            (-(MAX_EXACT_I64_IN_F64 as f64), -MAX_EXACT_I64_IN_F64),
+        ] {
+            let out = host
+                .call(0, &[Value::Float(input)], &[])
+                .expect("formatted");
+            let Value::Number(number) = out else {
+                panic!("expected resolved number");
+            };
+            assert_eq!(number.value, NumberValue::Integer(expected));
+        }
+    }
+
+    #[test]
+    fn builtin_host_keeps_fractional_and_large_integral_float_decimals() {
+        let mut host = builtin_host(&["number"]);
+        let fractional = host.call(0, &[Value::Float(4.25)], &[]).expect("formatted");
+        let Value::Number(number) = fractional else {
+            panic!("expected resolved number");
+        };
+        assert!(matches!(number.value, NumberValue::Decimal(_)));
+
+        let large = host.call(0, &[Value::Float(1e23)], &[]).expect("formatted");
+        let Value::Number(number) = large else {
+            panic!("expected resolved number");
+        };
+        assert!(matches!(number.value, NumberValue::Decimal(_)));
+        assert_eq!(number_text(&number.value), "100000000000000000000000");
+    }
+
+    #[test]
     fn builtin_host_formats_large_integer_minimum_fraction_digits_exactly() {
         let mut host = builtin_host(&["number minimumFractionDigits=2"]);
         let out = host
@@ -3216,6 +3286,75 @@ mod tests {
             apply_maximum_fraction_digits("9007199254740993.256".to_string(), Some(2)),
             "9007199254740993.26"
         );
+    }
+
+    fn resolved_plural_category_via_text(
+        number: &ResolvedNumber,
+        rules: &PluralRules,
+    ) -> Result<PluralCategory, FormatError> {
+        let minimum = number.format.minimum_fraction_digits;
+        let maximum = number.format.maximum_fraction_digits;
+        validate_digit_range_relationship(minimum, maximum)?;
+        let text = minimum.map_or_else(
+            || number.text(),
+            |minimum| format_int_or_decimal_with_min_fraction_digits(number.text(), minimum),
+        );
+        let text = apply_maximum_fraction_digits(text, maximum);
+        let decimal = Decimal::from_str(&text).map_err(|_| bad_operand())?;
+        Ok(rules.category_for(&decimal))
+    }
+
+    #[test]
+    fn resolved_plural_category_decimal_path_matches_text_reference() {
+        let cases = [
+            ("1.25", None, Some(1)),
+            ("-1.25", None, Some(1)),
+            ("9.995", None, Some(2)),
+            ("-9.995", None, Some(2)),
+            ("1.5", None, Some(0)),
+            ("-1.5", None, Some(0)),
+            ("1.2", Some(2), Some(2)),
+            ("-0", Some(2), Some(2)),
+            ("1.2300", Some(2), Some(4)),
+            ("1.2300", Some(2), Some(3)),
+        ];
+
+        for locale_name in ["en", "ru"] {
+            let locale = locale_name.parse().expect("locale");
+            let host = BuiltinHost::new(&locale).expect("host");
+            for (text, minimum, maximum) in cases {
+                let number = ResolvedNumber::new(
+                    NumberValue::Decimal(Decimal::from_str(text).expect("decimal")),
+                    NumberFormatOptions {
+                        minimum_fraction_digits: minimum,
+                        maximum_fraction_digits: maximum,
+                        ..NumberFormatOptions::DEFAULT
+                    },
+                    NumberSelection::Plural,
+                    true,
+                );
+                assert_eq!(
+                    resolved_plural_category(&number, &host.cardinal_rules),
+                    resolved_plural_category_via_text(&number, &host.cardinal_rules),
+                    "locale={locale_name} value={text} min={minimum:?} max={maximum:?}"
+                );
+            }
+
+            let integer = ResolvedNumber::new(
+                NumberValue::Integer(1),
+                NumberFormatOptions {
+                    maximum_fraction_digits: Some(2),
+                    ..NumberFormatOptions::DEFAULT
+                },
+                NumberSelection::Plural,
+                true,
+            );
+            assert_eq!(
+                resolved_plural_category(&integer, &host.cardinal_rules),
+                resolved_plural_category_via_text(&integer, &host.cardinal_rules),
+                "locale={locale_name} integer"
+            );
+        }
     }
 
     #[test]
