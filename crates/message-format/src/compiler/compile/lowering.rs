@@ -507,12 +507,18 @@ fn lower_selector(
                     let value_str_id = *string_map
                         .get(resolved.unwrap_or(value))
                         .ok_or(CompileError::internal("missing interned variable"))?;
-                    code.push(if resolved.is_some() {
-                        schema::Opcode::PushConst as u8
+                    if resolved.is_some() {
+                        code.push(schema::Opcode::PushConst as u8);
+                        code.extend_from_slice(&value_str_id.to_le_bytes());
                     } else {
-                        schema::Opcode::LoadArg as u8
-                    });
-                    code.extend_from_slice(&value_str_id.to_le_bytes());
+                        code.push(schema::Opcode::LoadOptionArg as u8);
+                        code.extend_from_slice(&value_str_id.to_le_bytes());
+                        let fallback = format!("{{${value}}}");
+                        let fallback_id = *string_map
+                            .get(&fallback)
+                            .ok_or(CompileError::internal("missing interned option fallback"))?;
+                        code.extend_from_slice(&fallback_id.to_le_bytes());
+                    }
                 }
             }
             // No ExprFallback for selectors — errors abort.
@@ -591,12 +597,18 @@ fn emit_call(
             let value_str_id = *string_map
                 .get(resolved.unwrap_or(value))
                 .ok_or(CompileError::internal("missing interned variable"))?;
-            code.push(if resolved.is_some() {
-                schema::Opcode::PushConst as u8
+            if resolved.is_some() {
+                code.push(schema::Opcode::PushConst as u8);
+                code.extend_from_slice(&value_str_id.to_le_bytes());
             } else {
-                schema::Opcode::LoadArg as u8
-            });
-            code.extend_from_slice(&value_str_id.to_le_bytes());
+                code.push(schema::Opcode::LoadOptionArg as u8);
+                code.extend_from_slice(&value_str_id.to_le_bytes());
+                let fallback = format!("{{${value}}}");
+                let fallback_id = *string_map
+                    .get(&fallback)
+                    .ok_or(CompileError::internal("missing interned option fallback"))?;
+                code.extend_from_slice(&fallback_id.to_le_bytes());
+            }
         }
     }
     // Fallback is needed for the outer expression; nested calls still leave

@@ -590,6 +590,15 @@ fn validate_instruction_operands(
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
+        Opcode::LoadOptionArg => {
+            let arg_id = read_u32(code, base + 1)?;
+            let fallback_id = read_u32(code, base + 5)?;
+            for id in [arg_id, fallback_id] {
+                if id as usize >= string_count {
+                    return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
+                }
+            }
+        }
         Opcode::CheckSelector | Opcode::StoreLocal | Opcode::LoadLocal | Opcode::SelectLocal => {
             // The runtime validates dense-slot ordering because the valid
             // range depends on the execution path. Decoding still checks the
@@ -645,7 +654,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
     let base = decoded.pc as usize;
     match decoded.opcode {
         Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin | Opcode::StoreLocal => (1, 0),
-        Opcode::PushConst | Opcode::LoadArg => (0, 1),
+        Opcode::PushConst | Opcode::LoadArg | Opcode::LoadOptionArg => (0, 1),
         Opcode::LoadLocal => (0, 1),
         Opcode::CheckSelector | Opcode::OutArg | Opcode::SelectArg | Opcode::SelectLocal => (0, 0),
         Opcode::CallFunc | Opcode::CallSelect => {
@@ -1390,6 +1399,89 @@ mod tests {
                 slot: 0,
             }
         );
+    }
+
+    #[test]
+    fn truncated_load_option_arg_operand_fails_decode() {
+        let full = [
+            Opcode::LoadOptionArg as u8,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            Opcode::Halt as u8,
+        ];
+        for len in 1..9 {
+            let bytes = build_catalog(
+                &["main", "arg", "fallback"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &full[..len],
+            );
+            let err = Catalog::from_bytes(&bytes).expect_err("must reject truncation");
+            assert!(matches!(err, CatalogError::TruncatedInstruction { pc: 0 }));
+        }
+    }
+
+    #[test]
+    fn invalid_load_option_arg_argument_ref_is_rejected() {
+        let code = [
+            Opcode::LoadOptionArg as u8,
+            99,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            Opcode::Halt as u8,
+        ];
+        let bytes = build_catalog(
+            &["main", "fallback"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("must reject argument ref");
+        assert_eq!(err, CatalogError::InvalidStringRef { pc: 0, id: 99 });
+    }
+
+    #[test]
+    fn invalid_load_option_arg_fallback_ref_is_rejected() {
+        let code = [
+            Opcode::LoadOptionArg as u8,
+            1,
+            0,
+            0,
+            0,
+            99,
+            0,
+            0,
+            0,
+            Opcode::Halt as u8,
+        ];
+        let bytes = build_catalog(
+            &["main", "arg"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("must reject fallback ref");
+        assert_eq!(err, CatalogError::InvalidStringRef { pc: 0, id: 99 });
     }
 
     #[test]

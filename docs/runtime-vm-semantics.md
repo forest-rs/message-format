@@ -64,7 +64,15 @@ isolation is applied at output, so later annotations consume the raw text.
 `Host::call` receives:
 - Function id (`u16`).
 - Positional argument values.
-- Options as `(key_str_id, value)` pairs.
+- A borrowed `FunctionOptions` view. Iterate it, or use `get`, to access
+  resolved options. Runtime option presence remains available through
+  `was_dynamic` and `was_unresolved`, including when a fallback-valued option
+  is omitted from iteration.
+
+Migration note: host implementations written against the former options slice
+should accept `FunctionOptions` and replace slice iteration with
+`opts.iter()` (or `opts.into_iter()`). Hosts that need to distinguish static
+catalog options from runtime options should use `was_dynamic`.
 
 `Host::call_select` has the same signature as `call` and is invoked by `OP_CALL_SELECT` when a function result feeds into selection dispatch. The default implementation delegates to `call`. Hosts may override it to return `Value::StrRef` for known categories (e.g. plural), avoiding allocation. When the selector is a `StrRef`, `CASE_STR` compares pool IDs directly before falling back to string comparison.
 
