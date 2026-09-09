@@ -124,6 +124,7 @@ fn collect_function_strings(func: &FunctionSpec, out: &mut BTreeSet<String>) {
             }
             FunctionOptionValue::Var(var) => {
                 out.insert(var.clone());
+                out.insert(format!("{{${var}}}"));
             }
             FunctionOptionValue::ResolvedVar { name, value } => {
                 out.insert(name.clone());

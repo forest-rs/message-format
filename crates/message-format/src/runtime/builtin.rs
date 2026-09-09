@@ -34,7 +34,7 @@ use crate::runtime::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
         ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
-    vm::Host,
+    vm::{FunctionOptions, Host},
 };
 
 const MAX_EXACT_I64_IN_F64: i64 = 9_007_199_254_740_992;
@@ -339,7 +339,7 @@ impl BuiltinHost {
         icu_formatters: &mut IcuFormatterCache,
         entry: &BuiltinEntry,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, FormatError> {
         let Some(raw_arg) = args.first() else {
@@ -355,7 +355,9 @@ impl BuiltinHost {
             BuiltinFn::Number | BuiltinFn::Integer => {
                 let integer_only = entry.func == BuiltinFn::Integer;
                 if opts.iter().any(|(key_id, _)| {
-                    index.option_keys_by_str_id.get(key_id) == Some(&BuiltinOptionKey::Select)
+                    index.option_keys_by_str_id.get(&key_id) == Some(&BuiltinOptionKey::Select)
+                }) && !index.option_keys_by_str_id.iter().any(|(key_id, key)| {
+                    *key == BuiltinOptionKey::Select && opts.was_unresolved(*key_id)
                 }) {
                     on_error(MessageFunctionError::BadOption);
                 }
@@ -442,7 +444,7 @@ impl BuiltinHost {
         index: &BuiltinHostCatalogIndex,
         entry: &BuiltinEntry,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
     ) -> Option<&PluralRules> {
         if !matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer) {
             return None;
@@ -454,6 +456,13 @@ impl BuiltinHost {
                 NumberSelection::Exact | NumberSelection::None | NumberSelection::Invalid => {}
             }
         }
+        let dynamic_select = index
+            .option_keys_by_str_id
+            .iter()
+            .any(|(key_id, key)| *key == BuiltinOptionKey::Select && opts.was_dynamic(*key_id));
+        if dynamic_select {
+            return None;
+        }
         if opts.is_empty() {
             return match entry.select_mode {
                 BuiltinSelectMode::Plural => Some(&self.cardinal_rules),
@@ -463,14 +472,6 @@ impl BuiltinHost {
                 // omits `select`, but a selector still needs a category.
                 BuiltinSelectMode::None => Some(&self.cardinal_rules),
             };
-        }
-        if opts.iter().any(|(key_id, _)| {
-            index
-                .option_keys_by_str_id
-                .get(key_id)
-                .is_some_and(|key| *key == BuiltinOptionKey::Select)
-        }) {
-            return None;
         }
         let options =
             EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
@@ -521,7 +522,7 @@ impl Host for BuiltinHost {
         index: &BuiltinHostCatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         let Some(entry) = index.by_id.get(&fn_id) else {
@@ -548,16 +549,22 @@ impl Host for BuiltinHost {
         index: &BuiltinHostCatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         let Some(entry) = index.by_id.get(&fn_id) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
-        if opts.iter().any(|(key_id, _)| {
-            index.option_keys_by_str_id.get(key_id) == Some(&BuiltinOptionKey::Select)
-        }) {
-            on_error(MessageFunctionError::BadOption);
+        if index
+            .option_keys_by_str_id
+            .iter()
+            .any(|(key_id, key)| *key == BuiltinOptionKey::Select && opts.was_dynamic(*key_id))
+        {
+            if !index.option_keys_by_str_id.iter().any(|(key_id, key)| {
+                *key == BuiltinOptionKey::Select && opts.was_unresolved(*key_id)
+            }) {
+                on_error(MessageFunctionError::BadOption);
+            }
             return Ok(Value::Null);
         }
         if matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer)
@@ -1923,29 +1930,33 @@ struct EffectiveOptions<'a> {
     // Keys are normalized up front to avoid repeated string comparisons in hot paths.
     base: &'a [Option<String>; BUILTIN_OPTION_KEY_COUNT],
     runtime: [Option<&'a Value>; BUILTIN_OPTION_KEY_COUNT],
+    runtime_options: FunctionOptions<'a>,
     has_invalid_runtime_key: bool,
     catalog: &'a Catalog,
+    option_keys_by_str_id: &'a BTreeMap<u32, BuiltinOptionKey>,
 }
 
 impl<'a> EffectiveOptions<'a> {
     fn has_runtime(&self, key: BuiltinOptionKey) -> bool {
-        self.runtime[key.index()].is_some()
+        self.option_keys_by_str_id
+            .iter()
+            .any(|(id, candidate)| *candidate == key && self.runtime_options.was_dynamic(*id))
     }
 
     fn new(
         base: &'a [Option<String>; BUILTIN_OPTION_KEY_COUNT],
-        runtime: &'a [(u32, Value)],
+        runtime: FunctionOptions<'a>,
         catalog: &'a Catalog,
         option_keys_by_str_id: &'a BTreeMap<u32, BuiltinOptionKey>,
     ) -> Self {
         let mut runtime_values = array::from_fn(|_| None);
         let mut has_invalid_runtime_key = false;
-        for (key_id, value) in runtime {
-            if catalog.pool_string_opt(*key_id).is_none() {
+        for (key_id, value) in runtime.iter() {
+            if catalog.pool_string_opt(key_id).is_none() {
                 has_invalid_runtime_key = true;
                 continue;
             }
-            let Some(runtime_key) = option_keys_by_str_id.get(key_id) else {
+            let Some(runtime_key) = option_keys_by_str_id.get(&key_id) else {
                 continue;
             };
             runtime_values[runtime_key.index()] = Some(value);
@@ -1953,8 +1964,10 @@ impl<'a> EffectiveOptions<'a> {
         Self {
             base,
             runtime: runtime_values,
+            runtime_options: runtime,
             has_invalid_runtime_key,
             catalog,
+            option_keys_by_str_id,
         }
     }
 
@@ -2392,7 +2405,7 @@ mod tests {
             &mut self,
             fn_id: u16,
             args: &[Value],
-            opts: &[(u32, Value)],
+            opts: FunctionOptions<'_>,
         ) -> Result<Value, HostCallError> {
             Host::call(
                 &mut self.host,
@@ -2409,7 +2422,7 @@ mod tests {
             &mut self,
             fn_id: u16,
             args: &[Value],
-            opts: &[(u32, Value)],
+            opts: FunctionOptions<'_>,
         ) -> Result<Value, HostCallError> {
             Host::call_select(
                 &mut self.host,
@@ -2604,7 +2617,7 @@ mod tests {
     fn test_select_preserves_only_explicitly_resolved_precision() {
         let mut host = builtin_host(&["test:select decimalPlaces=1", "test:select"]);
         let resolved = host
-            .call(0, &[Value::Int(1)], &[])
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("resolved selector");
         let Value::ResolvedSelect(value) = &resolved else {
             panic!("test:select must return a resolved selector");
@@ -2612,7 +2625,11 @@ mod tests {
         assert_eq!(value.text(), "1.0");
 
         let aliased = host
-            .call(1, core::slice::from_ref(&resolved), &[])
+            .call(
+                1,
+                core::slice::from_ref(&resolved),
+                FunctionOptions::new(&[]),
+            )
             .expect("aliased selector");
         let Value::ResolvedSelect(value) = &aliased else {
             panic!("test:select must return a resolved selector");
@@ -2620,7 +2637,11 @@ mod tests {
         assert_eq!(value.text(), "1.0");
 
         let raw = host
-            .call(1, &[Value::Str("1.0".to_string())], &[])
+            .call(
+                1,
+                &[Value::Str("1.0".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("raw selector");
         let Value::ResolvedSelect(value) = &raw else {
             panic!("test:select must return a resolved selector");
@@ -2632,7 +2653,11 @@ mod tests {
     fn resolved_number_exposes_exact_text_without_formatting_options() {
         let mut host = builtin_host(&["number minimumFractionDigits=2 useGrouping=always"]);
         let out = host
-            .call(0, &[Value::Int(9_007_199_254_740_993)], &[])
+            .call(
+                0,
+                &[Value::Int(9_007_199_254_740_993)],
+                FunctionOptions::new(&[]),
+            )
             .expect("resolved");
         let Value::Number(number) = out else {
             panic!("number function must return a resolved number");
@@ -2656,7 +2681,7 @@ mod tests {
             &host.index,
             0,
             &[Value::Int(1)],
-            &[(select_id, Value::Str("exact".to_string()))],
+            FunctionOptions::new(&[(select_id, Value::Str("exact".to_string()))]),
             &mut |error| errors.push(error),
         )
         .expect("formatting remains available");
@@ -2671,7 +2696,7 @@ mod tests {
     fn static_select_keeps_selection_provenance_on_resolved_number() {
         let mut host = builtin_host(&["number select=plural"]);
         let out = host
-            .call(0, &[Value::Int(1)], &[])
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("formatting remains available");
         let Value::Number(number) = out else {
             panic!("number function must return a resolved number");
@@ -2683,7 +2708,7 @@ mod tests {
     fn inherited_select_reports_error_on_reannotation() {
         let mut host = builtin_host(&["number select=plural", "number"]);
         let first = host
-            .call(0, &[Value::Int(1)], &[])
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("first annotation");
         let mut errors = Vec::new();
         let second = Host::call(
@@ -2692,7 +2717,7 @@ mod tests {
             &host.index,
             1,
             &[first],
-            &[],
+            FunctionOptions::new(&[]),
             &mut |error| errors.push(error),
         )
         .expect("formatting remains available");
@@ -2715,13 +2740,13 @@ mod tests {
             &host.index,
             0,
             &[Value::Int(1)],
-            &[(select_id, Value::Str("exact".to_string()))],
+            FunctionOptions::new(&[(select_id, Value::Str("exact".to_string()))]),
             &mut |error| errors.push(error),
         )
         .expect("formatting remains available");
         assert_eq!(errors, vec![MessageFunctionError::BadOption]);
         let selected = host
-            .call_select(1, &[stored], &[])
+            .call_select(1, &[stored], FunctionOptions::new(&[]))
             .expect("invalid selection uses default");
         assert_eq!(selected, Value::Null);
     }
@@ -2729,9 +2754,11 @@ mod tests {
     #[test]
     fn call_select_uses_valid_mode_from_stored_number() {
         let mut host = builtin_host(&["number select=plural", "number"]);
-        let stored = host.call(0, &[Value::Int(1)], &[]).expect("stored number");
+        let stored = host
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
+            .expect("stored number");
         let selected = host
-            .call_select(1, &[stored], &[])
+            .call_select(1, &[stored], FunctionOptions::new(&[]))
             .expect("stored selection");
         assert_selector_result(host.catalog, selected, "one");
     }
@@ -2743,10 +2770,10 @@ mod tests {
             "number maximumFractionDigits=2",
         ]);
         let resolved = host
-            .call(0, &[Value::Float(4.2)], &[])
+            .call(0, &[Value::Float(4.2)], FunctionOptions::new(&[]))
             .expect("first annotation");
         let err = host
-            .call(1, &[resolved], &[])
+            .call(1, &[resolved], FunctionOptions::new(&[]))
             .expect_err("merged options must be validated");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
@@ -2755,7 +2782,11 @@ mod tests {
     fn builtin_host_applies_number_minimum_fraction_digits() {
         let mut host = builtin_host(&["number minimumFractionDigits=2"]);
         let out = host
-            .call(0, &[Value::Str("4.2".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("4.2".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_number_rendered(&mut host, out, "4.20");
     }
@@ -2764,7 +2795,11 @@ mod tests {
     fn builtin_host_rejects_bad_minimum_fraction_digits() {
         let mut host = builtin_host(&["number minimumFractionDigits=foo"]);
         let err = host
-            .call(0, &[Value::Str("4.2".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("4.2".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
@@ -2772,21 +2807,27 @@ mod tests {
     #[test]
     fn builtin_host_rejects_invalid_sign_display_literal() {
         let mut host = builtin_host(&["number signDisplay=bogus"]);
-        let err = host.call(0, &[Value::Int(5)], &[]).expect_err("must fail");
+        let err = host
+            .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
+            .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
 
     #[test]
     fn builtin_host_rejects_invalid_use_grouping_literal() {
         let mut host = builtin_host(&["number useGrouping=bogus"]);
-        let err = host.call(0, &[Value::Int(5)], &[]).expect_err("must fail");
+        let err = host
+            .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
+            .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
 
     #[test]
     fn builtin_host_formats_integral_float_minimum_fraction_digits() {
         let mut host = builtin_host(&["number minimumFractionDigits=3"]);
-        let out = host.call(0, &[Value::Float(42.0)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Float(42.0)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, out, "42.000");
     }
 
@@ -2798,7 +2839,7 @@ mod tests {
             (-(MAX_EXACT_I64_IN_F64 as f64), -MAX_EXACT_I64_IN_F64),
         ] {
             let out = host
-                .call(0, &[Value::Float(input)], &[])
+                .call(0, &[Value::Float(input)], FunctionOptions::new(&[]))
                 .expect("formatted");
             let Value::Number(number) = out else {
                 panic!("expected resolved number");
@@ -2810,13 +2851,17 @@ mod tests {
     #[test]
     fn builtin_host_keeps_fractional_and_large_integral_float_decimals() {
         let mut host = builtin_host(&["number"]);
-        let fractional = host.call(0, &[Value::Float(4.25)], &[]).expect("formatted");
+        let fractional = host
+            .call(0, &[Value::Float(4.25)], FunctionOptions::new(&[]))
+            .expect("formatted");
         let Value::Number(number) = fractional else {
             panic!("expected resolved number");
         };
         assert!(matches!(number.value, NumberValue::Decimal(_)));
 
-        let large = host.call(0, &[Value::Float(1e23)], &[]).expect("formatted");
+        let large = host
+            .call(0, &[Value::Float(1e23)], FunctionOptions::new(&[]))
+            .expect("formatted");
         let Value::Number(number) = large else {
             panic!("expected resolved number");
         };
@@ -2828,7 +2873,7 @@ mod tests {
     fn builtin_host_formats_large_integer_minimum_fraction_digits_exactly() {
         let mut host = builtin_host(&["number minimumFractionDigits=2"]);
         let out = host
-            .call(0, &[Value::Int(i64::MAX)], &[])
+            .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_number_rendered(&mut host, out, &format!("{}.00", i64::MAX));
     }
@@ -2837,7 +2882,7 @@ mod tests {
     fn builtin_host_applies_maximum_fraction_digits_rounding() {
         let mut host = builtin_host(&["number maximumFractionDigits=2"]);
         let out = host
-            .call(0, &[Value::Float(4.256)], &[])
+            .call(0, &[Value::Float(4.256)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_number_rendered(&mut host, out, "4.26");
     }
@@ -2846,7 +2891,7 @@ mod tests {
     fn builtin_host_rejects_invalid_min_then_max_fraction_digit_range() {
         let mut host = builtin_host(&["number minimumFractionDigits=4 maximumFractionDigits=2"]);
         let err = host
-            .call(0, &[Value::Float(4.2)], &[])
+            .call(0, &[Value::Float(4.2)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
@@ -2855,12 +2900,14 @@ mod tests {
     fn builtin_host_rejects_out_of_range_digit_options() {
         let mut host = builtin_host(&["number minimumFractionDigits=21"]);
         let err = host
-            .call(0, &[Value::Float(4.2)], &[])
+            .call(0, &[Value::Float(4.2)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
 
         let mut host = builtin_host(&["number minimumIntegerDigits=22"]);
-        let err = host.call(0, &[Value::Int(42)], &[]).expect_err("must fail");
+        let err = host
+            .call(0, &[Value::Int(42)], FunctionOptions::new(&[]))
+            .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
 
@@ -2868,7 +2915,7 @@ mod tests {
     fn builtin_host_rejects_minimum_fraction_digits_greater_than_maximum() {
         let mut host = builtin_host(&["number minimumFractionDigits=3 maximumFractionDigits=2"]);
         let err = host
-            .call(0, &[Value::Float(4.2)], &[])
+            .call(0, &[Value::Float(4.2)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
@@ -2876,7 +2923,9 @@ mod tests {
     #[test]
     fn builtin_host_preserves_negative_zero_fraction_formatting() {
         let mut host = builtin_host(&["number minimumFractionDigits=2"]);
-        let out = host.call(0, &[Value::Float(-0.0)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Float(-0.0)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, out, "-0.00");
     }
 
@@ -2884,7 +2933,11 @@ mod tests {
     fn builtin_host_preserves_negative_zero_string_sign() {
         let mut host = builtin_host(&["number"]);
         let out = host
-            .call(0, &[Value::Str("-0".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("-0".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_number_rendered(&mut host, out, "-0");
     }
@@ -2893,13 +2946,13 @@ mod tests {
     fn builtin_host_preserves_nonfinite_number_rendering() {
         let mut host = builtin_host(&["number"]);
         let infinity = host
-            .call(0, &[Value::Float(f64::INFINITY)], &[])
+            .call(0, &[Value::Float(f64::INFINITY)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_number_rendered(&mut host, infinity, "inf");
 
         let mut offset = builtin_host(&["offset add=1"]);
         let infinity = offset
-            .call(0, &[Value::Float(f64::INFINITY)], &[])
+            .call(0, &[Value::Float(f64::INFINITY)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_number_rendered(&mut offset, infinity, "inf");
     }
@@ -2918,7 +2971,7 @@ mod tests {
             .call(
                 0,
                 &[Value::Float(4.2)],
-                &[(mfd_str_id, Value::Str("3".to_string()))],
+                FunctionOptions::new(&[(mfd_str_id, Value::Str("3".to_string()))]),
             )
             .expect("formatted");
         assert_number_rendered(&mut host, out, "4.200");
@@ -2933,7 +2986,7 @@ mod tests {
             .call(
                 0,
                 &[Value::Float(4.2)],
-                &[(mystery_str_id, Value::Str("7".to_string()))],
+                FunctionOptions::new(&[(mystery_str_id, Value::Str("7".to_string()))]),
             )
             .expect("formatted");
         assert_number_rendered(&mut host, out, "4.20");
@@ -2946,7 +2999,7 @@ mod tests {
             .call(
                 0,
                 &[Value::Float(4.2)],
-                &[(99, Value::Str("3".to_string()))],
+                FunctionOptions::new(&[(99, Value::Str("3".to_string()))]),
             )
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
@@ -2968,7 +3021,11 @@ mod tests {
         for (func, input) in cases {
             let mut host = builtin_host(&[func]);
             let out = host
-                .call(0, &[Value::Str(input.to_string())], &[])
+                .call(
+                    0,
+                    &[Value::Str(input.to_string())],
+                    FunctionOptions::new(&[]),
+                )
                 .expect("formatted");
             assert_string_resolved(out, input);
         }
@@ -2978,7 +3035,11 @@ mod tests {
     fn string_u_dir_ignores_bidi_controls_in_option_value() {
         let mut host = builtin_host(&["string u:dir=|\u{2067}rtl\u{2069}|"]);
         let out = host
-            .call(0, &[Value::Str("abc".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("abc".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_string_resolved(out, "abc");
     }
@@ -2986,7 +3047,9 @@ mod tests {
     #[test]
     fn number_option_key_with_bidi_controls_is_recognized() {
         let mut host = builtin_host(&["number \u{2068}minimumFractionDigits\u{2069}=2"]);
-        let out = host.call(0, &[Value::Float(4.2)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Float(4.2)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, out, "4.20");
     }
 
@@ -2994,7 +3057,9 @@ mod tests {
     fn string_u_dir_does_not_double_wrap_existing_isolates() {
         let mut host = builtin_host(&["string u:dir=auto"]);
         let input = Value::Str("\u{2066}world\u{2069}".to_string());
-        let out = host.call(0, &[input], &[]).expect("formatted");
+        let out = host
+            .call(0, &[input], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_string_resolved(out, "\u{2066}world\u{2069}");
     }
 
@@ -3005,12 +3070,12 @@ mod tests {
         let number_id = host.catalog.string_id("42.5").expect("number in pool");
 
         let string_out = host
-            .call(0, &[Value::StrRef(hello_id)], &[])
+            .call(0, &[Value::StrRef(hello_id)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_string_resolved(string_out, "hello");
 
         let number_out = host
-            .call(1, &[Value::StrRef(number_id)], &[])
+            .call(1, &[Value::StrRef(number_id)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_number_rendered(&mut host, number_out, "42.5");
     }
@@ -3020,12 +3085,20 @@ mod tests {
         let mut host = builtin_host_with_catalog_parts(&["string", "number"], &[], "hello42.5");
 
         let string_out = host
-            .call(0, &[Value::LitRef { off: 0, len: 5 }], &[])
+            .call(
+                0,
+                &[Value::LitRef { off: 0, len: 5 }],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_string_resolved(string_out, "hello");
 
         let number_out = host
-            .call(1, &[Value::LitRef { off: 5, len: 4 }], &[])
+            .call(
+                1,
+                &[Value::LitRef { off: 5, len: 4 }],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_number_rendered(&mut host, number_out, "42.5");
     }
@@ -3033,8 +3106,12 @@ mod tests {
     #[test]
     fn number_select_plural_returns_cardinal_category() {
         let mut host = builtin_host(&["number select=plural"]);
-        let one = host.call(0, &[Value::Int(1)], &[]).expect("formatted");
-        let other = host.call(0, &[Value::Int(2)], &[]).expect("formatted");
+        let one = host
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        let other = host
+            .call(0, &[Value::Int(2)], FunctionOptions::new(&[]))
+            .expect("formatted");
         let Value::Number(one_number) = &one else {
             panic!("number function must return a resolved number");
         };
@@ -3050,10 +3127,18 @@ mod tests {
     #[test]
     fn number_select_ordinal_returns_ordinal_category() {
         let mut host = builtin_host(&["number select=ordinal"]);
-        let one = host.call(0, &[Value::Int(1)], &[]).expect("formatted");
-        let two = host.call(0, &[Value::Int(2)], &[]).expect("formatted");
-        let few = host.call(0, &[Value::Int(3)], &[]).expect("formatted");
-        let other = host.call(0, &[Value::Int(11)], &[]).expect("formatted");
+        let one = host
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        let two = host
+            .call(0, &[Value::Int(2)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        let few = host
+            .call(0, &[Value::Int(3)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        let other = host
+            .call(0, &[Value::Int(11)], FunctionOptions::new(&[]))
+            .expect("formatted");
         let Value::Number(two_number) = &two else {
             panic!("number function must return a resolved number");
         };
@@ -3068,7 +3153,7 @@ mod tests {
     fn number_call_select_static_plural_returns_pool_ref() {
         let mut host = builtin_host(&["number select=plural"]);
         let out = host
-            .call_select(0, &[Value::Int(1)], &[])
+            .call_select(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_selector_result(host.catalog, out, "one");
     }
@@ -3084,7 +3169,7 @@ mod tests {
             &host.index,
             0,
             &[Value::Int(2)],
-            &[(select_id, Value::Str("ordinal".to_string()))],
+            FunctionOptions::new(&[(select_id, Value::Str("ordinal".to_string()))]),
             &mut |error| errors.push(error),
         )
         .expect("formatted");
@@ -3103,7 +3188,7 @@ mod tests {
             &host.index,
             0,
             &[Value::Int(1)],
-            &[(select_id, Value::Str("bogus".to_string()))],
+            FunctionOptions::new(&[(select_id, Value::Str("bogus".to_string()))]),
             &mut |error| errors.push(error),
         )
         .expect("selector fallback");
@@ -3115,7 +3200,7 @@ mod tests {
     fn number_call_select_with_fraction_digit_options_uses_dynamic_path() {
         let mut host = builtin_host(&["number select=plural minimumFractionDigits=1"]);
         let out = host
-            .call_select(0, &[Value::Int(1)], &[])
+            .call_select(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_selector_result(host.catalog, out, "other");
     }
@@ -3123,15 +3208,21 @@ mod tests {
     #[test]
     fn number_select_exact_returns_formatted_number() {
         let mut host = builtin_host(&["number select=exact"]);
-        let out = host.call(0, &[Value::Int(42)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Int(42)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, out, "42");
     }
 
     #[test]
     fn integer_select_plural_returns_cardinal_category() {
         let mut host = builtin_host(&["integer select=plural"]);
-        let one = host.call(0, &[Value::Int(1)], &[]).expect("formatted");
-        let other = host.call(0, &[Value::Int(2)], &[]).expect("formatted");
+        let one = host
+            .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        let other = host
+            .call(0, &[Value::Int(2)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, one, "1");
         assert_number_rendered(&mut host, other, "2");
     }
@@ -3139,14 +3230,18 @@ mod tests {
     #[test]
     fn number_without_select_returns_formatted_number() {
         let mut host = builtin_host(&["number"]);
-        let out = host.call(0, &[Value::Int(42)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Int(42)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_number_rendered(&mut host, out, "42");
     }
 
     #[test]
     fn number_style_percent_multiplies_by_100() {
         let mut host = builtin_host(&["number style=percent"]);
-        let out = host.call(0, &[Value::Float(0.5)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Float(0.5)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_eq!(out, Value::Str("50%".to_string()));
     }
 
@@ -3154,7 +3249,7 @@ mod tests {
     fn number_style_percent_rejects_large_integer_that_would_lose_precision() {
         let mut host = builtin_host(&["number style=percent"]);
         let err = host
-            .call(0, &[Value::Int(i64::MAX)], &[])
+            .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOperand);
     }
@@ -3163,7 +3258,7 @@ mod tests {
     fn number_style_percent_with_fraction_digits() {
         let mut host = builtin_host(&["number style=percent minimumFractionDigits=1"]);
         let out = host
-            .call(0, &[Value::Float(0.123)], &[])
+            .call(0, &[Value::Float(0.123)], FunctionOptions::new(&[]))
             .expect("formatted");
         assert_eq!(out, Value::Str("12.3%".to_string()));
     }
@@ -3171,7 +3266,9 @@ mod tests {
     #[test]
     fn integer_style_percent_multiplies_by_100() {
         let mut host = builtin_host(&["integer style=percent"]);
-        let out = host.call(0, &[Value::Float(0.42)], &[]).expect("formatted");
+        let out = host
+            .call(0, &[Value::Float(0.42)], FunctionOptions::new(&[]))
+            .expect("formatted");
         assert_eq!(out, Value::Str("42%".to_string()));
     }
 
@@ -3180,21 +3277,33 @@ mod tests {
         let mut date_host = builtin_host(&["date style=short"]);
         assert!(date_host.icu_formatters.date.short.is_none());
         let _ = date_host
-            .call(0, &[Value::Str("2024-05-01".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert!(date_host.icu_formatters.date.short.is_some());
 
         let mut time_host = builtin_host(&["time style=short"]);
         assert!(time_host.icu_formatters.time.short.is_none());
         let _ = time_host
-            .call(0, &[Value::Str("2024-05-01T14:30:00".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:00".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert!(time_host.icu_formatters.time.short.is_some());
 
         let mut datetime_host = builtin_host(&["datetime"]);
         assert!(datetime_host.icu_formatters.datetime.medium.short.is_none());
         let _ = datetime_host
-            .call(0, &[Value::Str("2024-05-01T14:30:00".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:00".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert!(datetime_host.icu_formatters.datetime.medium.short.is_some());
     }
@@ -3203,7 +3312,7 @@ mod tests {
     fn offset_rejects_large_integer_that_exceeds_checked_range() {
         let mut host = builtin_host(&["offset add=1"]);
         let err = host
-            .call(0, &[Value::Int(i64::MAX)], &[])
+            .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
             .expect("i128 range");
         assert_number_rendered(&mut host, err, "9223372036854775808");
 
@@ -3214,7 +3323,7 @@ mod tests {
                 &[Value::Str(
                     "99999999999999999999999999999999999999999".to_string(),
                 )],
-                &[],
+                FunctionOptions::new(&[]),
             )
             .expect_err("must exceed checked range");
         assert_function_error(
@@ -3227,19 +3336,19 @@ mod tests {
     fn offset_rejects_missing_or_non_integer_adjustments() {
         let mut missing = builtin_host(&["offset"]);
         let err = missing
-            .call(0, &[Value::Int(4)], &[])
+            .call(0, &[Value::Int(4)], FunctionOptions::new(&[]))
             .expect_err("missing adjustment must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
 
         let mut fractional = builtin_host(&["offset add=1.5"]);
         let err = fractional
-            .call(0, &[Value::Int(4)], &[])
+            .call(0, &[Value::Int(4)], FunctionOptions::new(&[]))
             .expect_err("fractional adjustment must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
 
         let mut invalid = builtin_host(&["offset add=bogus"]);
         let err = invalid
-            .call(0, &[Value::Int(4)], &[])
+            .call(0, &[Value::Int(4)], FunctionOptions::new(&[]))
             .expect_err("invalid adjustment must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
     }
@@ -3248,12 +3357,20 @@ mod tests {
     fn datetime_time_style_changes_output_and_cache_slot() {
         let mut short_host = builtin_host(&["datetime dateStyle=short timeStyle=short"]);
         let short = short_host
-            .call(0, &[Value::Str("2024-05-01T14:30:45".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:45".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
 
         let mut long_host = builtin_host(&["datetime dateStyle=short timeStyle=long"]);
         let long = long_host
-            .call(0, &[Value::Str("2024-05-01T14:30:45".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:45".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
 
         assert_ne!(short, long);
@@ -3293,10 +3410,18 @@ mod tests {
     fn time_formatting_keeps_hour_and_minute_for_datetime_without_seconds() {
         let mut host = builtin_host(&["time timeStyle=short"]);
         let without_seconds = host
-            .call(0, &[Value::Str("2024-05-01T14:30".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         let with_seconds = host
-            .call(0, &[Value::Str("2024-05-01T14:30:00".to_string())], &[])
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:00".to_string())],
+                FunctionOptions::new(&[]),
+            )
             .expect("formatted");
         assert_eq!(without_seconds, with_seconds);
     }

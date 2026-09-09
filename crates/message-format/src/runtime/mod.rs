@@ -168,6 +168,12 @@
 //!
 //! # Migration
 //!
+//! Function callbacks now receive [`FunctionOptions`] instead of an option
+//! slice. Use `iter` or `get` for resolved values and `was_dynamic` or
+//! `was_unresolved` for variable provenance. [`HostFn`] closures use the same
+//! view. Literal options remain in the catalog's function entry. Recompile
+//! catalogs to enable recovery for missing input variables used as options.
+//!
 //! Host implementations must accept the `on_error` callback on `call` and
 //! `call_select`. With ICU4X enabled, numeric built-ins return a resolved
 //! numeric value internally; callers that inspect host results should render
@@ -211,7 +217,7 @@ pub use schema::{FuncEntry, MessageEntry, Opcode};
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, StrId, Value};
 #[cfg(feature = "icu4x")]
 pub use value::{ResolvedNumber, ResolvedString};
-pub use vm::{FormatOption, FormatSink, Host, HostFn, MessageHandle, NoopHost};
+pub use vm::{FormatOption, FormatSink, FunctionOptions, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.
 pub mod catalog;

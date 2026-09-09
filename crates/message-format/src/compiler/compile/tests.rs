@@ -4,7 +4,7 @@
 #[cfg(feature = "icu4x")]
 use crate::runtime::BuiltinHost;
 use crate::runtime::schema;
-use crate::runtime::{Catalog, Formatter, HostFn, NoopHost, Value};
+use crate::runtime::{Catalog, Formatter, FunctionOptions, HostFn, NoopHost, Value};
 use alloc::rc::Rc;
 use core::cell::Cell;
 
@@ -39,7 +39,9 @@ fn expect_errors(report: CompileReport) -> Vec<BuildError> {
 }
 
 fn passthrough_host() -> impl crate::runtime::Host<CatalogIndex = ()> {
-    HostFn(|_, args: &[Value], _: &[(u32, Value)]| Ok(args.first().cloned().unwrap_or(Value::Null)))
+    HostFn(|_, args: &[Value], _: FunctionOptions<'_>| {
+        Ok(args.first().cloned().unwrap_or(Value::Null))
+    })
 }
 
 fn arg_id(catalog: &Catalog, name: &str) -> u32 {
@@ -2478,6 +2480,63 @@ fn local_literal_option_values_are_substituted_as_semantic_text() {
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     assert!(catalog.string_id("fast path").is_some());
     assert!(catalog.string_id("|fast path|").is_none());
+}
+
+#[test]
+fn custom_host_observes_local_literal_option_provenance() {
+    let bytes =
+        compile_str(".local $mode = {|fast path|} {{Value: { $name :custom:format mode=$mode }}}")
+            .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mode_id = catalog.string_id("mode").expect("mode id");
+    let fast_id = catalog.string_id("fast path").expect("fast path id");
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(move |_, _, opts| {
+            assert_eq!(opts.get(mode_id), Some(&Value::StrRef(fast_id)));
+            assert!(opts.was_dynamic(mode_id));
+            assert!(!opts.was_unresolved(mode_id));
+            Ok(Value::Str("ok".to_string()))
+        }),
+    )
+    .expect("formatter");
+    let args = vec![arg(&catalog, "name", Value::Str("name".to_string()))];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "Value: ok"
+    );
+}
+
+#[test]
+fn custom_host_observes_omitted_missing_option_without_diagnostics() {
+    let bytes =
+        compile_str(".local $bad = {$missing} {{Value: { $name :custom:format mode=$bad }}}")
+            .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mode_id = catalog.string_id("mode").expect("mode id");
+    let calls = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&calls);
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(move |_, _, opts: FunctionOptions<'_>| {
+            observed.set(observed.get() + 1);
+            assert!(opts.is_empty());
+            assert!(opts.was_dynamic(mode_id));
+            assert!(opts.was_unresolved(mode_id));
+            Ok(Value::Str("ok".to_string()))
+        }),
+    )
+    .expect("formatter");
+    let args = vec![arg(&catalog, "name", Value::Str("name".to_string()))];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "Value: ok"
+    );
+    assert_eq!(calls.get(), 1);
 }
 
 #[test]

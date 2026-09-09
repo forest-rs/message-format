@@ -31,6 +31,93 @@ pub struct MessageHandle {
     pub(crate) entry_pc: u32,
 }
 
+/// Resolved function options. Fallback-valued options are retained privately
+/// for provenance but are omitted from [`Self::iter`] and [`Self::get`].
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionOptions<'a> {
+    raw: &'a [(u32, Value)],
+}
+
+impl<'a> FunctionOptions<'a> {
+    /// Construct an option view from variable-valued runtime pairs.
+    ///
+    /// Every supplied key is dynamic, including keys whose values are
+    /// fallbacks. Literal options are stored separately in the catalog's
+    /// function entry.
+    #[must_use]
+    pub fn new(raw: &'a [(u32, Value)]) -> Self {
+        Self { raw }
+    }
+
+    /// Iterate over resolved, non-fallback options.
+    pub fn iter(self) -> FunctionOptionsIter<'a> {
+        FunctionOptionsIter {
+            inner: self.raw.iter(),
+        }
+    }
+
+    /// Whether the view contains no resolved option values.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    /// Number of resolved, non-fallback options.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.iter().count()
+    }
+
+    /// Return a resolved option by key.
+    #[must_use]
+    pub fn get(self, key: u32) -> Option<&'a Value> {
+        self.iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(value))
+    }
+
+    /// Whether this call supplied a runtime option with `key`.
+    #[must_use]
+    pub fn was_dynamic(self, key: u32) -> bool {
+        self.raw.iter().any(|(candidate, _)| *candidate == key)
+    }
+
+    /// Whether the runtime option with `key` resolved to a fallback.
+    #[must_use]
+    pub fn was_unresolved(self, key: u32) -> bool {
+        self.raw
+            .iter()
+            .any(|(candidate, value)| *candidate == key && matches!(value, Value::Fallback(_)))
+    }
+}
+
+/// Iterator over resolved function options.
+#[derive(Debug)]
+pub struct FunctionOptionsIter<'a> {
+    inner: core::slice::Iter<'a, (u32, Value)>,
+}
+
+impl<'a> Iterator for FunctionOptionsIter<'a> {
+    type Item = (u32, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for (key, value) in self.inner.by_ref() {
+            if !matches!(value, Value::Fallback(_)) {
+                return Some((*key, value));
+            }
+        }
+        None
+    }
+}
+
+impl<'a> IntoIterator for FunctionOptions<'a> {
+    type Item = (u32, &'a Value);
+    type IntoIter = FunctionOptionsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl MessageHandle {
     /// Resolve a message id directly from a catalog.
     pub fn from_catalog(catalog: &Catalog, message_id: &str) -> Result<Self, FormatError> {
@@ -66,7 +153,7 @@ pub trait Host {
         index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError>;
 
@@ -84,7 +171,7 @@ pub trait Host {
         index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         self.call(catalog, index, fn_id, args, opts, on_error)
@@ -117,7 +204,7 @@ impl<H: Host> Host for Box<H> {
         index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         H::call(self, catalog, index, fn_id, args, opts, on_error)
@@ -129,7 +216,7 @@ impl<H: Host> Host for Box<H> {
         index: &Self::CatalogIndex,
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         H::call_select(self, catalog, index, fn_id, args, opts, on_error)
@@ -162,7 +249,7 @@ impl Host for NoopHost {
         _index: &(),
         fn_id: u16,
         _args: &[Value],
-        _opts: &[(u32, Value)],
+        _opts: FunctionOptions<'_>,
         _on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         Err(HostCallError::UnknownFunction { fn_id })
@@ -175,11 +262,11 @@ impl Host for NoopHost {
 #[expect(missing_debug_implementations, reason = "Can't Debug an FnMut")]
 pub struct HostFn<F>(pub F)
 where
-    F: FnMut(u16, &[Value], &[(u32, Value)]) -> Result<Value, HostCallError>;
+    F: FnMut(u16, &[Value], FunctionOptions<'_>) -> Result<Value, HostCallError>;
 
 impl<F> Host for HostFn<F>
 where
-    F: FnMut(u16, &[Value], &[(u32, Value)]) -> Result<Value, HostCallError>,
+    F: FnMut(u16, &[Value], FunctionOptions<'_>) -> Result<Value, HostCallError>,
 {
     type CatalogIndex = ();
 
@@ -193,7 +280,7 @@ where
         _index: &(),
         fn_id: u16,
         args: &[Value],
-        opts: &[(u32, Value)],
+        opts: FunctionOptions<'_>,
         _on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         (self.0)(fn_id, args, opts)
@@ -303,6 +390,7 @@ enum ExprStatePendingErrors {
 struct ExprState {
     fallback_id: Option<u32>,
     pending_errors: ExprStatePendingErrors,
+    pending_option_errors: ExprStatePendingErrors,
 }
 
 impl<'a> SelectorValue<'a> {
@@ -389,6 +477,10 @@ impl ExprState {
                 Some(_) => ExprStatePendingErrors::All(Vec::new()),
                 None => ExprStatePendingErrors::Minimal { any: false },
             },
+            pending_option_errors: match diagnostics {
+                Some(_) => ExprStatePendingErrors::All(Vec::new()),
+                None => ExprStatePendingErrors::Minimal { any: false },
+            },
         }
     }
 
@@ -396,6 +488,23 @@ impl ExprState {
         match &mut self.pending_errors {
             ExprStatePendingErrors::Minimal { any } => *any = true,
             ExprStatePendingErrors::All(errors) => errors.push(error),
+        }
+    }
+
+    fn record_option_error(&mut self, error: FormatError) {
+        match &mut self.pending_option_errors {
+            ExprStatePendingErrors::Minimal { any } => *any = true,
+            ExprStatePendingErrors::All(errors) => errors.push(error),
+        }
+    }
+
+    fn take_option_errors(&mut self) -> Option<Vec<FormatError>> {
+        match &mut self.pending_option_errors {
+            ExprStatePendingErrors::Minimal { any } => {
+                *any = false;
+                None
+            }
+            ExprStatePendingErrors::All(errors) => Some(core::mem::take(errors)),
         }
     }
 
@@ -442,6 +551,10 @@ impl ExprState {
             ExprStatePendingErrors::Minimal { any } => {
                 *any = false;
             }
+            ExprStatePendingErrors::All(errors) => errors.clear(),
+        }
+        match &mut self.pending_option_errors {
+            ExprStatePendingErrors::Minimal { any } => *any = false,
             ExprStatePendingErrors::All(errors) => errors.clear(),
         }
     }
@@ -536,6 +649,12 @@ where
             Opcode::LoadArg => {
                 let id = read_u32(code, base + 1)?;
                 let value = load_arg_value(args, catalog, id, &mut expr_state);
+                stack.push(value);
+            }
+            Opcode::LoadOptionArg => {
+                let id = read_u32(code, base + 1)?;
+                let fallback_id = read_u32(code, base + 5)?;
+                let value = load_option_arg_value(args, catalog, id, fallback_id, &mut expr_state)?;
                 stack.push(value);
             }
             Opcode::StoreLocal => {
@@ -807,6 +926,23 @@ fn load_arg_value(
     }
 }
 
+fn load_option_arg_value(
+    args: &dyn Args,
+    catalog: &Catalog,
+    key_id: StrId,
+    fallback_id: StrId,
+    expr_state: &mut ExprState,
+) -> Result<Value, FormatError> {
+    if let Some(value) = args.get_ref(key_id) {
+        return Ok(value.clone());
+    }
+    expr_state.record_option_error(FormatError::MissingArg(format_id(catalog, key_id)));
+    catalog
+        .string(fallback_id)
+        .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
+    Ok(Value::Fallback(fallback_id))
+}
+
 fn decode_call_operands(
     stack: &mut Vec<Value>,
     catalog: &Catalog,
@@ -953,6 +1089,10 @@ fn handle_call_instruction<H: Host>(
             .first()
             .is_some_and(|value| matches!(value, Value::Fallback(_)))
     {
+        // Option resolution is not reached when operand resolution fails.
+        // Discard deferred option diagnostics so they cannot leak into a
+        // later expression.
+        let _ = expr_state.take_option_errors();
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             let mut pending_errors = pending_errors.into_iter();
             if opcode == Opcode::CallSelect {
@@ -971,6 +1111,20 @@ fn handle_call_instruction<H: Host>(
         return Ok(());
     }
 
+    if let Some(option_errors) = expr_state.take_option_errors() {
+        for error in option_errors {
+            record_diagnostic(diagnostics, error);
+        }
+    }
+    for (_, value) in call_options {
+        if matches!(value, Value::Fallback(_)) {
+            record_diagnostic(
+                diagnostics,
+                FormatError::Function(MessageFunctionError::BadOption),
+            );
+        }
+    }
+
     let mut on_error = |error| record_diagnostic(diagnostics, FormatError::Function(error));
     let call_result = if opcode == Opcode::CallSelect {
         host.call_select(
@@ -978,7 +1132,7 @@ fn handle_call_instruction<H: Host>(
             index,
             fn_id,
             call_args,
-            call_options,
+            FunctionOptions::new(call_options),
             &mut on_error,
         )
     } else {
@@ -987,7 +1141,7 @@ fn handle_call_instruction<H: Host>(
             index,
             fn_id,
             call_args,
-            call_options,
+            FunctionOptions::new(call_options),
             &mut on_error,
         )
     };
@@ -1603,6 +1757,26 @@ mod tests {
         catalog.string_id(name).expect("arg id")
     }
 
+    #[test]
+    fn function_options_filter_values_but_preserve_provenance() {
+        let raw = vec![(1, Value::Fallback(2)), (3, Value::Int(4))];
+        let options = FunctionOptions::new(&raw);
+        assert!(!options.is_empty());
+        assert_eq!(options.len(), 1);
+        assert_eq!(options.get(1), None);
+        assert_eq!(options.get(3), Some(&Value::Int(4)));
+        assert!(options.was_dynamic(1));
+        assert!(options.was_unresolved(1));
+        assert!(options.was_dynamic(3));
+
+        let all_fallback = FunctionOptions::new(&[(1, Value::Fallback(2))]);
+        assert!(all_fallback.is_empty());
+        assert_eq!(all_fallback.len(), 0);
+        assert_eq!(all_fallback.get(1), None);
+        assert!(all_fallback.was_dynamic(1));
+        assert!(all_fallback.was_unresolved(1));
+    }
+
     trait FormatterTestExt<H: Host> {
         fn format_by_id_for_test(
             &mut self,
@@ -2052,7 +2226,7 @@ mod tests {
                 _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
-                _opts: &[(u32, Value)],
+                _opts: FunctionOptions<'_>,
                 _on_error: &mut dyn FnMut(MessageFunctionError),
             ) -> Result<Value, HostCallError> {
                 panic!("call_select opcode must not dispatch to call()")
@@ -2064,7 +2238,7 @@ mod tests {
                 _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
-                _opts: &[(u32, Value)],
+                _opts: FunctionOptions<'_>,
                 _on_error: &mut dyn FnMut(MessageFunctionError),
             ) -> Result<Value, HostCallError> {
                 Err(HostCallError::Function(MessageFunctionError::BadOperand))
@@ -2362,7 +2536,7 @@ mod tests {
                 _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
-                _opts: &[(u32, Value)],
+                _opts: FunctionOptions<'_>,
                 _on_error: &mut dyn FnMut(MessageFunctionError),
             ) -> Result<Value, HostCallError> {
                 panic!("call_select opcode must not dispatch to call()")
@@ -2374,7 +2548,7 @@ mod tests {
                 _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
-                _opts: &[(u32, Value)],
+                _opts: FunctionOptions<'_>,
                 _on_error: &mut dyn FnMut(MessageFunctionError),
             ) -> Result<Value, HostCallError> {
                 // Return StrRef pointing to "yes" (str_id=2)
@@ -2434,7 +2608,7 @@ mod tests {
                 _index: &(),
                 _fn_id: u16,
                 _args: &[Value],
-                _opts: &[(u32, Value)],
+                _opts: FunctionOptions<'_>,
                 _on_error: &mut dyn FnMut(MessageFunctionError),
             ) -> Result<Value, HostCallError> {
                 unreachable!("plain interpolation should only use format_default")
