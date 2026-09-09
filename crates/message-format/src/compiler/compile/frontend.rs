@@ -13,6 +13,7 @@ mod raw_match;
 mod rewrite;
 
 use document::parse_single_message;
+pub(crate) use matching::{BuiltinNumericSelectorMode, builtin_numeric_selector_mode};
 use pattern::FunctionOriginContext;
 
 #[cfg(test)]

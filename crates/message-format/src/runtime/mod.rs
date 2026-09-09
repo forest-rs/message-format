@@ -151,8 +151,7 @@
 //! - [`FormatError`] is returned while resolving/formatting messages.
 //! - [`HostCallError`] constrains host callbacks to unknown-function failures or
 //!   typed [`MessageFunctionError`] values.
-//! - [`Host::call`] and
-//!   [`Host::call_select`] can report a
+//! - [`Host::call`], [`Host::call_select`], and [`Host::project_select`] can report a
 //!   recoverable function diagnostic while still returning a value.
 //! - [`MessageFunctionError`] carries spec-shaped function error categories, with
 //!   structured sub-enums for unsupported operations and implementation-defined

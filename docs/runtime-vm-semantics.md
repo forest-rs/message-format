@@ -48,11 +48,12 @@ error: `.local $x = {$missing :number} {{hello}}` renders `hello` and reports
 
 The compiler emits `CheckSelector` once for each source selector, before variant
 dispatch. Each check reports `BadSelector` if the local is a fallback or an
-unselectable resolved number. `SelectLocal` then compares that local directly,
-without cloning it or repeating the diagnostic when generated branches retry
-exact and plural candidates. Both instructions require a definitely initialized
-slot. Repeated default subtrees share a target; jumps to an ancestor default
-close each intervening select scope with `SelectEnd`.
+unselectable resolved number. `SelectLocal` compares exact candidates directly.
+When keyword candidates require a category from that same stored number,
+`ProjectSelect` invokes the host's stored-value projection path without
+reapplying options or repeating the diagnostic. These instructions require a
+definitely initialized slot. Repeated default subtrees share a target; jumps to
+an ancestor default close each intervening select scope with `SelectEnd`.
 
 Failed expressions carry `Value::Fallback` through nested calls and declarations.
 Failure state is attached to the value rather than to the following instruction.
@@ -75,6 +76,11 @@ should accept `FunctionOptions` and replace slice iteration with
 catalog options from runtime options should use `was_dynamic`.
 
 `Host::call_select` has the same signature as `call` and is invoked by `OP_CALL_SELECT` when a function result feeds into selection dispatch. The default implementation delegates to `call`. Hosts may override it to return `Value::StrRef` for known categories (e.g. plural), avoiding allocation. When the selector is a `StrRef`, `CASE_STR` compares pool IDs directly before falling back to string comparison.
+
+`Host::project_select` receives one already resolved declaration value. The
+default delegates to `call_select` with no dynamic options. Hosts that retain
+selection metadata in their resolved values can override it to compute a
+category without decoding or reapplying the declaration's options.
 
 `Host::format_default` may override plain interpolation rendering for values.
 

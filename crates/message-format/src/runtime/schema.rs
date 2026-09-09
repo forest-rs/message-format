@@ -93,6 +93,8 @@ pub enum Opcode {
     ExprFallback = 0x41,
     /// Host function call for selection (zero-allocation fast path).
     CallSelect = 0x42,
+    /// Project a prechecked stored value through its selection function.
+    ProjectSelect = 0x43,
     /// Markup open tag with name and options.
     MarkupOpen = 0x50,
     /// Markup close tag with name and options.
@@ -124,6 +126,7 @@ impl Opcode {
             Self::CallFunc => 5,
             Self::ExprFallback => 5,
             Self::CallSelect => 5,
+            Self::ProjectSelect => 3,
             Self::MarkupOpen => 6,
             Self::MarkupClose => 6,
         }
@@ -158,6 +161,7 @@ impl TryFrom<u8> for Opcode {
             0x40 => Ok(Self::CallFunc),
             0x41 => Ok(Self::ExprFallback),
             0x42 => Ok(Self::CallSelect),
+            0x43 => Ok(Self::ProjectSelect),
             0x50 => Ok(Self::MarkupOpen),
             0x51 => Ok(Self::MarkupClose),
             other => Err(other),
@@ -521,6 +525,12 @@ impl TestOps {
         self.code.extend_from_slice(&fn_id.to_le_bytes());
         self.code.push(arg_count);
         self.code.push(optc);
+        self
+    }
+
+    pub fn project_select(mut self, fn_id: u16) -> Self {
+        self.code.push(Opcode::ProjectSelect as u8);
+        self.code.extend_from_slice(&fn_id.to_le_bytes());
         self
     }
 

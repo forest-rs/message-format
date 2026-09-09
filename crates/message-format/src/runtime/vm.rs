@@ -10,20 +10,19 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+#[cfg(feature = "icu4x")]
+use core::fmt;
 use core::str;
 
+pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 #[cfg(feature = "icu4x")]
-use crate::runtime::value::{NumberSelection, ResolvedNumber};
+use crate::runtime::value::{NumberSelection, NumberValue, ResolvedNumber};
 use crate::runtime::{
     catalog::{Catalog, read_i32},
     error::{FormatError, HostCallError, MessageFunctionError, Trap},
     schema::decode_opcode_and_next_pc,
     value::{Args, StrId, Value},
 };
-#[cfg(feature = "icu4x")]
-use icu_plurals::PluralCategory;
-
-pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 
 fn store_value(values: &mut Vec<Value>, value: Value) -> usize {
     let id = values.len();
@@ -189,6 +188,30 @@ pub trait Host {
         self.call(catalog, index, fn_id, args, opts, on_error)
     }
 
+    /// Project an already resolved and prechecked declaration value for
+    /// keyword selection.
+    ///
+    /// The default delegates to [`Host::call_select`] with one argument and
+    /// no dynamic options. Hosts may override this to bypass ordinary call
+    /// setup when the value retains everything needed for selection.
+    fn project_select(
+        &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+        value: &Value,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        self.call_select(
+            catalog,
+            index,
+            fn_id,
+            core::slice::from_ref(value),
+            FunctionOptions::new(&[]),
+            on_error,
+        )
+    }
+
     /// Optionally format a value for default interpolation.
     ///
     /// Return `Some(String)` to override how this value is rendered by `{ $var }`.
@@ -232,6 +255,17 @@ impl<H: Host> Host for Box<H> {
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         H::call_select(self, catalog, index, fn_id, args, opts, on_error)
+    }
+
+    fn project_select(
+        &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+        value: &Value,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        H::project_select(self, catalog, index, fn_id, value, on_error)
     }
 
     fn format_default(
@@ -373,6 +407,7 @@ enum SelectorValue<'a> {
         view: ValueView<'a>,
         str_id: Option<u32>,
     },
+    ExactText(&'a str),
     /// Message-local selector resolved lazily for each case comparison.
     Local(usize),
     InvalidBorrowed,
@@ -383,8 +418,6 @@ enum SelectorValue<'a> {
 enum CaseMatch {
     No,
     Exact,
-    #[cfg(feature = "icu4x")]
-    Category,
 }
 
 enum ExprStatePendingErrors {
@@ -408,6 +441,7 @@ struct ExprState {
 impl<'a> SelectorValue<'a> {
     fn from_borrowed(value: &'a Value, catalog: &'a Catalog) -> Self {
         match value {
+            Value::Str(text) => Self::ExactText(text),
             Value::StrRef(id) => {
                 catalog
                     .pool_string_opt(*id)
@@ -469,6 +503,13 @@ impl<'a> SelectorValue<'a> {
             .map_err(|_| FormatError::Trap(Trap::InvalidCaseStringId))?;
         Ok(match self {
             Self::Borrowed { view, .. } => view.string_case_match(case),
+            Self::ExactText(text) => {
+                if *text == case {
+                    CaseMatch::Exact
+                } else {
+                    CaseMatch::No
+                }
+            }
             Self::Local(_) => unreachable!("local selectors are handled above"),
             Self::InvalidBorrowed => CaseMatch::No,
             Self::Stored(value) => value_case_match(stored_value(values, *value)?, case, catalog),
@@ -478,6 +519,7 @@ impl<'a> SelectorValue<'a> {
     fn fast_str_id(&self, values: &[Value]) -> Option<u32> {
         match self {
             Self::Borrowed { str_id, .. } => *str_id,
+            Self::ExactText(_) => None,
             Self::Local(_) => None,
             Self::InvalidBorrowed => None,
             Self::Stored(value_id) => match values.get(*value_id) {
@@ -632,7 +674,6 @@ where
     locals.clear();
     let mut selector: Option<SelectorValue<'_>> = None;
     let mut expr_state = ExprState::new(&diagnostics);
-    let mut deferred_case = None;
     let mut remaining_fuel = fuel;
 
     loop {
@@ -714,7 +755,6 @@ where
                     index,
                     values,
                     stack,
-                    locals,
                     catalog,
                     args,
                     &mut diagnostics,
@@ -741,7 +781,6 @@ where
                     next_pc,
                     base,
                     code,
-                    &mut deferred_case,
                 )? {
                     pc = jump_pc;
                     continue;
@@ -764,6 +803,18 @@ where
                     call_options,
                     &mut diagnostics,
                     &mut expr_state,
+                )?;
+            }
+            Opcode::ProjectSelect => {
+                handle_project_select(
+                    host,
+                    index,
+                    values,
+                    stack,
+                    catalog,
+                    base,
+                    code,
+                    &mut diagnostics,
                 )?;
             }
             Opcode::MarkupOpen | Opcode::MarkupClose => {
@@ -815,7 +866,6 @@ fn handle_output_instruction<H: Host, S>(
     index: &H::CatalogIndex,
     values: &[Value],
     stack: &mut Vec<usize>,
-    _locals: &[usize],
     catalog: &Catalog,
     args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
@@ -867,17 +917,14 @@ fn handle_select_instruction<'a>(
     next_pc: u32,
     base: usize,
     code: &[u8],
-    deferred_case: &mut Option<u32>,
 ) -> Result<Option<u32>, FormatError> {
     match opcode {
         Opcode::SelectArg => {
-            *deferred_case = None;
             let key_id = read_u32(code, base + 1)?;
             *selector = Some(load_selector_value(args, catalog, key_id, diagnostics));
             Ok(None)
         }
         Opcode::SelectLocal => {
-            *deferred_case = None;
             let slot = local_slot(code, base)?;
             if locals.get(slot).is_none() {
                 return Err(FormatError::Trap(Trap::InvalidLocalSlot));
@@ -886,7 +933,6 @@ fn handle_select_instruction<'a>(
             Ok(None)
         }
         Opcode::SelectBegin => {
-            *deferred_case = None;
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
             check_selector_value(stored_value(values, value)?, diagnostics);
             *selector = Some(SelectorValue::Stored(value));
@@ -899,29 +945,17 @@ fn handle_select_instruction<'a>(
             let case_str_id = read_u32(code, base + 1)?;
             match selector.case_match(values, locals, case_str_id, catalog)? {
                 CaseMatch::Exact => {
-                    *deferred_case = None;
                     let rel = read_i32(code, base + 5)?;
                     apply_rel_jump(pc, next_pc, rel).map(Some)
-                }
-                #[cfg(feature = "icu4x")]
-                CaseMatch::Category => {
-                    let rel = read_i32(code, base + 5)?;
-                    *deferred_case = Some(apply_rel_jump(pc, next_pc, rel)?);
-                    Ok(None)
                 }
                 CaseMatch::No => Ok(None),
             }
         }
         Opcode::CaseDefault => {
             let rel = read_i32(code, base + 1)?;
-            if let Some(jump_pc) = deferred_case.take() {
-                Ok(Some(jump_pc))
-            } else {
-                apply_rel_jump(pc, next_pc, rel).map(Some)
-            }
+            apply_rel_jump(pc, next_pc, rel).map(Some)
         }
         Opcode::SelectEnd => {
-            *deferred_case = None;
             *selector = None;
             Ok(None)
         }
@@ -938,10 +972,8 @@ fn load_selector_value<'a>(
     if let Some(value) = args.get_ref(key_id) {
         SelectorValue::from_borrowed(value, catalog)
     } else {
-        record_bad_selector(
-            diagnostics,
-            Some(FormatError::MissingArg(format_id(catalog, key_id))),
-        );
+        record_missing_arg(diagnostics, catalog, key_id);
+        record_bad_selector(diagnostics, None);
         SelectorValue::InvalidBorrowed
     }
 }
@@ -1093,6 +1125,55 @@ fn handle_call_opcode<H: Host>(
     Ok(())
 }
 
+fn handle_project_select<H: Host>(
+    host: &mut H,
+    index: &H::CatalogIndex,
+    values: &mut Vec<Value>,
+    stack: &mut Vec<usize>,
+    catalog: &Catalog,
+    base: usize,
+    code: &[u8],
+    diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
+) -> Result<(), FormatError> {
+    let fn_id = read_u16(code, base + 1)?;
+    let value_id = stack.pop().ok_or(FormatError::StackUnderflow)?;
+    let value = stored_value(values, value_id)?;
+    let prechecked_unselectable = {
+        #[cfg(feature = "icu4x")]
+        {
+            matches!(value, Value::Fallback(_))
+                || matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid)
+        }
+        #[cfg(not(feature = "icu4x"))]
+        {
+            matches!(value, Value::Fallback(_))
+        }
+    };
+    if prechecked_unselectable {
+        stack.push(store_value(values, Value::Null));
+        return Ok(());
+    }
+    let mut on_error = |error| record_diagnostic(diagnostics, FormatError::Function(error));
+    let result = match host.project_select(catalog, index, fn_id, value, &mut on_error) {
+        Ok(result) => {
+            if matches!(result, Value::Null) {
+                record_bad_selector(diagnostics, None);
+            }
+            result
+        }
+        Err(error) => {
+            let error = match error {
+                HostCallError::UnknownFunction { fn_id } => FormatError::UnknownFunction { fn_id },
+                HostCallError::Function(error) => FormatError::Function(error),
+            };
+            record_diagnostic(diagnostics, into_bad_selector(error));
+            Value::Null
+        }
+    };
+    stack.push(store_value(values, result));
+    Ok(())
+}
+
 fn handle_markup_instruction<S>(
     sink: &mut S,
     values: &[Value],
@@ -1143,22 +1224,21 @@ fn handle_call_instruction<H: Host>(
     // A fallback can be propagated from a previously resolved local without
     // leaving a pending error in this expression. Such an operand still
     // short-circuits function resolution per MF2 formatting §16.1.
-    if expr_state.should_skip_call()
-        || call_args
-            .first()
-            .is_some_and(|value| matches!(value, Value::Fallback(_)))
-    {
+    let has_pending_operand_error = expr_state.should_skip_call();
+    let has_propagated_fallback = call_args
+        .first()
+        .is_some_and(|value| matches!(value, Value::Fallback(_)));
+    if has_pending_operand_error || has_propagated_fallback {
         // Option resolution is not reached when operand resolution fails.
         // Discard deferred option diagnostics so they cannot leak into a
         // later expression.
         let _ = expr_state.take_option_errors();
         if let Some(pending_errors) = expr_state.take_pending_errors() {
-            let mut pending_errors = pending_errors.into_iter();
-            if opcode == Opcode::CallSelect {
-                record_bad_selector(diagnostics, pending_errors.next());
-            }
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
+            }
+            if opcode == Opcode::CallSelect && has_pending_operand_error {
+                record_bad_selector(diagnostics, None);
             }
         }
         if opcode == Opcode::CallSelect {
@@ -1378,10 +1458,14 @@ impl<'a> ValueView<'a> {
             Self::Fallback(v) => sink.expression(v),
             Self::ResolvedSelect(v) => sink.expression(v),
             #[cfg(feature = "icu4x")]
-            Self::Number(v) => {
-                let rendered = v.text();
-                sink.expression(&rendered);
-            }
+            Self::Number(v) => match &v.value {
+                NumberValue::Integer(value) => {
+                    let rendered = format_i64(*value);
+                    sink.expression(rendered.as_str());
+                }
+                NumberValue::Decimal(value) => sink.expression(&value.to_string()),
+                NumberValue::NonFinite(value) => sink.expression(&value.to_string()),
+            },
         }
     }
 
@@ -1456,32 +1540,10 @@ impl<'a> ValueView<'a> {
             #[cfg(feature = "icu4x")]
             Self::Number(v) => match v.selection {
                 NumberSelection::Invalid => CaseMatch::No,
-                NumberSelection::Plural | NumberSelection::Ordinal => {
-                    if string_value_matches_case(&v.text(), case) {
-                        CaseMatch::Exact
-                    } else if v.selection_category.is_some_and(|category| {
-                        matches!(
-                            (category, case),
-                            (PluralCategory::Zero, "zero")
-                                | (PluralCategory::One, "one")
-                                | (PluralCategory::Two, "two")
-                                | (PluralCategory::Few, "few")
-                                | (PluralCategory::Many, "many")
-                                | (PluralCategory::Other, "other")
-                        )
-                    }) {
-                        CaseMatch::Category
-                    } else {
-                        CaseMatch::No
-                    }
-                }
-                NumberSelection::Exact | NumberSelection::None => {
-                    if string_value_matches_case(&v.text(), case) {
-                        CaseMatch::Exact
-                    } else {
-                        CaseMatch::No
-                    }
-                }
+                NumberSelection::Plural
+                | NumberSelection::Ordinal
+                | NumberSelection::Exact
+                | NumberSelection::None => resolved_number_matches_case(v, case),
             },
         }
     }
@@ -1518,9 +1580,55 @@ impl<'a> ValueView<'a> {
             Self::Fallback(v) => v.is_empty(),
             Self::ResolvedSelect(v) => v == "0",
             #[cfg(feature = "icu4x")]
-            Self::Number(v) => v.text() == "0",
+            Self::Number(v) => match &v.value {
+                NumberValue::Integer(value) => *value == 0,
+                NumberValue::Decimal(value) => value.is_zero(),
+                NumberValue::NonFinite(value) => *value == 0.0,
+            },
         }
     }
+}
+
+#[cfg(feature = "icu4x")]
+fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatch {
+    let matches = match &number.value {
+        NumberValue::Integer(value) => int_matches_case(*value, case),
+        NumberValue::Decimal(value) => display_matches_case(value.as_ref(), case),
+        NumberValue::NonFinite(value) => display_matches_case(value, case),
+    };
+    if matches {
+        CaseMatch::Exact
+    } else {
+        CaseMatch::No
+    }
+}
+
+#[cfg(feature = "icu4x")]
+fn display_matches_case(value: &impl fmt::Display, case: &str) -> bool {
+    struct CompareWriter<'a> {
+        expected: &'a [u8],
+        position: usize,
+        equal: bool,
+    }
+
+    impl fmt::Write for CompareWriter<'_> {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            let end = self.position.saturating_add(value.len());
+            if self.expected.get(self.position..end) != Some(value.as_bytes()) {
+                self.equal = false;
+            }
+            self.position = end;
+            Ok(())
+        }
+    }
+
+    let mut writer = CompareWriter {
+        expected: case.as_bytes(),
+        position: 0,
+        equal: true,
+    };
+    let _ = fmt::write(&mut writer, format_args!("{value}"));
+    writer.equal && writer.position == writer.expected.len()
 }
 
 fn emit_value_ref<S: FormatSink + ?Sized>(sink: &mut S, catalog: &Catalog, value: &Value) {
@@ -1794,6 +1902,80 @@ mod tests {
     #[cfg(feature = "icu4x")]
     use crate::runtime::value::{NumberFormatOptions, NumberSelection, NumberValue};
 
+    #[test]
+    fn invalid_execution_value_indices_have_their_own_trap() {
+        assert_eq!(
+            stored_value(&[], 0).expect_err("empty arena must reject an index"),
+            FormatError::Trap(Trap::InvalidValueIndex)
+        );
+    }
+
+    #[test]
+    fn project_select_uses_the_prechecked_host_path() {
+        #[derive(Default)]
+        struct ProjectionHost;
+
+        impl Host for ProjectionHost {
+            type CatalogIndex = ();
+
+            fn index(&mut self, _catalog: &Catalog) -> Result<Self::CatalogIndex, FormatError> {
+                Ok(())
+            }
+
+            fn call(
+                &mut self,
+                _catalog: &Catalog,
+                _index: &Self::CatalogIndex,
+                _fn_id: u16,
+                _args: &[Value],
+                _opts: FunctionOptions<'_>,
+                _on_error: &mut dyn FnMut(MessageFunctionError),
+            ) -> Result<Value, HostCallError> {
+                panic!("stored projection must not use the ordinary call path")
+            }
+
+            fn project_select(
+                &mut self,
+                _catalog: &Catalog,
+                _index: &Self::CatalogIndex,
+                _fn_id: u16,
+                value: &Value,
+                _on_error: &mut dyn FnMut(MessageFunctionError),
+            ) -> Result<Value, HostCallError> {
+                assert_eq!(value, &Value::Int(1));
+                Ok(Value::StrRef(2))
+            }
+        }
+
+        let code = TestOps::new()
+            .load_arg(1)
+            .project_select(0)
+            .select_begin()
+            .case_str(2, "hit")
+            .case_default("other")
+            .label("hit")
+            .out_slice(0, 3)
+            .jmp("end")
+            .label("other")
+            .out_slice(3, 5)
+            .label("end")
+            .select_end()
+            .halt()
+            .build();
+        let catalog = catalog_for_test(&["main", "value", "one"], "hitother", &code);
+        let mut formatter = Formatter::new(&catalog, ProjectionHost).expect("host");
+        let mut sink = String::new();
+        let errors = formatter
+            .format_to_for_test_by_id(
+                "main",
+                &[(arg_id(&catalog, "value"), Value::Int(1))],
+                &mut sink,
+            )
+            .expect("formatted");
+        assert_eq!(sink, "hit");
+        assert!(errors.is_empty());
+    }
+
     fn catalog_for_test(strings: &[&str], literals: &str, code: &[u8]) -> Catalog {
         let bytes = if let Some(func_count) = max_function_id(code).map(|id| usize::from(id) + 1) {
             let funcs = (0..func_count)
@@ -1835,7 +2017,10 @@ mod tests {
         let mut max_fn_id = None;
         while (pc as usize) < code.len() {
             let decoded = decode(code, pc).expect("well-formed test bytecode");
-            if decoded.opcode == Opcode::CallFunc || decoded.opcode == Opcode::CallSelect {
+            if matches!(
+                decoded.opcode,
+                Opcode::CallFunc | Opcode::CallSelect | Opcode::ProjectSelect
+            ) {
                 let fn_id = u16::from_le_bytes([code[pc as usize + 1], code[pc as usize + 2]]);
                 max_fn_id = Some(max_fn_id.map_or(fn_id, |current: u16| current.max(fn_id)));
             }
@@ -2226,9 +2411,10 @@ mod tests {
         assert_eq!(sink, "D");
         assert_eq!(
             errors,
-            vec![FormatError::BadSelector {
-                source: Some(Box::new(FormatError::MissingArg("sel".to_string()))),
-            }]
+            vec![
+                FormatError::MissingArg("sel".to_string()),
+                FormatError::BadSelector { source: None },
+            ]
         );
     }
 

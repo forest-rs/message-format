@@ -616,7 +616,7 @@ fn validate_instruction_operands(
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
-        Opcode::CallFunc | Opcode::CallSelect => {
+        Opcode::CallFunc | Opcode::CallSelect | Opcode::ProjectSelect => {
             let fn_id = read_u16(code, base + 1)?;
             if usize::from(fn_id) >= func_count {
                 return Err(CatalogError::InvalidFunctionRef {
@@ -663,6 +663,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
             let pops = arg_count + optc.saturating_mul(2);
             (pops, 1)
         }
+        Opcode::ProjectSelect => (1, 1),
         Opcode::MarkupOpen | Opcode::MarkupClose => {
             let optc = u32::from(code[base + 5]);
             let pops = optc.saturating_mul(2);
@@ -1839,18 +1840,31 @@ mod tests {
 
     #[test]
     fn invalid_function_ref_is_rejected() {
-        let code = TestOps::new().call_func(9, 0, 0).out_val().halt().build();
-        let bytes = build_catalog(
-            &["main"],
-            "",
-            &[MessageEntry {
-                name_str_id: 0,
-                entry_pc: 0,
-            }],
-            &code,
-        );
-        let err = Catalog::from_bytes(&bytes).expect_err("must fail");
-        assert_eq!(err, CatalogError::InvalidFunctionRef { pc: 0, fn_id: 9 });
+        for code in [
+            TestOps::new().call_func(9, 0, 0).out_val().halt().build(),
+            TestOps::new()
+                .push_const(0)
+                .project_select(9)
+                .halt()
+                .build(),
+        ] {
+            let bytes = build_catalog(
+                &["main"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &code,
+            );
+            let err = Catalog::from_bytes(&bytes).expect_err("must fail");
+            let pc = if code[0] == Opcode::CallFunc as u8 {
+                0
+            } else {
+                5
+            };
+            assert_eq!(err, CatalogError::InvalidFunctionRef { pc, fn_id: 9 });
+        }
     }
 
     #[test]

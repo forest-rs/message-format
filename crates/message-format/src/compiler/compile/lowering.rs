@@ -13,6 +13,7 @@ use crate::compiler::semantic::{
     SelectorExpr,
 };
 
+use super::frontend::{BuiltinNumericSelectorMode, builtin_numeric_selector_mode};
 use super::interning::{FunctionCatalogKey, function_catalog_key};
 use super::{
     CompileError, LiteralDeduplication, LiteralStats, escape_fallback_literal,
@@ -354,7 +355,7 @@ fn lower_select<'a>(
     code: &mut Vec<u8>,
     state: &mut LoweringState<'a>,
 ) -> Result<(), CompileError> {
-    emit_selector_start(&select.selector, string_map, func_map, code)?;
+    emit_selector_start(select, string_map, func_map, code)?;
 
     let mut dispatch_patches = Vec::new();
     for (arm_idx, arm) in select.arms.iter().enumerate() {
@@ -420,15 +421,33 @@ fn lower_select<'a>(
 }
 
 fn emit_selector_start(
-    selector: &SelectorExpr,
+    select: &SelectExpr,
     string_map: &BTreeMap<String, u32>,
     func_map: &BTreeMap<FunctionCatalogKey, u16>,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
+    let selector = &select.selector;
     match selector {
         SelectorExpr::Local { slot, .. } => {
             code.push(schema::Opcode::LoadLocal as u8);
             code.extend_from_slice(&slot.to_le_bytes());
+            code.push(schema::Opcode::SelectBegin as u8);
+            Ok(())
+        }
+        SelectorExpr::CheckedLocal {
+            slot,
+            func: Some(func),
+        } if is_stored_numeric_keyword_projection(select) => {
+            let fn_id =
+                *func_map
+                    .get(&function_catalog_key(func))
+                    .ok_or(CompileError::internal(
+                        "missing stored numeric function entry",
+                    ))?;
+            code.push(schema::Opcode::LoadLocal as u8);
+            code.extend_from_slice(&slot.to_le_bytes());
+            code.push(schema::Opcode::ProjectSelect as u8);
+            code.extend_from_slice(&fn_id.to_le_bytes());
             code.push(schema::Opcode::SelectBegin as u8);
             Ok(())
         }
@@ -540,6 +559,18 @@ fn lower_selector(
             Ok(())
         }
     }
+}
+
+fn is_stored_numeric_keyword_projection(select: &SelectExpr) -> bool {
+    !select.arms.is_empty()
+        && matches!(
+            builtin_numeric_selector_mode(&select.selector),
+            Some(BuiltinNumericSelectorMode::Plural | BuiltinNumericSelectorMode::Ordinal)
+        )
+        && select
+            .arms
+            .iter()
+            .all(|arm| crate::common::text::parse_number_literal(&arm.key).is_none())
 }
 
 fn emit_operand(

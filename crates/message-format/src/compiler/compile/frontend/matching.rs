@@ -355,14 +355,14 @@ fn exact_match_candidates(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum BuiltinNumericSelectorMode {
+pub(crate) enum BuiltinNumericSelectorMode {
     Exact,
     Plural,
     Ordinal,
     Dynamic,
 }
 
-pub(super) fn builtin_numeric_selector_mode(
+pub(crate) fn builtin_numeric_selector_mode(
     selector: &SelectorExpr,
 ) -> Option<BuiltinNumericSelectorMode> {
     match selector {
@@ -500,19 +500,38 @@ fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSele
             }
         }
         SelectorExpr::Call { .. } => None,
-        // A stored numeric value already contains both its exact text and
-        // plural/ordinal category. Reuse the one loaded local for both passes;
-        // the nested IR controls whether numeric keys or category keys are
-        // considered, without re-running the function call.
         SelectorExpr::Local {
-            func: Some(func), ..
-        }
-        | SelectorExpr::CheckedLocal {
+            slot,
+            func: Some(func),
+        } => match builtin_numeric_selector_mode_for_func(func)? {
+            BuiltinNumericSelectorMode::Plural => Some(NumericSelectorLoweringPlan {
+                exact_selector: selector.clone(),
+                keyword_selector: clone_numeric_selector_with_select(
+                    Operand::Local(*slot),
+                    func,
+                    "plural",
+                ),
+            }),
+            BuiltinNumericSelectorMode::Ordinal => Some(NumericSelectorLoweringPlan {
+                exact_selector: selector.clone(),
+                keyword_selector: clone_numeric_selector_with_select(
+                    Operand::Local(*slot),
+                    func,
+                    "ordinal",
+                ),
+            }),
+            BuiltinNumericSelectorMode::Exact | BuiltinNumericSelectorMode::Dynamic => None,
+        },
+        SelectorExpr::CheckedLocal {
             func: Some(func), ..
         } => match builtin_numeric_selector_mode_for_func(func)? {
             BuiltinNumericSelectorMode::Plural | BuiltinNumericSelectorMode::Ordinal => {
                 Some(NumericSelectorLoweringPlan {
                     exact_selector: selector.clone(),
+                    // Project the already-resolved local through the selector
+                    // entry point only when category matching is needed. The
+                    // built-in host reads the retained numeric value and does
+                    // not reapply the declaration function.
                     keyword_selector: selector.clone(),
                 })
             }
@@ -544,4 +563,30 @@ fn clone_numeric_selector_with_select(
             .push(FunctionOption::literal("select", select_value));
     }
     SelectorExpr::Call { operand, func }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchecked_numeric_local_keeps_a_real_keyword_selector_call() {
+        let selector = SelectorExpr::Local {
+            slot: 7,
+            func: Some(FunctionSpec::new("number")),
+        };
+        let plan = numeric_selector_lowering_plan(&selector).expect("numeric lowering plan");
+
+        assert_eq!(plan.exact_selector, selector);
+        assert!(matches!(
+            plan.keyword_selector,
+            SelectorExpr::Call {
+                operand: Operand::Local(7),
+                func
+            } if func.options.iter().any(|option| {
+                option.key == "select"
+                    && option.value == FunctionOptionValue::Literal(String::from("plural"))
+            })
+        ));
+    }
 }
