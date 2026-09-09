@@ -221,6 +221,19 @@ fn unused_runtime_alias_does_not_consume_a_slot() {
     );
 }
 
+#[cfg(feature = "icu4x")]
+#[test]
+fn stored_numeric_keyword_projection_reuses_declaration_function_entry() {
+    let source = ".input {$n :number minimumFractionDigits=2} .match $n one {{one}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+
+    assert_eq!(catalog.func_count(), 1);
+    let emitted = opcodes(&catalog);
+    assert!(emitted.contains(&schema::Opcode::ProjectSelect));
+    assert!(!emitted.contains(&schema::Opcode::CallSelect));
+}
+
 #[test]
 fn string_selector_with_options_does_not_lower_to_select_arg() {
     let mut builder = CatalogBuilder::new();

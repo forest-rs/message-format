@@ -226,6 +226,35 @@ fn numeric_local_dynamic_select_reports_both_diagnostics() {
     );
 }
 
+/// A compiler-generated keyword projection must not repeat the selector
+/// diagnostic already emitted for an invalid stored number.
+#[test]
+fn inherited_invalid_numeric_selector_reports_bad_selector_once() {
+    let output = format_output(
+        ".local $x = {1 :number select=plural} .local $y = {$x :number} .match $y one {{one}} * {{other}}",
+        &[],
+    );
+    assert_eq!(output.value, "other");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            function_error(MessageFunctionError::BadOption),
+            FormatError::BadSelector { source: None },
+        ],
+    );
+}
+
+/// Exact numeric selection compares the complete numeric value rather than
+/// truncating a decimal to an integer key.
+#[test]
+fn decimal_does_not_match_truncated_integer_key() {
+    assert_format(
+        ".local $x = {2.7 :number} .match $x 2 {{TWO}} * {{OTHER {$x}}}",
+        &[],
+        "OTHER 2.7",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TR35 §14 — :number selection via select= option
 // ---------------------------------------------------------------------------
@@ -533,6 +562,22 @@ fn missing_local_option_is_recoverable() {
         &output.errors,
         &[
             missing_arg("missing"),
+            function_error(MessageFunctionError::BadOption),
+        ],
+    );
+}
+
+#[test]
+fn numeric_local_selector_does_not_reresolve_options() {
+    let output = format_output(
+        ".input {$digits :string} .input {$n :number minimumFractionDigits=$digits} .match $n one {{one}} * {{other}}",
+        &[("n", Value::Int(1))],
+    );
+    assert_eq!(output.value, "one");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("digits"),
             function_error(MessageFunctionError::BadOption),
         ],
     );
