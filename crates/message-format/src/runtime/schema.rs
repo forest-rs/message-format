@@ -56,6 +56,12 @@ pub enum Opcode {
     PushConst = 0x10,
     /// Load argument by string-pool id.
     LoadArg = 0x11,
+    /// Store the top stack value in a message-local slot.
+    StoreLocal = 0x12,
+    /// Load a cloned value from a message-local slot.
+    LoadLocal = 0x13,
+    /// Validate a message-local selector value without consuming it.
+    CheckSelector = 0x15,
     /// Output pool string by id.
     OutLit = 0x20,
     /// Output literal slice by offset and length.
@@ -68,6 +74,8 @@ pub enum Opcode {
     OutArg = 0x24,
     /// Load one selector argument directly by string-pool id.
     SelectArg = 0x25,
+    /// Select using a previously validated message-local value.
+    SelectLocal = 0x26,
     /// Begin select dispatch.
     SelectBegin = 0x30,
     /// Case compare against string-pool id.
@@ -98,6 +106,7 @@ impl Opcode {
             Self::JmpIfFalse => 5,
             Self::PushConst => 5,
             Self::LoadArg => 5,
+            Self::CheckSelector | Self::StoreLocal | Self::LoadLocal | Self::SelectLocal => 5,
             Self::OutLit => 5,
             Self::OutSlice => 9,
             Self::OutVal => 1,
@@ -127,12 +136,16 @@ impl TryFrom<u8> for Opcode {
             0x02 => Ok(Self::JmpIfFalse),
             0x10 => Ok(Self::PushConst),
             0x11 => Ok(Self::LoadArg),
+            0x15 => Ok(Self::CheckSelector),
+            0x12 => Ok(Self::StoreLocal),
+            0x13 => Ok(Self::LoadLocal),
             0x20 => Ok(Self::OutLit),
             0x21 => Ok(Self::OutSlice),
             0x22 => Ok(Self::OutVal),
             0x23 => Ok(Self::OutExpr),
             0x24 => Ok(Self::OutArg),
             0x25 => Ok(Self::SelectArg),
+            0x26 => Ok(Self::SelectLocal),
             0x30 => Ok(Self::SelectBegin),
             0x31 => Ok(Self::CaseStr),
             0x32 => Ok(Self::CaseDefault),
@@ -354,6 +367,27 @@ impl TestOps {
         self
     }
 
+    /// Store the top stack value in a message-local slot.
+    pub fn store_local(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::StoreLocal as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
+        self
+    }
+
+    /// Load a message-local slot onto the stack.
+    pub fn load_local(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::LoadLocal as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
+        self
+    }
+
+    /// Validate a message-local selector value without consuming it.
+    pub fn check_selector(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::CheckSelector as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
+        self
+    }
+
     pub fn out_lit(mut self, str_id: u32) -> Self {
         self.code.push(Opcode::OutLit as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
@@ -369,6 +403,13 @@ impl TestOps {
     pub fn select_arg(mut self, str_id: u32) -> Self {
         self.code.push(Opcode::SelectArg as u8);
         self.code.extend_from_slice(&str_id.to_le_bytes());
+        self
+    }
+
+    /// Select using a previously validated message-local value.
+    pub fn select_local(mut self, slot: u32) -> Self {
+        self.code.push(Opcode::SelectLocal as u8);
+        self.code.extend_from_slice(&slot.to_le_bytes());
         self
     }
 

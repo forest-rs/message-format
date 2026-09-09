@@ -3,10 +3,17 @@
 
 //! Runtime value and argument model.
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+#[cfg(feature = "icu4x")]
+use alloc::string::ToString;
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::{error::Error, fmt};
 
 use crate::runtime::Catalog;
+
+#[cfg(feature = "icu4x")]
+use fixed_decimal::Decimal;
+#[cfg(feature = "icu4x")]
+use icu_plurals::PluralCategory;
 
 /// String-pool identifier.
 pub type StrId = u32;
@@ -26,8 +33,17 @@ pub enum Value {
     Float(f64),
     /// Owned UTF-8 string.
     Str(String),
+    /// String resolved by the `string` function, retaining direction metadata.
+    #[cfg(feature = "icu4x")]
+    String(ResolvedString),
     /// Reference to a catalog string-pool entry.
     StrRef(StrId),
+    /// Fallback expression text from the catalog string pool.
+    ///
+    /// This preserves the recoverable-error state of a failed declaration so
+    /// the value can render its fallback while remaining ineligible for
+    /// selector matching.
+    Fallback(StrId),
     /// Reference to a literal slice in the catalog literal blob.
     LitRef {
         /// Offset into literal blob bytes.
@@ -35,6 +51,193 @@ pub enum Value {
         /// Length in bytes.
         len: u32,
     },
+    /// A number resolved by a built-in numeric function.
+    #[cfg(feature = "icu4x")]
+    Number(Box<ResolvedNumber>),
+    /// A value resolved by the test-only `test:select` function.
+    ///
+    /// The private payload preserves the function's selected precision across
+    /// aliases and reannotations. Raw strings continue to follow ordinary
+    /// string/numeric conversion rules.
+    ResolvedSelect(Box<ResolvedSelect>),
+}
+
+/// String payload resolved by the `string` function.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedString {
+    /// Raw resolved text without bidi isolation controls.
+    pub(crate) text: Box<str>,
+    /// Direction requested by the string function.
+    pub(crate) direction: StringDirection,
+}
+
+/// Direction metadata retained on a resolved string.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StringDirection {
+    /// Automatic direction selection.
+    Auto,
+    /// Left-to-right isolation.
+    Ltr,
+    /// Right-to-left isolation.
+    Rtl,
+}
+
+#[cfg(feature = "icu4x")]
+impl ResolvedString {
+    /// Return the raw resolved text without direction isolation controls.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// Value produced by the test-only `test:select` function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSelect {
+    text: String,
+}
+
+impl ResolvedSelect {
+    #[cfg(feature = "icu4x")]
+    pub(crate) fn new(text: String) -> Self {
+        Self { text }
+    }
+
+    /// Return the resolved selector text without applying another function.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// A numeric value resolved by a built-in numeric function.
+//
+// The fields stay private so hosts cannot accidentally manufacture a value
+// whose options and numeric payload disagree. The runtime uses this value to
+// carry an exact integer or decimal through subsequent annotations.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedNumber {
+    pub(crate) value: NumberValue,
+    pub(crate) format: NumberFormatOptions,
+    pub(crate) selection: NumberSelection,
+    /// Whether a `select` option was explicitly resolved for this value.
+    pub(crate) has_explicit_select: bool,
+    /// Category computed when this value was resolved by the locale-aware
+    /// built-in host. Stored values can therefore be matched without
+    /// re-running their function call.
+    pub(crate) selection_category: Option<PluralCategory>,
+}
+
+/// Exact numeric payload retained by [`ResolvedNumber`].
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NumberValue {
+    /// Exact signed integer payload.
+    Integer(i64),
+    /// Exact finite decimal payload.
+    Decimal(Decimal),
+    /// A floating-point non-finite value retained for compatibility with the
+    /// existing runtime rendering behavior.
+    NonFinite(f64),
+}
+
+/// Parsed options needed to render a resolved number. Keeping these values
+/// parsed makes default interpolation infallible after a function call has
+/// validated the merged option set.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NumberFormatOptions {
+    pub(crate) minimum_fraction_digits: Option<usize>,
+    pub(crate) maximum_fraction_digits: Option<usize>,
+    pub(crate) minimum_integer_digits: Option<usize>,
+    pub(crate) sign_display: NumberSignDisplay,
+    pub(crate) notation_scientific: bool,
+    pub(crate) grouping: NumberGrouping,
+}
+
+#[cfg(feature = "icu4x")]
+impl NumberFormatOptions {
+    pub(crate) const DEFAULT: Self = Self {
+        minimum_fraction_digits: None,
+        maximum_fraction_digits: None,
+        minimum_integer_digits: None,
+        sign_display: NumberSignDisplay::Auto,
+        notation_scientific: false,
+        grouping: NumberGrouping::Auto,
+    };
+}
+
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumberSignDisplay {
+    Auto,
+    Always,
+    Never,
+}
+
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumberGrouping {
+    Auto,
+    Always,
+    Never,
+    Min2,
+}
+
+/// Selection provenance retained with a resolved number.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumberSelection {
+    /// No selection annotation was involved.
+    None,
+    /// The value came from a plural selection annotation.
+    Plural,
+    /// The value came from an ordinal selection annotation.
+    Ordinal,
+    /// The value came from an exact selection annotation.
+    Exact,
+    /// A variable selection annotation reported `BadOption` and cannot be
+    /// used to match a later selection.
+    Invalid,
+}
+
+#[cfg(feature = "icu4x")]
+impl ResolvedNumber {
+    pub(crate) fn new(
+        value: NumberValue,
+        format: NumberFormatOptions,
+        selection: NumberSelection,
+        has_explicit_select: bool,
+    ) -> Self {
+        Self {
+            value,
+            format,
+            selection,
+            has_explicit_select,
+            selection_category: None,
+        }
+    }
+
+    pub(crate) fn set_selection_category(&mut self, category: Option<PluralCategory>) {
+        self.selection_category = category;
+    }
+
+    /// Return the exact finite numeric value as an ASCII decimal string.
+    ///
+    /// The returned text contains no locale formatting, grouping, or
+    /// annotation options. Hosts can use it when handling a [`Value::Number`]
+    /// operand without depending on the runtime's private numeric payload.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match &self.value {
+            NumberValue::Integer(value) => value.to_string(),
+            NumberValue::Decimal(value) => value.to_string(),
+            NumberValue::NonFinite(value) => value.to_string(),
+        }
+    }
 }
 
 /// Error returned when building [`MessageArgs`] with a name that is not interned

@@ -511,7 +511,9 @@ fn verify_code(
 
         match decoded.opcode {
             Opcode::ExprFallback if !expr_fallback_pending => expr_fallback_pending = true,
-            Opcode::CallFunc | Opcode::CallSelect => expr_fallback_pending = false,
+            Opcode::CallFunc | Opcode::CallSelect | Opcode::StoreLocal => {
+                expr_fallback_pending = false;
+            }
             _ => {
                 if expr_fallback_pending {
                     return Err(CatalogError::InvalidExprFallbackSequence { pc });
@@ -588,6 +590,12 @@ fn validate_instruction_operands(
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
             }
         }
+        Opcode::CheckSelector | Opcode::StoreLocal | Opcode::LoadLocal | Opcode::SelectLocal => {
+            // The runtime validates dense-slot ordering because the valid
+            // range depends on the execution path. Decoding still checks the
+            // complete u32 operand here, including truncated instructions.
+            let _ = read_u32(code, base + 1)?;
+        }
         Opcode::OutSlice | Opcode::OutExpr => {
             let offset = read_u32(code, base + 1)?;
             let len = read_u32(code, base + 5)?;
@@ -636,9 +644,10 @@ fn validate_literal_ref(
 fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
     let base = decoded.pc as usize;
     match decoded.opcode {
-        Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin => (1, 0),
+        Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin | Opcode::StoreLocal => (1, 0),
         Opcode::PushConst | Opcode::LoadArg => (0, 1),
-        Opcode::OutArg | Opcode::SelectArg => (0, 0),
+        Opcode::LoadLocal => (0, 1),
+        Opcode::CheckSelector | Opcode::OutArg | Opcode::SelectArg | Opcode::SelectLocal => (0, 0),
         Opcode::CallFunc | Opcode::CallSelect => {
             let arg_count = u32::from(code[base + 3]);
             let optc = u32::from(code[base + 4]);
@@ -681,6 +690,8 @@ struct AbstractExecutionState {
     pc: u32,
     /// Minimum stack depth
     min_stack_depth: u32,
+    /// Number of contiguous local slots definitely initialized on every path.
+    initialized_locals: u32,
     /// Select depth
     select_depth: u8,
 }
@@ -691,6 +702,7 @@ impl AbstractExecutionState {
             cycle: 0,
             pc,
             min_stack_depth: 0,
+            initialized_locals: 0,
             select_depth: 0,
         }
     }
@@ -701,6 +713,7 @@ impl AbstractExecutionVerifier {
     ///
     /// - Termination
     /// - Stack depth >= 0 at all times
+    /// - Local slots are loaded only after definite dense-prefix initialization
     /// - Select depth >= 0 at all times
     /// - Select sequencing (begin, case*, end) and termination
     ///
@@ -720,6 +733,7 @@ impl AbstractExecutionVerifier {
             mut cycle,
             mut pc,
             mut min_stack_depth,
+            mut initialized_locals,
             mut select_depth,
         })) = heap.pop()
         {
@@ -732,6 +746,7 @@ impl AbstractExecutionVerifier {
                     && peeked.select_depth == select_depth
                 {
                     min_stack_depth = min_stack_depth.min(peeked.min_stack_depth);
+                    initialized_locals = initialized_locals.min(peeked.initialized_locals);
                     heap.pop();
                     heap_peek = heap.peek().cloned();
                 }
@@ -741,6 +756,26 @@ impl AbstractExecutionVerifier {
                 update_select_depth(&mut select_depth, decoded)?;
 
                 let (pops, pushes) = stack_effect(code, decoded);
+                match decoded.opcode {
+                    Opcode::CheckSelector | Opcode::LoadLocal | Opcode::SelectLocal => {
+                        let slot = read_u32(code, pc as usize + 1)?;
+                        if slot >= initialized_locals {
+                            return Err(CatalogError::InvalidLocalSlot { pc, slot });
+                        }
+                    }
+                    Opcode::StoreLocal => {
+                        let slot = read_u32(code, pc as usize + 1)?;
+                        if slot > initialized_locals {
+                            return Err(CatalogError::InvalidLocalSlot { pc, slot });
+                        }
+                        if slot == initialized_locals {
+                            initialized_locals = initialized_locals
+                                .checked_add(1)
+                                .ok_or(CatalogError::InvalidLocalSlot { pc, slot })?;
+                        }
+                    }
+                    _ => {}
+                }
                 if (pops, pushes) != (0, 0) {
                     if min_stack_depth < pops {
                         return Err(CatalogError::BadPc { pc });
@@ -795,6 +830,7 @@ impl AbstractExecutionVerifier {
                                 cycle,
                                 pc: target,
                                 min_stack_depth,
+                                initialized_locals,
                                 select_depth,
                             }));
                         }
@@ -814,7 +850,7 @@ impl AbstractExecutionVerifier {
 
 fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<(), CatalogError> {
     match decoded.opcode {
-        Opcode::SelectArg | Opcode::SelectBegin => {
+        Opcode::SelectArg | Opcode::SelectLocal | Opcode::SelectBegin => {
             *select_depth =
                 select_depth
                     .checked_add(1)
@@ -1127,6 +1163,233 @@ mod tests {
         bytes[code_len_pos..code_len_pos + 4].copy_from_slice(&10_u32.to_le_bytes());
         let err = Catalog::from_bytes(&bytes).expect_err("must fail");
         assert!(matches!(err, CatalogError::ChunkOutOfBounds));
+    }
+
+    #[test]
+    fn truncated_local_operand_fails_decode() {
+        let bytes = build_catalog(
+            &["main"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &[Opcode::LoadLocal as u8, 0, 0],
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("must reject truncated operand");
+        assert!(matches!(err, CatalogError::TruncatedInstruction { pc: 0 }));
+    }
+
+    #[test]
+    fn truncated_local_selector_operands_fail_decode() {
+        for opcode in [Opcode::CheckSelector, Opcode::SelectLocal] {
+            let bytes = build_catalog(
+                &["main"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &[opcode as u8, 0, 0],
+            );
+            let err = Catalog::from_bytes(&bytes).expect_err("must reject truncated operand");
+            assert!(matches!(err, CatalogError::TruncatedInstruction { pc: 0 }));
+        }
+    }
+
+    #[test]
+    fn local_load_before_store_is_rejected() {
+        let code = [Opcode::LoadLocal as u8, 0, 0, 0, 0, Opcode::Halt as u8];
+        let bytes = build_catalog(
+            &["main"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        assert_eq!(
+            Catalog::from_bytes(&bytes).expect_err("load must follow store"),
+            CatalogError::InvalidLocalSlot { pc: 0, slot: 0 }
+        );
+    }
+
+    #[test]
+    fn local_selector_before_store_is_rejected() {
+        for opcode in [Opcode::CheckSelector, Opcode::SelectLocal] {
+            let code = [opcode as u8, 0, 0, 0, 0, Opcode::Halt as u8];
+            let bytes = build_catalog(
+                &["main"],
+                "",
+                &[MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                }],
+                &code,
+            );
+            assert_eq!(
+                Catalog::from_bytes(&bytes).expect_err("selector must follow store"),
+                CatalogError::InvalidLocalSlot { pc: 0, slot: 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn local_store_cannot_skip_dense_slot() {
+        let code = [
+            Opcode::PushConst as u8,
+            1,
+            0,
+            0,
+            0,
+            Opcode::StoreLocal as u8,
+            1,
+            0,
+            0,
+            0,
+            Opcode::Halt as u8,
+        ];
+        let bytes = build_catalog(
+            &["main", "value"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        assert_eq!(
+            Catalog::from_bytes(&bytes).expect_err("store must not skip slot 0"),
+            CatalogError::InvalidLocalSlot { pc: 5, slot: 1 }
+        );
+    }
+
+    #[test]
+    fn local_slot_replacement_is_valid_after_initialization() {
+        let code = TestOps::new()
+            .push_const(1)
+            .store_local(0)
+            .push_const(1)
+            .store_local(0)
+            .halt()
+            .build();
+        let bytes = build_catalog(
+            &["main", "value"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        Catalog::from_bytes(&bytes).expect("replacement is valid");
+    }
+
+    #[test]
+    fn local_initialization_on_only_one_branch_is_rejected() {
+        let code = TestOps::new()
+            .push_const(1)
+            .jmp_if_false("init")
+            .push_const(1)
+            .store_local(0)
+            .label("init")
+            .load_local(0)
+            .out_val()
+            .halt()
+            .build();
+        let bytes = build_catalog(
+            &["main", "value"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("one branch leaves slot uninitialized");
+        assert!(matches!(err, CatalogError::InvalidLocalSlot { .. }));
+    }
+
+    #[test]
+    fn local_initialization_on_both_branches_is_valid() {
+        let code = TestOps::new()
+            .push_const(1)
+            .jmp_if_false("else")
+            .push_const(1)
+            .store_local(0)
+            .jmp("join")
+            .label("else")
+            .push_const(1)
+            .store_local(0)
+            .label("join")
+            .load_local(0)
+            .out_val()
+            .halt()
+            .build();
+        let bytes = build_catalog(
+            &["main", "value"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        Catalog::from_bytes(&bytes).expect("both branches initialize slot");
+    }
+
+    #[test]
+    fn local_load_before_store_on_backward_path_is_rejected() {
+        let code = TestOps::new()
+            .label("loop")
+            .load_local(0)
+            .out_val()
+            .push_const(1)
+            .store_local(0)
+            .jmp("loop")
+            .build();
+        let bytes = build_catalog(
+            &["main", "value"],
+            "",
+            &[MessageEntry {
+                name_str_id: 0,
+                entry_pc: 0,
+            }],
+            &code,
+        );
+        let err = Catalog::from_bytes(&bytes).expect_err("backedge cannot initialize prior load");
+        assert!(matches!(err, CatalogError::InvalidLocalSlot { .. }));
+    }
+
+    #[test]
+    fn local_initialization_does_not_cross_message_entries() {
+        let first = TestOps::new().push_const(1).store_local(0).halt().build();
+        let second_pc = u32::try_from(first.len()).expect("pc");
+        let mut code = first;
+        code.extend_from_slice(&TestOps::new().load_local(0).out_val().halt().build());
+        let bytes = build_catalog(
+            &["first", "main", "value"],
+            "",
+            &[
+                MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                },
+                MessageEntry {
+                    name_str_id: 1,
+                    entry_pc: second_pc,
+                },
+            ],
+            &code,
+        );
+        assert_eq!(
+            Catalog::from_bytes(&bytes).expect_err("entries must initialize locals independently"),
+            CatalogError::InvalidLocalSlot {
+                pc: second_pc,
+                slot: 0,
+            }
+        );
     }
 
     #[test]

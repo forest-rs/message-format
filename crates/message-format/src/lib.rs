@@ -467,7 +467,7 @@ mod tests {
         let args = MessageArgs::new();
         assert_eq!(
             compile_and_format("{-1e23 :offset subtract=1 signDisplay=never}", &args),
-            "100000000000000000000000"
+            "100000000000000000000001"
         );
     }
 

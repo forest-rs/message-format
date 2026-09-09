@@ -17,6 +17,7 @@ use crate::runtime::{
 pub(crate) struct VmState {
     pub(crate) fuel: Option<u64>,
     pub(crate) stack: Vec<Value>,
+    pub(crate) locals: Vec<Value>,
     pub(crate) call_args: Vec<Value>,
     pub(crate) call_options: Vec<(u32, Value)>,
 }
@@ -112,7 +113,7 @@ impl<'a, H: Host> Formatter<'a, H> {
     ) -> Result<(), FormatError> {
         #[cfg(feature = "profiling")]
         profiling::function_scope!();
-        run_bytecode(
+        let result = run_bytecode(
             self.catalog,
             &mut self.host,
             &self.index,
@@ -120,11 +121,14 @@ impl<'a, H: Host> Formatter<'a, H> {
             args,
             self.vm.fuel,
             &mut self.vm.stack,
+            &mut self.vm.locals,
             sink,
             diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
-        )?;
+        );
+        self.vm.locals.clear();
+        result?;
         Ok(())
     }
 }
@@ -281,7 +285,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             .catalogs
             .get(message.catalog_idx as usize)
             .ok_or(FormatError::Trap(Trap::InvalidCatalogIndex))?;
-        run_bytecode(
+        let result = run_bytecode(
             catalog,
             &mut self.host,
             index,
@@ -289,11 +293,14 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             args,
             self.vm.fuel,
             &mut self.vm.stack,
+            &mut self.vm.locals,
             sink,
             diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
-        )?;
+        );
+        self.vm.locals.clear();
+        result?;
         Ok(())
     }
 }
@@ -318,6 +325,10 @@ mod tests {
             code,
         );
         Catalog::from_bytes(&bytes).expect("valid catalog")
+    }
+
+    fn local_catalog(message_name: &str, code: &[u8]) -> Catalog {
+        one_message_catalog(&[message_name, "value"], "", code)
     }
 
     use crate::runtime::schema::TestOps;
@@ -415,5 +426,143 @@ mod tests {
             .unwrap();
         assert!(diagnostics.is_empty());
         assert_eq!(sink, "world");
+    }
+
+    #[test]
+    fn formatter_reuses_local_scratch_capacity() {
+        let code = TestOps::new()
+            .push_const(1)
+            .store_local(0)
+            .load_local(0)
+            .out_val()
+            .halt()
+            .build();
+        let catalog = local_catalog("main", &code);
+        let mut formatter = Formatter::new(&catalog, NoopHost).unwrap();
+        let message = formatter.resolve("main").unwrap();
+        let mut first = String::new();
+        formatter
+            .format_to(message, &vec![] as &Vec<(u32, Value)>, &mut first, None)
+            .unwrap();
+        let capacity = formatter.vm.locals.capacity();
+        assert!(capacity >= 1);
+        assert!(formatter.vm.locals.is_empty());
+
+        let mut second = String::new();
+        formatter
+            .format_to(message, &vec![] as &Vec<(u32, Value)>, &mut second, None)
+            .unwrap();
+        assert_eq!(formatter.vm.locals.capacity(), capacity);
+        assert_eq!(first, "value");
+        assert_eq!(second, "value");
+    }
+
+    #[test]
+    fn formatter_clears_locals_after_trap() {
+        let first_code = TestOps::new().push_const(1).store_local(0).halt().build();
+        let second_code = TestOps::new().push_const(2).store_local(0).halt().build();
+        let mut code = first_code.clone();
+        let second_entry = u32::try_from(code.len()).unwrap();
+        code.extend_from_slice(&second_code);
+        let bytes = build_catalog(
+            &["first", "second", "value"],
+            "",
+            &[
+                MessageEntry {
+                    name_str_id: 0,
+                    entry_pc: 0,
+                },
+                MessageEntry {
+                    name_str_id: 1,
+                    entry_pc: second_entry,
+                },
+            ],
+            &code,
+        );
+        let catalog = Catalog::from_bytes(&bytes).unwrap();
+        let mut formatter = Formatter::new(&catalog, NoopHost).unwrap();
+        let first = formatter.resolve("first").unwrap();
+        let second = formatter.resolve("second").unwrap();
+        let mut sink = String::new();
+        formatter
+            .format_to(first, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
+            .unwrap();
+        let capacity = formatter.vm.locals.capacity();
+        assert!(capacity >= 1);
+        assert!(formatter.vm.locals.is_empty());
+
+        formatter.set_fuel(Some(2));
+        assert_eq!(
+            formatter
+                .format_to(second, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
+                .unwrap_err(),
+            FormatError::Trap(Trap::FuelExhausted)
+        );
+        assert!(formatter.vm.locals.is_empty());
+        assert_eq!(formatter.vm.locals.capacity(), capacity);
+
+        formatter.set_fuel(None);
+        formatter
+            .format_to(second, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
+            .expect("rerun after clearing fuel");
+        assert!(formatter.vm.locals.is_empty());
+        assert_eq!(formatter.vm.locals.capacity(), capacity);
+    }
+
+    #[test]
+    fn multi_formatter_does_not_share_locals_between_catalogs() {
+        let store_first = TestOps::new()
+            .push_const(1)
+            .store_local(0)
+            .load_local(0)
+            .out_val()
+            .halt()
+            .build();
+        let store_second = TestOps::new()
+            .push_const(1)
+            .store_local(0)
+            .load_local(0)
+            .out_val()
+            .halt()
+            .build();
+        let first = one_message_catalog(&["first", "value"], "", &store_first);
+        let second = one_message_catalog(&["second", "other"], "", &store_second);
+        let mut formatter = MultiFormatter::new([&first, &second], NoopHost).unwrap();
+        let first_handle = formatter.resolve("first").unwrap();
+        let second_handle = formatter.resolve("second").unwrap();
+        let mut sink = String::new();
+        formatter
+            .format_to(first_handle, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
+            .unwrap();
+        let capacity = formatter.vm.locals.capacity();
+        assert!(capacity >= 1);
+        assert!(formatter.vm.locals.is_empty());
+        formatter.set_fuel(Some(1));
+        assert_eq!(
+            formatter
+                .format_to(
+                    second_handle,
+                    &vec![] as &Vec<(u32, Value)>,
+                    &mut sink,
+                    None,
+                )
+                .unwrap_err(),
+            FormatError::Trap(Trap::FuelExhausted)
+        );
+        assert!(formatter.vm.locals.is_empty());
+        assert_eq!(formatter.vm.locals.capacity(), capacity);
+        sink.clear();
+        formatter.set_fuel(None);
+        formatter
+            .format_to(
+                second_handle,
+                &vec![] as &Vec<(u32, Value)>,
+                &mut sink,
+                None,
+            )
+            .expect("second catalog formats");
+        assert_eq!(sink, "other");
+        assert!(formatter.vm.locals.is_empty());
+        assert_eq!(formatter.vm.locals.capacity(), capacity);
     }
 }

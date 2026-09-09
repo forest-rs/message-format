@@ -316,6 +316,31 @@ fn build_many_segments_catalog() -> Catalog {
     Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
 }
 
+fn build_repeated_local_catalog() -> Catalog {
+    let strings = ["main", "value"];
+    let mut code = Vec::new();
+    for slot in 0_u32..16 {
+        code.push(vm::Opcode::PushConst as u8);
+        code.extend_from_slice(&1_u32.to_le_bytes());
+        code.push(vm::Opcode::StoreLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+        code.push(vm::Opcode::LoadLocal as u8);
+        code.extend_from_slice(&slot.to_le_bytes());
+        code.push(vm::Opcode::OutVal as u8);
+    }
+    code.push(vm::Opcode::Halt as u8);
+    let bytes = build_catalog(
+        &strings,
+        "",
+        &[MessageEntry {
+            name_str_id: 0,
+            entry_pc: 0,
+        }],
+        &code,
+    );
+    Catalog::from_bytes(&bytes).expect("valid repeated-local benchmark catalog")
+}
+
 fn build_markup_catalog() -> Catalog {
     // MARKUP_OPEN "b"(1) optc=0, OUT_SLICE "Hello "(0,6), LOAD_ARG "name"(2), OUT_VAL,
     // MARKUP_CLOSE "b"(1) optc=0, HALT
@@ -605,6 +630,7 @@ fn bench_formatting(c: &mut Criterion) {
     let call_catalog_no_opts = build_call_catalog_no_opts();
     let call_catalog_with_opts = build_call_catalog_with_opts();
     let many_segments_catalog = build_many_segments_catalog();
+    let repeated_local_catalog = build_repeated_local_catalog();
     let markup_catalog = build_markup_catalog();
     let markup_option_literal_catalog = build_markup_option_literal_catalog();
     let markup_option_variable_catalog = build_markup_option_variable_catalog();
@@ -671,6 +697,17 @@ fn bench_formatting(c: &mut Criterion) {
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&default_args))
+                .expect("format");
+            black_box(out);
+        });
+    });
+
+    group.bench_function("repeated_local_storage", |b| {
+        let mut formatter = Formatter::new(&repeated_local_catalog, NoopHost).expect("formatter");
+        let empty_args: Vec<(u32, Value)> = Vec::new();
+        b.iter(|| {
+            let out = formatter
+                .format_by_id_for_bench("main", black_box(&empty_args))
                 .expect("format");
             black_box(out);
         });
@@ -1291,5 +1328,89 @@ fn bench_plural_ordinal(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_formatting, bench_plural_ordinal);
+fn bench_runtime_compiled_declarations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("runtime_compiled_declarations");
+
+    let number_catalog =
+        compile_catalog(".input {$n :number} .local $x = {$n :number} {{a={$x} b={$x} c={$x}}}");
+    let number_entries = [("n", Value::Int(21))];
+    let number_args = message_args(&number_catalog, &number_entries);
+    let number_host = BuiltinHost::new(&locale("en-US")).expect("host");
+    let mut number_formatter = Formatter::new(&number_catalog, number_host).expect("formatter");
+    let number_message = number_formatter.resolve("main").expect("resolved message");
+    assert_eq!(
+        number_formatter
+            .format_for_bench(number_message, &number_args)
+            .expect("format"),
+        "a=21 b=21 c=21",
+        "the benchmark must format all three uses of the numeric declaration"
+    );
+    group.bench_function("number_declaration_reused_three_places", |b| {
+        b.iter(|| {
+            let out = number_formatter
+                .format_for_bench(number_message, black_box(&number_args))
+                .expect("format");
+            black_box(out);
+        });
+    });
+
+    let chain_catalog =
+        compile_catalog(".input {$x :string} .local $n = {$x :number} {{value={$n}}}");
+    let chain_entries = [("x", Value::Int(21))];
+    let chain_args = message_args(&chain_catalog, &chain_entries);
+    let chain_host = BuiltinHost::new(&locale("en-US")).expect("host");
+    let mut chain_formatter = Formatter::new(&chain_catalog, chain_host).expect("formatter");
+    let chain_message = chain_formatter.resolve("main").expect("resolved message");
+    assert_eq!(
+        chain_formatter
+            .format_for_bench(chain_message, &chain_args)
+            .expect("format"),
+        "value=21",
+        "the string declaration must supply raw text to the numeric annotation"
+    );
+    group.bench_function("string_to_number_chain", |b| {
+        b.iter(|| {
+            let out = chain_formatter
+                .format_for_bench(chain_message, black_box(&chain_args))
+                .expect("format");
+            black_box(out);
+        });
+    });
+
+    let selector_catalog = compile_catalog(
+        ".input {$a :number} .input {$b :number}\n.match $a $b\n1 1 {{exact}}\none one {{category}}\n* * {{fallback}}",
+    );
+    let selector_entries = [("a", Value::Int(1)), ("b", Value::Int(21))];
+    let selector_args = message_args(&selector_catalog, &selector_entries);
+    let selector_host = BuiltinHost::new(&locale("ru")).expect("host");
+    let mut selector_formatter =
+        Formatter::new(&selector_catalog, selector_host).expect("formatter");
+    let selector_message = selector_formatter
+        .resolve("main")
+        .expect("resolved message");
+    assert_eq!(
+        selector_formatter
+            .format_for_bench(selector_message, &selector_args)
+            .expect("format"),
+        "category",
+        "rejecting the exact variant must retry the plural category"
+    );
+    group.bench_function("numeric_exact_rejected_then_category", |b| {
+        b.iter(|| {
+            let out = selector_formatter
+                .format_for_bench(selector_message, black_box(&selector_args))
+                .expect("format");
+            black_box(out);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_formatting,
+    bench_plural_ordinal,
+    bench_runtime_compiled_declarations
+);
 criterion_main!(benches);

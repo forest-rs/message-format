@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use super::helpers::*;
-use message_format::runtime::{MessageFunctionError, Value};
+use message_format::runtime::{FormatError, MessageFunctionError, Value};
 
 // ---------------------------------------------------------------------------
 // TR35 §12 — Pattern selection basics (SEL-2, SEL-11)
@@ -139,22 +139,34 @@ fn literal_key_quoted_unquoted_equal() {
 /// E-7/SEL-5 — Selector with missing arg: only catch-all matches.
 #[test]
 fn selector_missing_arg_falls_to_catchall() {
-    assert_format_with_error(
+    let output = format_output(
         ".input { $x :string }\n.match $x\na {{A}}\n* {{CATCHALL}}",
         &[], // no args → selector can't resolve
-        "CATCHALL",
-        bad_selector_with_source(missing_arg("x")),
+    );
+    assert_eq!(output.value, "CATCHALL");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            FormatError::MissingArg("x".into()),
+            FormatError::BadSelector { source: None },
+        ],
     );
 }
 
 /// E-7/SEL-5 — Invalid runtime selector options still emit `Bad Selector`.
 #[test]
 fn selector_bad_option_falls_to_catchall() {
-    assert_format_with_error(
+    let output = format_output(
         ".input { $mode }\n.input { $x :number select=$mode }\n.match $x\none {{ONE}}\n* {{CATCHALL}}",
         &[("mode", Value::Str("bogus".into())), ("x", Value::Int(1))],
-        "CATCHALL",
-        bad_selector_with_source(function_error(MessageFunctionError::BadOption)),
+    );
+    assert_eq!(output.value, "CATCHALL");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            function_error(MessageFunctionError::BadOption),
+            FormatError::BadSelector { source: None },
+        ],
     );
 }
 
@@ -166,22 +178,36 @@ fn selector_with_multiple_missing_inputs_reports_all_missing_args() {
         &[],
     );
     assert_eq!(output.value, "CATCHALL");
-    assert!(
-        output
-            .errors
-            .iter()
-            .any(bad_selector_with_source(missing_arg("x"))),
-        "missing primary bad-selector diagnostic: {:?}",
-        output.errors
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("x"),
+            missing_arg("mode"),
+            missing_arg("digits"),
+            FormatError::BadSelector { source: None },
+        ],
     );
-    assert!(
-        output.errors.contains(&missing_arg("mode")),
-        "missing secondary missing-arg diagnostic: {:?}",
-        output.errors
+}
+
+/// A fallback propagated through a local is re-annotated using the current
+/// variable's fallback representation, without invoking the function host.
+#[test]
+fn local_fallback_reannotation_uses_current_variable_name() {
+    let output = format_output(
+        ".local $a = {$missing}\n.local $b = {$a :number}\n{{{$b}}}",
+        &[],
     );
-    assert!(
-        output.errors.contains(&missing_arg("digits")),
-        "missing tertiary missing-arg diagnostic: {:?}",
-        output.errors
+    assert_eq!(output.value, "{$b}");
+    assert_errors_multiset(&output.errors, &[missing_arg("missing")]);
+}
+
+/// Plain local aliases retain their own fallback identity when rendered.
+#[test]
+fn local_fallback_aliases_use_each_variable_name() {
+    let output = format_output(
+        ".local $a = {$missing}\n.local $b = {$a}\n{{{$a} {$b}}}",
+        &[],
     );
+    assert_eq!(output.value, "{$a} {$b}");
+    assert_errors_multiset(&output.errors, &[missing_arg("missing")]);
 }

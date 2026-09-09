@@ -49,7 +49,16 @@ pub(super) fn collect_strings(messages: &[Message], out: &mut BTreeSet<String>) 
 fn collect_parts_strings(parts: &[Part], out: &mut BTreeSet<String>) {
     for part in parts {
         match part {
-            Part::Text(_) | Part::Literal(_) => {}
+            Part::Text(_) | Part::Local(_) | Part::CheckSelector(_) => {}
+            Part::Literal(value) => {
+                out.insert(value.clone());
+            }
+            Part::Bind {
+                fallback, value, ..
+            } => {
+                out.insert(fallback.clone());
+                collect_parts_strings(core::slice::from_ref(value), out);
+            }
             Part::Var(name) => {
                 out.insert(name.clone());
             }
@@ -89,6 +98,13 @@ fn collect_parts_strings(parts: &[Part], out: &mut BTreeSet<String>) {
                         FunctionOptionValue::Var(var) => {
                             out.insert(var.clone());
                         }
+                        FunctionOptionValue::ResolvedVar { name, value } => {
+                            out.insert(name.clone());
+                            out.insert(value.clone());
+                        }
+                        FunctionOptionValue::LocalVar { name, .. } => {
+                            out.insert(name.clone());
+                        }
                     }
                 }
             }
@@ -108,6 +124,13 @@ fn collect_function_strings(func: &FunctionSpec, out: &mut BTreeSet<String>) {
             }
             FunctionOptionValue::Var(var) => {
                 out.insert(var.clone());
+            }
+            FunctionOptionValue::ResolvedVar { name, value } => {
+                out.insert(name.clone());
+                out.insert(value.clone());
+            }
+            FunctionOptionValue::LocalVar { name, .. } => {
+                out.insert(name.clone());
             }
         }
     }
@@ -135,8 +158,12 @@ fn collect_parts_functions(
 ) -> Result<(), CompileError> {
     for part in parts {
         match part {
-            Part::Call(CallExpr { func, .. }) => {
+            Part::Call(CallExpr { operand, func, .. }) => {
+                collect_operand_functions(operand, func_map, entries)?;
                 register_function(func, func_map, entries)?;
+            }
+            Part::Bind { value, .. } => {
+                collect_parts_functions(core::slice::from_ref(value), func_map, entries)?;
             }
             Part::Select(SelectExpr {
                 selector,
@@ -160,6 +187,7 @@ fn collect_selector_strings(selector: &SelectorExpr, out: &mut BTreeSet<String>)
         SelectorExpr::Var(name) => {
             out.insert(name.clone());
         }
+        SelectorExpr::Local { .. } | SelectorExpr::CheckedLocal { .. } => {}
         SelectorExpr::Call { operand, func } => {
             collect_operand_strings(operand, out);
             collect_function_strings(func, out);
@@ -176,8 +204,14 @@ fn collect_selector_functions(
     entries: &mut Vec<CollectedFunc>,
 ) -> Result<(), CompileError> {
     match selector {
-        SelectorExpr::Call { func, .. } => register_function(func, func_map, entries),
-        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => Ok(()),
+        SelectorExpr::Call { operand, func } => {
+            collect_operand_functions(operand, func_map, entries)?;
+            register_function(func, func_map, entries)
+        }
+        SelectorExpr::Var(_)
+        | SelectorExpr::Local { .. }
+        | SelectorExpr::CheckedLocal { .. }
+        | SelectorExpr::Literal(_) => Ok(()),
     }
 }
 
@@ -186,15 +220,42 @@ fn collect_operand_strings(operand: &Operand, out: &mut BTreeSet<String>) {
         Operand::Var(value) | Operand::Literal { value, .. } => {
             out.insert(value.clone());
         }
+        Operand::Local(_) => {}
+        Operand::Call(call) => {
+            collect_operand_strings(&call.operand, out);
+            collect_function_strings(&call.func, out);
+            if let Some(fallback) = &call.fallback {
+                out.insert(fallback.clone());
+            } else {
+                out.insert(render_call_fallback(&call.operand, &call.func));
+            }
+        }
     }
 }
 
 fn render_call_fallback(operand: &Operand, func: &FunctionSpec) -> String {
     match operand {
         Operand::Var(var) => format!("{{${var}}}"),
+        Operand::Local(slot) => format!("{{<local:{slot}>}}"),
         Operand::Literal { value, .. } if value.is_empty() => format!("{{:{}}}", func.name),
         Operand::Literal { value, .. } => format!("{{|{}|}}", escape_fallback_literal(value)),
+        Operand::Call(call) => call
+            .fallback
+            .clone()
+            .unwrap_or_else(|| render_call_fallback(&call.operand, &call.func)),
     }
+}
+
+fn collect_operand_functions(
+    operand: &Operand,
+    func_map: &mut BTreeMap<FunctionCatalogKey, u16>,
+    entries: &mut Vec<CollectedFunc>,
+) -> Result<(), CompileError> {
+    if let Operand::Call(call) = operand {
+        collect_operand_functions(&call.operand, func_map, entries)?;
+        register_function(&call.func, func_map, entries)?;
+    }
+    Ok(())
 }
 
 fn register_function(
@@ -214,7 +275,9 @@ fn register_function(
         .iter()
         .filter_map(|opt| match &opt.value {
             FunctionOptionValue::Literal(value) => Some((opt.key.clone(), value.clone())),
-            FunctionOptionValue::Var(_) => None,
+            FunctionOptionValue::Var(_)
+            | FunctionOptionValue::ResolvedVar { .. }
+            | FunctionOptionValue::LocalVar { .. } => None,
         })
         .collect();
 
@@ -238,6 +301,12 @@ pub(crate) fn function_catalog_key(func: &FunctionSpec) -> FunctionCatalogKey {
                         FunctionCatalogOptionValue::Literal(value.clone())
                     }
                     FunctionOptionValue::Var(var) => FunctionCatalogOptionValue::Var(var.clone()),
+                    FunctionOptionValue::ResolvedVar { name, .. } => {
+                        FunctionCatalogOptionValue::Var(name.clone())
+                    }
+                    FunctionOptionValue::LocalVar { name, .. } => {
+                        FunctionCatalogOptionValue::Var(name.clone())
+                    }
                 },
             })
             .collect(),
@@ -248,11 +317,27 @@ pub(super) fn escape_fallback_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('|', "\\|")
 }
 
-pub(super) fn function_dynamic_options(func: &FunctionSpec) -> Vec<(&str, &str)> {
+pub(super) fn function_dynamic_options(
+    func: &FunctionSpec,
+) -> Vec<(&str, &str, Option<u32>, Option<&str>)> {
     let mut out = Vec::new();
     for option in &func.options {
-        if let FunctionOptionValue::Var(var) = &option.value {
-            out.push((option.key.as_str(), var.as_str()));
+        match &option.value {
+            FunctionOptionValue::Var(var) => {
+                out.push((option.key.as_str(), var.as_str(), None, None));
+            }
+            FunctionOptionValue::ResolvedVar { name, value } => {
+                out.push((
+                    option.key.as_str(),
+                    name.as_str(),
+                    None,
+                    Some(value.as_str()),
+                ));
+            }
+            FunctionOptionValue::LocalVar { name, slot } => {
+                out.push((option.key.as_str(), name.as_str(), Some(*slot), None));
+            }
+            FunctionOptionValue::Literal(_) => {}
         }
     }
     out

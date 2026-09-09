@@ -151,6 +151,9 @@
 //! - [`FormatError`] is returned while resolving/formatting messages.
 //! - [`HostCallError`] constrains host callbacks to unknown-function failures or
 //!   typed [`MessageFunctionError`] values.
+//! - [`Host::call`] and
+//!   [`Host::call_select`] can report a
+//!   recoverable function diagnostic while still returning a value.
 //! - [`MessageFunctionError`] carries spec-shaped function error categories, with
 //!   structured sub-enums for unsupported operations and implementation-defined
 //!   host failures.
@@ -162,6 +165,32 @@
 //! The runtime owns the executable catalog schema in [`schema`]. The compiler
 //! targets that shared schema when emitting binary catalogs, and the runtime
 //! verifier/VM interpret the same schema when loading and executing them.
+//!
+//! # Migration
+//!
+//! Host implementations must accept the `on_error` callback on `call` and
+//! `call_select`. With ICU4X enabled, numeric built-ins return a resolved
+//! numeric value internally; callers that inspect host results should render
+//! values through [`Host::format_default`], or inspect the exact value with
+//! the `ResolvedNumber::text` accessor. Exhaustive `Value` matches should
+//! handle the numeric, resolved-test-selector, and fallback variants. Offset arithmetic can report
+//! [`UnsupportedOperation::NumericMagnitude`] when checked storage limits
+//! are exceeded.
+//!
+//! `Value::String` carries a resolved string payload and direction metadata.
+//! Use `ResolvedString::text` for semantic text and
+//! [`Host::format_default`] when rendering so direction metadata is applied at
+//! output. Exhaustive `Value` matches must account for this resolved variant.
+//!
+//! Catalog loading now rejects local loads without prior initialization on
+//! every reachable path, and stores that skip a local slot. Exhaustive
+//! [`CatalogError`] matches must handle [`CatalogError::InvalidLocalSlot`].
+//!
+//! Recompile catalogs to use eager string declarations and the separate
+//! `CheckSelector`/`SelectLocal` instructions. Structured compiler inputs gain
+//! `Part::CheckSelector` and `SelectorExpr::CheckedLocal`; exhaustive semantic
+//! matches must handle these variants. The check belongs before dispatch,
+//! once per source selector, including repeated uses of the same local.
 
 #[cfg(feature = "icu4x")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
@@ -179,7 +208,9 @@ pub use error::{
 };
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
-pub use value::{ArgNameError, Args, MessageArgs, StrId, Value};
+pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, StrId, Value};
+#[cfg(feature = "icu4x")]
+pub use value::{ResolvedNumber, ResolvedString};
 pub use vm::{FormatOption, FormatSink, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.

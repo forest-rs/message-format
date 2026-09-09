@@ -34,6 +34,31 @@ Pipeline:
 - Unknown host functions are reported as `FormatError::UnknownFunction` unless host overrides behavior.
 - Missing arguments are reported as `FormatError::MissingArg` under default semantics.
 
+Local slots are private to one message execution. `StoreLocal` initializes the
+next dense slot or replaces an initialized slot; `LoadLocal` requires prior
+initialization on every reachable path. The verifier checks each entry point
+independently and intersects initialization state at control-flow joins.
+Formatters reuse the local buffer's capacity, but clear its values before
+returning from execution on both success and error.
+
+Declarations that need runtime evaluation are resolved eagerly in source order,
+once per message execution. An unused declaration can therefore report an
+error: `.local $x = {$missing :number} {{hello}}` renders `hello` and reports
+`MissingArg`. Constant literal bindings can still be substituted at compilation.
+
+The compiler emits `CheckSelector` once for each source selector, before variant
+dispatch. Each check reports `BadSelector` if the local is a fallback or an
+unselectable resolved number. `SelectLocal` then compares that local directly,
+without cloning it or repeating the diagnostic when generated branches retry
+exact and plural candidates. Both instructions require a definitely initialized
+slot. Repeated default subtrees share a target; jumps to an ancestor default
+close each intervening select scope with `SelectEnd`.
+
+Failed expressions carry `Value::Fallback` through nested calls and declarations.
+Failure state is attached to the value rather than to the following instruction.
+Resolved strings retain raw text and direction metadata separately; bidi
+isolation is applied at output, so later annotations consume the raw text.
+
 ## Host Contract
 
 `Host::call` receives:
