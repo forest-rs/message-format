@@ -73,23 +73,24 @@ pub(super) fn lower_declaration_prelude(
 /// Remove declaration slots that are provably unobservable and then restore
 /// the dense slot numbering required by the catalog verifier.
 ///
-/// Bare `:string` inputs used only for selection retain the direct `SelectArg`
-/// path, while aliases that no remaining expression reads do not consume VM
-/// storage. Calls other than the optionless built-in string identity remain
-/// observable because a host can report diagnostics from them.
+/// Aliases and optionless built-in string resolutions that no remaining
+/// expression reads do not consume VM storage. Other calls remain observable
+/// because a host can report diagnostics from them.
 pub(super) fn compact_declaration_slots(
     declarations: &mut Vec<Part>,
     body: &mut [Part],
 ) -> Result<(), CompileError> {
+    let inlined_string_slots = inline_adjacent_string_numeric_chains(declarations, body);
     let mut live = BTreeSet::new();
     collect_part_slots(body, &mut live);
-
     let mut retain = vec![true; declarations.len()];
     for (index, declaration) in declarations.iter().enumerate().rev() {
         let Part::Bind { slot, value, .. } = declaration else {
             continue;
         };
-        if !live.contains(slot) && binding_is_elidable(declaration) {
+        if !live.contains(slot)
+            && (binding_is_elidable(declaration) || inlined_string_slots.contains(slot))
+        {
             retain[index] = false;
             continue;
         }
@@ -120,22 +121,148 @@ pub(super) fn compact_declaration_slots(
     remap_part_slots(body, &remap)
 }
 
+fn inline_adjacent_string_numeric_chains(
+    declarations: &mut [Part],
+    body: &[Part],
+) -> BTreeSet<u32> {
+    let candidates = declarations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, declaration)| {
+            let Part::Bind { slot, value, .. } = declaration else {
+                return None;
+            };
+            let Part::Call(call) = value.as_ref() else {
+                return None;
+            };
+            (call.func.name == "string" && call.func.options.is_empty())
+                .then(|| (index, *slot, call.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut inlined_slots = BTreeSet::new();
+
+    for (index, slot, string_call) in candidates {
+        let uses = declarations
+            .iter()
+            .map(|part| count_slot_uses(part, slot))
+            .sum::<usize>()
+            + body
+                .iter()
+                .map(|part| count_slot_uses(part, slot))
+                .sum::<usize>();
+        if uses != 1 {
+            continue;
+        }
+        let Some(Part::Bind { value, .. }) = declarations.get_mut(index + 1) else {
+            continue;
+        };
+        let Part::Call(consumer) = value.as_mut() else {
+            continue;
+        };
+        if !matches!(consumer.func.name.as_str(), "number" | "integer" | "offset")
+            || !matches!(consumer.operand, Operand::Local(candidate) if candidate == slot)
+        {
+            continue;
+        }
+        consumer.operand = Operand::Call(Box::new(string_call));
+        inlined_slots.insert(slot);
+    }
+    inlined_slots
+}
+
+fn count_slot_uses(part: &Part, target: u32) -> usize {
+    match part {
+        Part::Local(slot) | Part::CheckSelector(slot) => usize::from(*slot == target),
+        Part::Call(call) => {
+            count_operand_slot_uses(&call.operand, target)
+                + call
+                    .func
+                    .options
+                    .iter()
+                    .filter(|option| {
+                        matches!(
+                            option.value,
+                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
+                        )
+                    })
+                    .count()
+        }
+        Part::Select(select) => {
+            count_selector_slot_uses(&select.selector, target)
+                + select
+                    .arms
+                    .iter()
+                    .flat_map(|arm| &arm.parts)
+                    .map(|part| count_slot_uses(part, target))
+                    .sum::<usize>()
+                + select
+                    .default
+                    .iter()
+                    .map(|part| count_slot_uses(part, target))
+                    .sum::<usize>()
+        }
+        Part::Bind { value, .. } => count_slot_uses(value, target),
+        Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => options
+            .iter()
+            .filter(|option| {
+                matches!(
+                    option.value,
+                    FunctionOptionValue::LocalVar { slot, .. } if slot == target
+                )
+            })
+            .count(),
+        Part::Text(_) | Part::Literal(_) | Part::Var(_) => 0,
+    }
+}
+
+fn count_selector_slot_uses(selector: &SelectorExpr, target: u32) -> usize {
+    match selector {
+        SelectorExpr::Local { slot, .. } | SelectorExpr::CheckedLocal { slot, .. } => {
+            usize::from(*slot == target)
+        }
+        SelectorExpr::Call { operand, func } => {
+            count_operand_slot_uses(operand, target)
+                + func
+                    .options
+                    .iter()
+                    .filter(|option| {
+                        matches!(
+                            option.value,
+                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
+                        )
+                    })
+                    .count()
+        }
+        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => 0,
+    }
+}
+
+fn count_operand_slot_uses(operand: &Operand, target: u32) -> usize {
+    match operand {
+        Operand::Local(slot) => usize::from(*slot == target),
+        Operand::Call(call) => {
+            count_operand_slot_uses(&call.operand, target)
+                + call
+                    .func
+                    .options
+                    .iter()
+                    .filter(|option| {
+                        matches!(
+                            option.value,
+                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
+                        )
+                    })
+                    .count()
+        }
+        Operand::Var(_) | Operand::Literal { .. } => 0,
+    }
+}
+
 fn binding_is_elidable(binding: &Part) -> bool {
-    let Part::Bind {
-        fallback, value, ..
-    } = binding
-    else {
+    let Part::Bind { value, .. } = binding else {
         return false;
     };
-    match value.as_ref() {
-        Part::Local(_) => true,
-        Part::Call(CallExpr { operand, func, .. }) => {
-            matches!(operand, Operand::Var(var) if fallback == &format!("{{${var}}}"))
-                && func.name == "string"
-                && func.options.is_empty()
-        }
-        _ => false,
-    }
+    matches!(value.as_ref(), Part::Local(_))
 }
 
 pub(super) fn collect_part_slots(parts: &[Part], slots: &mut BTreeSet<u32>) {
@@ -333,8 +460,9 @@ fn lower_part_with_bindings(
         Part::Call(CallExpr {
             operand: Operand::Var(var),
             func,
-            ..
+            fallback,
         }) => {
+            let retained_fallback = fallback.clone();
             let canonical = canonicalize_identifier(var);
             let _ = resolve_alias(&canonical, &bindings.aliases)?;
             if excluded == Some(canonical.as_str()) {
@@ -347,7 +475,9 @@ fn lower_part_with_bindings(
                 *part = Part::Call(CallExpr {
                     operand: Operand::Local(*slot),
                     func: func.clone(),
-                    fallback: Some(format!("{{${canonical}}}")),
+                    fallback: retained_fallback
+                        .clone()
+                        .or_else(|| Some(format!("{{${canonical}}}"))),
                 });
                 return Ok(());
             }
@@ -358,7 +488,9 @@ fn lower_part_with_bindings(
                         kind: *kind,
                     },
                     func: func.clone(),
-                    fallback: Some(format!("{{${canonical}}}")),
+                    fallback: retained_fallback
+                        .clone()
+                        .or_else(|| Some(format!("{{${canonical}}}"))),
                 });
                 return Ok(());
             }
@@ -371,7 +503,9 @@ fn lower_part_with_bindings(
                 *part = Part::Call(CallExpr {
                     operand: Operand::Local(*slot),
                     func: func.clone(),
-                    fallback: Some(format!("{{${aliased}}}")),
+                    fallback: retained_fallback
+                        .clone()
+                        .or_else(|| Some(format!("{{${aliased}}}"))),
                 });
                 return Ok(());
             }
@@ -384,7 +518,9 @@ fn lower_part_with_bindings(
                         kind: *kind,
                     },
                     func: func.clone(),
-                    fallback: Some(format!("{{${aliased}}}")),
+                    fallback: retained_fallback
+                        .clone()
+                        .or_else(|| Some(format!("{{${aliased}}}"))),
                 });
                 return Ok(());
             }
@@ -392,7 +528,9 @@ fn lower_part_with_bindings(
                 let mut lowered = Part::Call(CallExpr {
                     operand: input_function_operand(function),
                     func: func.clone(),
-                    fallback: Some(format!("{{${aliased}}}")),
+                    fallback: retained_fallback
+                        .clone()
+                        .or_else(|| Some(format!("{{${aliased}}}"))),
                 });
                 rewrite_dynamic_option_vars_from_locals(
                     &mut lowered,

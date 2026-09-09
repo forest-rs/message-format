@@ -153,6 +153,8 @@
 //!   typed [`MessageFunctionError`] values.
 //! - [`Host::call`], [`Host::call_select`], and [`Host::project_select`] can report a
 //!   recoverable function diagnostic while still returning a value.
+//! - [`Host::format_default_to`] lets hosts stream default interpolation output
+//!   when constructing a temporary owned string would be unnecessary.
 //! - [`MessageFunctionError`] carries spec-shaped function error categories, with
 //!   structured sub-enums for unsupported operations and implementation-defined
 //!   host failures.
@@ -213,9 +215,9 @@ pub use error::{
 };
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
-pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, StrId, Value};
 #[cfg(feature = "icu4x")]
-pub use value::{ResolvedNumber, ResolvedString};
+pub use value::ResolvedNumber;
+pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, ResolvedString, StrId, Value};
 pub use vm::{FormatOption, FormatSink, FunctionOptions, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.

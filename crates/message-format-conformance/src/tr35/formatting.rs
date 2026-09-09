@@ -114,7 +114,7 @@ fn format_to_self_closing_markup_through_compiler() {
 #[test]
 fn bidi_isolation_wraps_placeholders() {
     let out = format_with_options_raw(
-        "Hello { $name :string }!",
+        "Hello { $name }!",
         &[("name", Value::Str("World".into()))],
         CompileOptions {
             default_bidi_isolation: true,
@@ -128,13 +128,13 @@ fn bidi_isolation_wraps_placeholders() {
     );
 }
 
-/// TR35 §18 — :string function always applies bidi isolation.
+/// TR35 §18 — `:string` without `u:dir` does not request bidi isolation.
 #[test]
-fn string_function_applies_bidi() {
+fn string_function_without_direction_does_not_apply_bidi() {
     let out = format_raw("{ $x :string }", &[("x", Value::Str("test".into()))]);
     assert!(
-        out.contains('\u{2068}') && out.contains('\u{2069}'),
-        "expected bidi isolation from :string, got: {out:?}",
+        !out.contains(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
+        "unexpected bidi isolation from optionless :string: {out:?}",
     );
 }
 

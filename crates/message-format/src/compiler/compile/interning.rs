@@ -161,7 +161,9 @@ fn collect_parts_functions(
         match part {
             Part::Call(CallExpr { operand, func, .. }) => {
                 collect_operand_functions(operand, func_map, entries)?;
-                register_function(func, func_map, entries)?;
+                if !is_optionless_string(func) {
+                    register_function(func, func_map, entries)?;
+                }
             }
             Part::Bind { value, .. } => {
                 collect_parts_functions(core::slice::from_ref(value), func_map, entries)?;
@@ -207,13 +209,21 @@ fn collect_selector_functions(
     match selector {
         SelectorExpr::Call { operand, func } => {
             collect_operand_functions(operand, func_map, entries)?;
-            register_function(func, func_map, entries)
+            if is_optionless_string(func) {
+                Ok(())
+            } else {
+                register_function(func, func_map, entries)
+            }
         }
         SelectorExpr::Var(_)
         | SelectorExpr::Local { .. }
         | SelectorExpr::CheckedLocal { .. }
         | SelectorExpr::Literal(_) => Ok(()),
     }
+}
+
+fn is_optionless_string(func: &FunctionSpec) -> bool {
+    func.name == "string" && func.options.is_empty()
 }
 
 fn collect_operand_strings(operand: &Operand, out: &mut BTreeSet<String>) {
@@ -254,7 +264,9 @@ fn collect_operand_functions(
 ) -> Result<(), CompileError> {
     if let Operand::Call(call) = operand {
         collect_operand_functions(&call.operand, func_map, entries)?;
-        register_function(&call.func, func_map, entries)?;
+        if !is_optionless_string(&call.func) {
+            register_function(&call.func, func_map, entries)?;
+        }
     }
     Ok(())
 }

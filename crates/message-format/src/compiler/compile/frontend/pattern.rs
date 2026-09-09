@@ -176,11 +176,7 @@ fn lower_expression_payload_node_to_part(
             if context.default_bidi_isolation && context.allow_default_bidi_rewrite {
                 return Ok(Part::Call(CallExpr {
                     operand: Operand::Var(var),
-                    func: FunctionSpec {
-                        name: String::from("string"),
-                        options: Vec::new(),
-                        origin: None,
-                    },
+                    func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
                     fallback: None,
                 }));
             }
@@ -193,6 +189,7 @@ fn lower_expression_payload_node_to_part(
                 ctx,
             )?;
             func_spec.origin = function_spec_origin(&call.function, source, context);
+            apply_default_bidi_direction(&mut func_spec, context);
             match &call.operand {
                 crate::compiler::syntax::ast::CallOperandNode::Var(var) => {
                     let mut full = String::from("$");
@@ -242,6 +239,7 @@ fn lower_expression_payload_node_to_part(
                 let mut func_spec =
                     crate::compiler::syntax::semantic::parse_function_spec_node(source, func, ctx)?;
                 func_spec.origin = function_spec_origin(func, source, context);
+                apply_default_bidi_direction(&mut func_spec, context);
                 let value = if literal.value.trim().is_empty() {
                     String::new()
                 } else {
@@ -257,16 +255,22 @@ fn lower_expression_payload_node_to_part(
             if context.default_bidi_isolation && context.allow_default_bidi_rewrite {
                 return Ok(Part::Call(CallExpr {
                     operand: lower_literal_expression_operand(&literal.value_span, value, source),
-                    func: FunctionSpec {
-                        name: String::from("string"),
-                        options: Vec::new(),
-                        origin: None,
-                    },
+                    func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
                     fallback: None,
                 }));
             }
             Ok(Part::Literal(value))
         }
+    }
+}
+
+fn apply_default_bidi_direction(func: &mut FunctionSpec, context: ExpressionLoweringContext) {
+    if context.default_bidi_isolation
+        && context.allow_default_bidi_rewrite
+        && func.name == "string"
+        && !func.options.iter().any(|option| option.key == "u:dir")
+    {
+        func.options.push(FunctionOption::literal("u:dir", "auto"));
     }
 }
 

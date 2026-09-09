@@ -32,7 +32,6 @@ pub enum Value {
     /// Owned UTF-8 string.
     Str(String),
     /// String resolved by the `string` function, retaining direction metadata.
-    #[cfg(feature = "icu4x")]
     String(ResolvedString),
     /// Reference to a catalog string-pool entry.
     StrRef(StrId),
@@ -42,6 +41,11 @@ pub enum Value {
     /// the value can render its fallback while remaining ineligible for
     /// selector matching.
     Fallback(StrId),
+    /// Expression fallback produced by a function-resolution failure.
+    ///
+    /// This distinct provenance lets later selector projection avoid
+    /// re-reporting the failed function as an operand error.
+    FunctionFallback(StrId),
     /// Reference to a literal slice in the catalog literal blob.
     LitRef {
         /// Offset into literal blob bytes.
@@ -60,36 +64,139 @@ pub enum Value {
     ResolvedSelect(Box<ResolvedSelect>),
 }
 
+impl Value {
+    pub(crate) fn is_fallback(&self) -> bool {
+        matches!(self, Self::Fallback(_) | Self::FunctionFallback(_))
+    }
+}
+
 /// String payload resolved by the `string` function.
-#[cfg(feature = "icu4x")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ResolvedString {
     /// Raw resolved text without bidi isolation controls.
-    pub(crate) text: Box<str>,
+    text: ResolvedStringText,
     /// Direction requested by the string function.
     pub(crate) direction: StringDirection,
 }
 
+const INLINE_STRING_CAPACITY: usize = 24;
+
+#[derive(Debug, Clone)]
+enum ResolvedStringText {
+    Inline {
+        len: u8,
+        bytes: [u8; INLINE_STRING_CAPACITY],
+    },
+    #[cfg(feature = "icu4x")]
+    Integer {
+        value: i64,
+        len: u8,
+        bytes: [u8; 20],
+    },
+    Heap(Box<str>),
+}
+
 /// Direction metadata retained on a resolved string.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StringDirection {
+    /// No direction was requested by the string function.
+    Unspecified,
     /// Automatic direction selection.
+    #[cfg(feature = "icu4x")]
     Auto,
     /// Left-to-right isolation.
+    #[cfg(feature = "icu4x")]
     Ltr,
     /// Right-to-left isolation.
+    #[cfg(feature = "icu4x")]
     Rtl,
 }
 
-#[cfg(feature = "icu4x")]
 impl ResolvedString {
+    pub(crate) fn plain_borrowed(text: &str) -> Self {
+        Self::from_borrowed(text, StringDirection::Unspecified)
+    }
+
+    pub(crate) fn plain_owned(text: String) -> Self {
+        Self::from_owned(text, StringDirection::Unspecified)
+    }
+
+    pub(crate) fn from_borrowed(text: &str, direction: StringDirection) -> Self {
+        let text = if text.len() <= INLINE_STRING_CAPACITY {
+            let mut bytes = [0; INLINE_STRING_CAPACITY];
+            bytes[..text.len()].copy_from_slice(text.as_bytes());
+            ResolvedStringText::Inline {
+                len: u8::try_from(text.len()).expect("inline string length fits in u8"),
+                bytes,
+            }
+        } else {
+            ResolvedStringText::Heap(text.into())
+        };
+        Self { text, direction }
+    }
+
+    pub(crate) fn from_owned(text: String, direction: StringDirection) -> Self {
+        if text.len() <= INLINE_STRING_CAPACITY {
+            return Self::from_borrowed(&text, direction);
+        }
+        Self {
+            text: ResolvedStringText::Heap(text.into_boxed_str()),
+            direction,
+        }
+    }
+
+    #[cfg(feature = "icu4x")]
+    pub(crate) fn from_integer(text: &str, value: i64, direction: StringDirection) -> Self {
+        let mut bytes = [0; 20];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Self {
+            text: ResolvedStringText::Integer {
+                value,
+                len: u8::try_from(text.len()).expect("integer text length fits in u8"),
+                bytes,
+            },
+            direction,
+        }
+    }
+
+    #[cfg(not(feature = "icu4x"))]
+    pub(crate) fn from_integer(text: &str, _value: i64, direction: StringDirection) -> Self {
+        Self::from_borrowed(text, direction)
+    }
+
+    #[cfg(feature = "icu4x")]
+    pub(crate) fn integer_hint(&self) -> Option<i64> {
+        match self.text {
+            ResolvedStringText::Integer { value, .. } => Some(value),
+            ResolvedStringText::Inline { .. } | ResolvedStringText::Heap(_) => None,
+        }
+    }
+
     /// Return the raw resolved text without direction isolation controls.
     #[must_use]
     pub fn text(&self) -> &str {
-        &self.text
+        match &self.text {
+            ResolvedStringText::Inline { len, bytes } => {
+                core::str::from_utf8(&bytes[..usize::from(*len)])
+                    .expect("inline resolved strings originate from UTF-8")
+            }
+            #[cfg(feature = "icu4x")]
+            ResolvedStringText::Integer { len, bytes, .. } => {
+                core::str::from_utf8(&bytes[..usize::from(*len)])
+                    .expect("resolved integer strings contain ASCII")
+            }
+            ResolvedStringText::Heap(text) => text,
+        }
     }
 }
+
+impl PartialEq for ResolvedString {
+    fn eq(&self, other: &Self) -> bool {
+        self.direction == other.direction && self.text() == other.text()
+    }
+}
+
+impl Eq for ResolvedString {}
 
 /// Value produced by the test-only `test:select` function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,9 +521,11 @@ impl From<f64> for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgNameError, MessageArgs, Value};
+    #[cfg(feature = "icu4x")]
+    use super::StringDirection;
+    use super::{ArgNameError, MessageArgs, ResolvedString, ResolvedStringText, Value};
     use crate::runtime::catalog::{MessageEntry, build_catalog};
-    use alloc::string::ToString;
+    use alloc::{format, string::ToString};
 
     fn test_catalog() -> crate::runtime::Catalog {
         crate::runtime::Catalog::from_bytes(&build_catalog(
@@ -459,5 +568,30 @@ mod tests {
             }
         );
         assert_eq!(err.name(), "missing");
+    }
+
+    #[cfg(feature = "icu4x")]
+    #[test]
+    fn integer_string_provenance_does_not_affect_equality() {
+        for value in [i64::MIN, i64::MAX] {
+            let text = value.to_string();
+            let hinted = ResolvedString::from_integer(&text, value, StringDirection::Unspecified);
+            let ordinary = ResolvedString::from_borrowed(&text, StringDirection::Unspecified);
+            assert_eq!(hinted, ordinary);
+            assert_eq!(hinted.integer_hint(), Some(value));
+        }
+    }
+
+    #[test]
+    fn resolved_string_inline_boundary_counts_utf8_bytes() {
+        let inline = "é".repeat(12);
+        let heap = format!("{inline}a");
+        let inline = ResolvedString::plain_borrowed(&inline);
+        let heap = ResolvedString::plain_borrowed(&heap);
+
+        assert!(matches!(inline.text, ResolvedStringText::Inline { .. }));
+        assert!(matches!(heap.text, ResolvedStringText::Heap(_)));
+        assert_eq!(inline.text(), "éééééééééééé");
+        assert_eq!(heap.text(), "ééééééééééééa");
     }
 }

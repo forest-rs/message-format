@@ -34,7 +34,7 @@ use crate::runtime::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
         ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
-    vm::{FunctionOptions, Host},
+    vm::{FormatSink, FunctionOptions, Host, format_i64},
 };
 
 const MAX_EXACT_I64_IN_F64: i64 = 9_007_199_254_740_992;
@@ -337,6 +337,7 @@ impl BuiltinHost {
         entry: &BuiltinEntry,
         args: &[Value],
         opts: FunctionOptions<'_>,
+        selecting: bool,
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, FormatError> {
         let Some(raw_arg) = args.first() else {
@@ -358,27 +359,51 @@ impl BuiltinHost {
                 }) {
                     on_error(MessageFunctionError::BadOption);
                 }
-                if options.get(BuiltinOptionKey::Style).as_deref() == Some("percent") {
-                    return Ok(Value::Str(format_percent(raw_arg, catalog, &options)?));
+                match options.get(BuiltinOptionKey::Style).as_deref() {
+                    Some("percent") => {
+                        let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
+                        let maximum_fraction_digits = parse_maximum_fraction_digits(&options)?;
+                        let _ = parse_minimum_integer_digits(&options)?;
+                        validate_digit_range_relationship(
+                            minimum_fraction_digits,
+                            maximum_fraction_digits,
+                        )?;
+                        let sign_display = parse_sign_display(&options)?;
+                        return Ok(Value::Str(format_percent(
+                            raw_arg,
+                            catalog,
+                            minimum_fraction_digits,
+                            sign_display,
+                        )?));
+                    }
+                    Some(_) => return Err(bad_option()),
+                    None => {}
                 }
-                let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
-                let maximum_fraction_digits = parse_maximum_fraction_digits(&options)?;
-                let _ = parse_minimum_integer_digits(&options)?;
-                validate_digit_range_relationship(
-                    minimum_fraction_digits,
-                    maximum_fraction_digits,
-                )?;
                 let resolved = resolve_number(raw_arg, catalog, integer_only, &options, on_error)?;
                 Ok(Value::Number(resolved))
             }
-            BuiltinFn::Percent => Ok(Value::Str(format_percent(raw_arg, catalog, &options)?)),
+            BuiltinFn::Percent => {
+                let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
+                let sign_display = parse_sign_display(&options)?;
+                Ok(Value::Str(format_percent(
+                    raw_arg,
+                    catalog,
+                    minimum_fraction_digits,
+                    sign_display,
+                )?))
+            }
             BuiltinFn::Currency => Ok(Value::Str(format_currency(raw_arg, catalog, &options)?)),
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
-                format_test_select(raw_arg, catalog, &options)?,
+                format_test_select(raw_arg, catalog, &options, selecting)?,
             )))),
             BuiltinFn::TestFunction => format_test_function(raw_arg, catalog, &options),
-            BuiltinFn::TestFormat => Err(implementation_failure(ImplementationFailure::TestFormat)),
+            BuiltinFn::TestFormat if selecting => {
+                Err(implementation_failure(ImplementationFailure::TestFormat))
+            }
+            BuiltinFn::TestFormat => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
+                format_test_select(raw_arg, catalog, &options, false)?,
+            )))),
             BuiltinFn::Date => {
                 let text = validate_date_operand(raw_arg, catalog)?;
                 let (date, _) = parse_iso_datetime(text)?;
@@ -416,53 +441,6 @@ impl BuiltinHost {
                     time_style,
                 )?))
             }
-        }
-    }
-
-    /// Return the appropriate plural rules if `entry` is a number/integer
-    /// function with `select=plural` or `select=ordinal`.
-    fn plural_rules_for(
-        &self,
-        catalog: &Catalog,
-        index: &BuiltinHostCatalogIndex,
-        entry: &BuiltinEntry,
-        args: &[Value],
-        opts: FunctionOptions<'_>,
-    ) -> Option<&PluralRules> {
-        if !matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer) {
-            return None;
-        }
-        if let Some(Value::Number(number)) = args.first() {
-            match number.selection {
-                NumberSelection::Plural => return Some(&self.cardinal_rules),
-                NumberSelection::Ordinal => return Some(&self.ordinal_rules),
-                NumberSelection::Exact | NumberSelection::None | NumberSelection::Invalid => {}
-            }
-        }
-        let dynamic_select = index
-            .option_keys_by_str_id
-            .iter()
-            .any(|(key_id, key)| *key == BuiltinOptionKey::Select && opts.was_dynamic(*key_id));
-        if dynamic_select {
-            return None;
-        }
-        if opts.is_empty() {
-            return match entry.select_mode {
-                BuiltinSelectMode::Plural => Some(&self.cardinal_rules),
-                BuiltinSelectMode::Ordinal => Some(&self.ordinal_rules),
-                BuiltinSelectMode::Exact => None,
-                // Number selectors use cardinal plural selection by default.
-                // The function entry has no explicit mode when the annotation
-                // omits `select`, but a selector still needs a category.
-                BuiltinSelectMode::None => Some(&self.cardinal_rules),
-            };
-        }
-        let options =
-            EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
-        match options.get(BuiltinOptionKey::Select).as_deref() {
-            Some("plural") => Some(&self.cardinal_rules),
-            Some("ordinal") => Some(&self.ordinal_rules),
-            _ => None,
         }
     }
 }
@@ -512,6 +490,18 @@ impl Host for BuiltinHost {
         let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
+        if !opts.has_raw_options()
+            && matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer)
+            && entry.options.iter().all(Option::is_none)
+            && let Some(Value::Int(value)) = args.first()
+        {
+            return Ok(Value::Number(ResolvedNumber::new(
+                NumberValue::Integer(*value),
+                NumberFormatOptions::DEFAULT,
+                NumberSelection::Plural,
+                false,
+            )));
+        }
         Self::apply(
             catalog,
             index,
@@ -520,6 +510,7 @@ impl Host for BuiltinHost {
             entry,
             args,
             opts,
+            false,
             on_error,
         )
         .map_err(into_host_call_error)
@@ -537,29 +528,26 @@ impl Host for BuiltinHost {
         let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
-        if matches!(
-            entry.func,
-            BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
-        ) && let Some(Value::Number(number)) = args.first()
+        if !opts.has_raw_options()
+            && matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer)
+            && entry.options.iter().enumerate().all(|(option, value)| {
+                value.is_none() || option == BuiltinOptionKey::Select.index()
+            })
+            && let Some(Value::Int(value)) = args.first()
         {
-            match number.selection {
-                NumberSelection::Exact => return Ok(args[0].clone()),
-                NumberSelection::Plural | NumberSelection::Ordinal => {
-                    let rules = if number.selection == NumberSelection::Ordinal {
-                        &self.ordinal_rules
-                    } else {
-                        &self.cardinal_rules
-                    };
-                    let category =
-                        resolved_plural_category(number, rules).map_err(into_host_call_error)?;
-                    return if let Some(str_id) = index.category_pool_ids[category_index(category)] {
-                        Ok(Value::StrRef(str_id))
-                    } else {
-                        Ok(Value::Str(category_name(category).to_string()))
-                    };
-                }
-                NumberSelection::Invalid => return Ok(Value::Null),
-                NumberSelection::None => {}
+            let rules = match entry.select_mode {
+                BuiltinSelectMode::Plural => Some(&self.cardinal_rules),
+                BuiltinSelectMode::Ordinal => Some(&self.ordinal_rules),
+                BuiltinSelectMode::None | BuiltinSelectMode::Exact => None,
+            };
+            if let Some(rules) = rules {
+                let category = rules.category_for(*value);
+                return Ok(
+                    index.category_pool_ids[category_index(category)].map_or_else(
+                        || Value::Str(category_name(category).to_string()),
+                        Value::StrRef,
+                    ),
+                );
             }
         }
         if opts.has_raw_options()
@@ -575,22 +563,26 @@ impl Host for BuiltinHost {
             }
             return Ok(Value::Null);
         }
-        // For number/integer with select=plural|ordinal, compute category and
-        // return a StrRef into the string pool instead of allocating.
-        if let Some(rules) = self.plural_rules_for(catalog, index, entry, args, opts) {
-            let raw_arg = args
-                .first()
-                .ok_or_else(bad_operand)
-                .map_err(into_host_call_error)?;
-            let options =
-                EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
-            let category =
-                plural_category(raw_arg, catalog, rules, &options).map_err(into_host_call_error)?;
-            return if let Some(str_id) = index.category_pool_ids[category_index(category)] {
-                Ok(Value::StrRef(str_id))
-            } else {
-                Ok(Value::Str(category_name(category).to_string()))
+        if matches!(
+            entry.func,
+            BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
+        ) {
+            let resolved = Self::apply(
+                catalog,
+                index,
+                &self.locale,
+                &mut self.icu_formatters,
+                entry,
+                args,
+                opts,
+                true,
+                on_error,
+            )
+            .map_err(into_host_call_error)?;
+            let Value::Number(number) = resolved else {
+                return Ok(resolved);
             };
+            return project_resolved_number(self, index, &number).map_err(into_host_call_error);
         }
         Self::apply(
             catalog,
@@ -600,6 +592,7 @@ impl Host for BuiltinHost {
             entry,
             args,
             opts,
+            true,
             on_error,
         )
         .map_err(into_host_call_error)
@@ -619,34 +612,28 @@ impl Host for BuiltinHost {
         if matches!(
             entry.func,
             BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
-        ) && let Value::Number(number) = value
-        {
-            return match number.selection {
-                NumberSelection::Exact => Ok(value.clone()),
-                NumberSelection::Plural | NumberSelection::Ordinal => {
-                    let rules = if number.selection == NumberSelection::Ordinal {
-                        &self.ordinal_rules
-                    } else {
-                        &self.cardinal_rules
-                    };
-                    let category =
-                        resolved_plural_category(number, rules).map_err(into_host_call_error)?;
-                    if let Some(str_id) = index.category_pool_ids[category_index(category)] {
-                        Ok(Value::StrRef(str_id))
-                    } else {
-                        Ok(Value::Str(category_name(category).to_string()))
+        ) {
+            if value.is_fallback() {
+                return Ok(Value::Null);
+            }
+            if let Value::Number(number) = value {
+                return match number.selection {
+                    NumberSelection::Exact
+                    | NumberSelection::Plural
+                    | NumberSelection::Ordinal
+                    | NumberSelection::Invalid => {
+                        project_resolved_number(self, index, number).map_err(into_host_call_error)
                     }
-                }
-                NumberSelection::Invalid => Ok(Value::Null),
-                NumberSelection::None => self.call_select(
-                    catalog,
-                    index,
-                    fn_id,
-                    core::slice::from_ref(value),
-                    FunctionOptions::new(&[]),
-                    on_error,
-                ),
-            };
+                    NumberSelection::None => self.call_select(
+                        catalog,
+                        index,
+                        fn_id,
+                        core::slice::from_ref(value),
+                        FunctionOptions::new(&[]),
+                        on_error,
+                    ),
+                };
+            }
         }
         self.call_select(
             catalog,
@@ -667,16 +654,45 @@ impl Host for BuiltinHost {
         match value {
             Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
             Value::Number(number) => render_resolved_number(catalog, number),
-            Value::String(value) => Some(apply_bidi_dir(
-                Cow::Borrowed(value.text()),
-                Some(match value.direction {
-                    StringDirection::Auto => "auto",
-                    StringDirection::Ltr => "ltr",
-                    StringDirection::Rtl => "rtl",
-                }),
-            )),
+            Value::String(value) => {
+                let direction = match value.direction {
+                    StringDirection::Unspecified => None,
+                    StringDirection::Auto => Some("auto"),
+                    StringDirection::Ltr => Some("ltr"),
+                    StringDirection::Rtl => Some("rtl"),
+                };
+                Some(apply_bidi_dir(Cow::Borrowed(value.text()), direction))
+            }
             _ => None,
         }
+    }
+
+    fn format_default_to(
+        &mut self,
+        catalog: &Catalog,
+        index: &BuiltinHostCatalogIndex,
+        value: &Value,
+        sink: &mut dyn FormatSink,
+    ) -> bool {
+        if let Value::String(value) = value
+            && value.direction == StringDirection::Unspecified
+        {
+            sink.expression(value.text());
+            return true;
+        }
+        if let Value::Number(number) = value
+            && number.format == NumberFormatOptions::DEFAULT
+            && let NumberValue::Integer(value) = &number.value
+        {
+            let rendered = format_i64(*value);
+            sink.expression(rendered.as_str());
+            return true;
+        }
+        let Some(formatted) = self.format_default(catalog, index, value) else {
+            return false;
+        };
+        sink.expression(&formatted);
+        true
     }
 }
 
@@ -695,6 +711,10 @@ fn plain_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Cow<'a, str> {
             .map(Cow::Borrowed)
             .unwrap_or_else(|| Cow::Owned(id.to_string())),
         Value::Fallback(id) => catalog
+            .pool_string_opt(*id)
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| Cow::Owned(id.to_string())),
+        Value::FunctionFallback(id) => catalog
             .pool_string_opt(*id)
             .map(Cow::Borrowed)
             .unwrap_or_else(|| Cow::Owned(id.to_string())),
@@ -728,15 +748,20 @@ fn format_string(
     options: &EffectiveOptions<'_>,
 ) -> ResolvedString {
     let dir = options.get(BuiltinOptionKey::UDir);
-    let text = plain_text(catalog, value).into_owned();
     let direction = match dir.as_deref() {
+        None => StringDirection::Unspecified,
         Some("ltr") => StringDirection::Ltr,
         Some("rtl") => StringDirection::Rtl,
         _ => StringDirection::Auto,
     };
-    ResolvedString {
-        text: text.into_boxed_str(),
-        direction,
+    if let Value::Int(value) = value {
+        let text = format_i64(*value);
+        return ResolvedString::from_integer(text.as_str(), *value, direction);
+    }
+    let text = plain_text(catalog, value);
+    match text {
+        Cow::Borrowed(text) => ResolvedString::from_borrowed(text, direction),
+        Cow::Owned(text) => ResolvedString::from_owned(text, direction),
     }
 }
 
@@ -747,6 +772,7 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
         Value::LitRef { off, len } => catalog.literal_opt(*off, *len),
         Value::ResolvedSelect(value) => Some(value.text()),
         Value::String(value) => Some(value.text()),
+        Value::Fallback(_) | Value::FunctionFallback(_) => None,
         _ => None,
     }
 }
@@ -808,7 +834,7 @@ fn resolve_number(
             "plural" => NumberSelection::Plural,
             "ordinal" => NumberSelection::Ordinal,
             "exact" => NumberSelection::Exact,
-            _ => NumberSelection::Invalid,
+            _ => return Err(bad_option()),
         }
     } else {
         // A number selector uses cardinal plural rules when no explicit
@@ -846,30 +872,39 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
     {
         return Ok(NumberValue::Integer(value));
     }
-    let text = match value {
+    match value {
         Value::Int(value) => return Ok(NumberValue::Integer(*value)),
-        Value::Float(value) => value.to_string(),
-        _ => value_text(catalog, value)
-            .ok_or_else(bad_operand)?
-            .to_string(),
-    };
+        Value::String(value) if let Some(value) = value.integer_hint() => {
+            return Ok(NumberValue::Integer(value));
+        }
+        Value::Float(value) => {
+            let text = value.to_string();
+            return parse_number_text(&text);
+        }
+        _ => {}
+    }
+    let text = value_text(catalog, value).ok_or_else(bad_operand)?;
+    parse_number_text(text)
+}
+
+fn parse_number_text(text: &str) -> Result<NumberValue, FormatError> {
     // Parsing integers before any floating-point conversion is essential: an
     // i64 such as 9007199254740993 must remain exact.
     if text == "-0" {
         return Ok(NumberValue::Decimal(Box::new(
-            Decimal::from_str(&text).map_err(|_| bad_operand())?,
+            Decimal::from_str(text).map_err(|_| bad_operand())?,
         )));
     }
     if let Ok(value) = text.parse::<i64>() {
-        if parse_number_literal(&text).is_none() {
+        if parse_number_literal(text).is_none() {
             return Err(bad_operand());
         }
         return Ok(NumberValue::Integer(value));
     }
-    if parse_number_literal(&text).is_none() {
+    if parse_number_literal(text).is_none() {
         return Err(bad_operand());
     }
-    let decimal = match Decimal::from_str(&text) {
+    let decimal = match Decimal::from_str(text) {
         Ok(decimal) => decimal,
         Err(_) => {
             let value = text.parse::<f64>().map_err(|_| bad_operand())?;
@@ -885,13 +920,16 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
 /// not changed by a narrowing conversion.
 fn exact_integral_float(value: f64) -> Option<i64> {
     let limit = MAX_EXACT_I64_IN_F64 as f64;
-    if libm::trunc(value) == value && (-limit..=limit).contains(&value) {
-        // The range check above makes this cast exact and within i64 bounds.
-        #[allow(
+    if (-limit..=limit).contains(&value) {
+        #[expect(
             clippy::cast_possible_truncation,
-            reason = "the preceding exact range check proves this conversion is lossless"
+            reason = "the range and round-trip checks prove this conversion is exact"
         )]
-        Some(value as i64)
+        let integer = value as i64;
+        if integer as f64 != value {
+            return None;
+        }
+        Some(integer)
     } else {
         None
     }
@@ -902,26 +940,21 @@ fn resolve_number_format_options(
     options: &EffectiveOptions<'_>,
     integer_only: bool,
 ) -> Result<NumberFormatOptions, FormatError> {
-    let minimum_fraction_digits = if integer_only {
-        None
-    } else {
-        parse_digit_option_or_inherited(
-            options,
-            BuiltinOptionKey::MinimumFractionDigits,
-            inherited.minimum_fraction_digits,
-            MAX_FRACTION_DIGITS,
-        )?
-    };
-    let maximum_fraction_digits = if integer_only {
-        None
-    } else {
-        parse_digit_option_or_inherited(
-            options,
-            BuiltinOptionKey::MaximumFractionDigits,
-            inherited.maximum_fraction_digits,
-            MAX_FRACTION_DIGITS,
-        )?
-    };
+    let minimum_fraction_digits = parse_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MinimumFractionDigits,
+        inherited.minimum_fraction_digits,
+        MAX_FRACTION_DIGITS,
+    )?;
+    let maximum_fraction_digits = parse_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MaximumFractionDigits,
+        inherited.maximum_fraction_digits,
+        MAX_FRACTION_DIGITS,
+    )?;
+    // `:integer` ignores fraction formatting, but it must still validate
+    // explicitly supplied fraction options to preserve the function's error
+    // contract before discarding their resolved values below.
     validate_digit_range_relationship(
         minimum_fraction_digits.map(usize::from),
         maximum_fraction_digits.map(usize::from),
@@ -953,8 +986,16 @@ fn resolve_number_format_options(
         Some(_) => return Err(bad_option()),
     };
     Ok(NumberFormatOptions {
-        minimum_fraction_digits,
-        maximum_fraction_digits,
+        minimum_fraction_digits: if integer_only {
+            None
+        } else {
+            minimum_fraction_digits
+        },
+        maximum_fraction_digits: if integer_only {
+            None
+        } else {
+            maximum_fraction_digits
+        },
         minimum_integer_digits,
         sign_display,
         notation_scientific,
@@ -1066,46 +1107,6 @@ fn format_int_or_decimal_with_min_fraction_digits(mut text: String, minimum: usi
     text
 }
 
-fn plural_category(
-    value: &Value,
-    catalog: &Catalog,
-    rules: &PluralRules,
-    options: &EffectiveOptions<'_>,
-) -> Result<PluralCategory, FormatError> {
-    let minimum_fraction_digits = parse_number_digit_option(value, options, true)?;
-    let maximum_fraction_digits = parse_number_digit_option(value, options, false)?;
-    validate_digit_range_relationship(minimum_fraction_digits, maximum_fraction_digits)?;
-
-    if minimum_fraction_digits.is_none() && maximum_fraction_digits.is_none() {
-        return match value {
-            Value::Int(v) => Ok(rules.category_for(*v)),
-            Value::Float(v) => {
-                let decimal = Decimal::from_str(&v.to_string()).map_err(|_| bad_operand())?;
-                Ok(rules.category_for(&decimal))
-            }
-            Value::Number(number) => match &number.value {
-                NumberValue::Integer(value) => Ok(rules.category_for(*value)),
-                NumberValue::Decimal(value) => Ok(rules.category_for(value.as_ref())),
-                NumberValue::NonFinite(_) => Err(bad_operand()),
-            },
-            _ => {
-                let text = value_text(catalog, value).ok_or_else(bad_operand)?;
-                let decimal = Decimal::from_str(text).map_err(|_| bad_operand())?;
-                Ok(rules.category_for(&decimal))
-            }
-        };
-    }
-
-    let formatted = format_plural_operand(
-        value,
-        catalog,
-        minimum_fraction_digits,
-        maximum_fraction_digits,
-    )?;
-    let decimal = Decimal::from_str(&formatted).map_err(|_| bad_operand())?;
-    Ok(rules.category_for(&decimal))
-}
-
 /// Compute the category for a resolved number using the precision that was
 /// validated and retained on the value. This is intentionally separate from
 /// `plural_category`: stored values must be selectable without reapplying
@@ -1157,87 +1158,28 @@ fn resolved_plural_category(
     Ok(rules.category_for(&decimal))
 }
 
-fn format_plural_operand(
-    value: &Value,
-    catalog: &Catalog,
-    minimum_fraction_digits: Option<usize>,
-    maximum_fraction_digits: Option<usize>,
-) -> Result<String, FormatError> {
-    match value {
-        Value::Number(number) => Ok(apply_maximum_fraction_digits(
-            minimum_fraction_digits.map_or_else(
-                || number.text(),
-                |minimum| format_int_or_decimal_with_min_fraction_digits(number.text(), minimum),
-            ),
-            maximum_fraction_digits,
-        )),
-        Value::Int(v) => {
-            let rendered = if let Some(min) = minimum_fraction_digits {
-                format_int_with_min_fraction_digits(*v, min)
+fn project_resolved_number(
+    host: &BuiltinHost,
+    index: &BuiltinHostCatalogIndex,
+    number: &ResolvedNumber,
+) -> Result<Value, FormatError> {
+    match number.selection {
+        NumberSelection::Exact | NumberSelection::None => Ok(Value::Number(number.clone())),
+        NumberSelection::Plural | NumberSelection::Ordinal => {
+            let rules = if number.selection == NumberSelection::Ordinal {
+                &host.ordinal_rules
             } else {
-                v.to_string()
+                &host.cardinal_rules
             };
-            Ok(apply_maximum_fraction_digits(
-                rendered,
-                maximum_fraction_digits,
-            ))
-        }
-        Value::Float(v) => {
-            let rendered = if let Some(min) = minimum_fraction_digits {
-                format_float_with_min_fraction_digits(*v, min)
+            let category = resolved_plural_category(number, rules)?;
+            if let Some(str_id) = index.category_pool_ids[category_index(category)] {
+                Ok(Value::StrRef(str_id))
             } else {
-                v.to_string()
-            };
-            Ok(apply_maximum_fraction_digits(
-                rendered,
-                maximum_fraction_digits,
-            ))
-        }
-        _ => {
-            let text = value_text(catalog, value).ok_or_else(bad_operand)?;
-            if minimum_fraction_digits.is_none() {
-                return Ok(apply_maximum_fraction_digits(
-                    text.to_string(),
-                    maximum_fraction_digits,
-                ));
+                Ok(Value::Str(category_name(category).to_string()))
             }
-            let parsed = parse_number_literal(text).ok_or_else(bad_operand)?;
-            let digits = minimum_fraction_digits.unwrap_or(0);
-            let rendered = format!("{parsed:.digits$}");
-            Ok(apply_maximum_fraction_digits(
-                rendered,
-                maximum_fraction_digits,
-            ))
         }
+        NumberSelection::Invalid => Ok(Value::Null),
     }
-}
-
-fn parse_number_digit_option(
-    value: &Value,
-    options: &EffectiveOptions<'_>,
-    minimum: bool,
-) -> Result<Option<usize>, FormatError> {
-    let key = if minimum {
-        BuiltinOptionKey::MinimumFractionDigits
-    } else {
-        BuiltinOptionKey::MaximumFractionDigits
-    };
-    if let Some(found) = options.get(key) {
-        let value = found.parse::<usize>().map_err(|_| bad_option())?;
-        if value > MAX_FRACTION_DIGITS {
-            return Err(bad_option());
-        }
-        return Ok(Some(value));
-    }
-    if let Value::Number(number) = value {
-        return Ok(if minimum {
-            number.format.minimum_fraction_digits
-        } else {
-            number.format.maximum_fraction_digits
-        }
-        .map(usize::from));
-    }
-    Ok(None)
 }
 
 const CATEGORY_NAMES: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
@@ -1296,25 +1238,7 @@ fn validate_builtin_option_values(
 ) -> Result<(), FormatError> {
     validate_enum_option(options, BuiltinOptionKey::UDir, &["ltr", "rtl", "auto"])?;
     match func {
-        BuiltinFn::Number | BuiltinFn::Integer => {
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::SignDisplay,
-                &["auto", "always", "never"],
-            )?;
-            validate_enum_option(options, BuiltinOptionKey::Style, &["percent"])?;
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::Select,
-                &["exact", "plural", "ordinal"],
-            )?;
-            validate_enum_option(options, BuiltinOptionKey::Notation, &["scientific"])?;
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::UseGrouping,
-                &["auto", "always", "never", "min2"],
-            )?;
-        }
+        BuiltinFn::Number | BuiltinFn::Integer => {}
         BuiltinFn::Date => {
             validate_enum_option(
                 options,
@@ -1526,13 +1450,15 @@ fn parse_minimum_integer_digits(
     )
 }
 
-fn parse_sign_display(options: &EffectiveOptions<'_>) -> SignDisplay {
-    match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
-        Some("always") => SignDisplay::Always,
-        Some("never") => SignDisplay::Never,
-        Some("auto") | None => SignDisplay::Auto,
-        Some(other) => unreachable!("unexpected validated signDisplay value: {other}"),
-    }
+fn parse_sign_display(options: &EffectiveOptions<'_>) -> Result<SignDisplay, FormatError> {
+    Ok(
+        match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
+            Some("always") => SignDisplay::Always,
+            Some("never") => SignDisplay::Never,
+            Some("auto") | None => SignDisplay::Auto,
+            Some(_) => return Err(bad_option()),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1654,33 +1580,26 @@ fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError>
 fn format_percent(
     value: &Value,
     catalog: &Catalog,
-    options: &EffectiveOptions<'_>,
+    minimum_fraction_digits: Option<usize>,
+    sign_display: SignDisplay,
 ) -> Result<String, FormatError> {
     if let Value::Number(number) = value {
         if let NumberValue::NonFinite(value) = number.value {
-            return Ok(format_signed_string(
-                parse_sign_display(options),
-                format!("{}%", value),
-            ));
+            return Ok(format_signed_string(sign_display, format!("{}%", value)));
         }
         let rendered = multiply_decimal_by_100(&number.text())?;
-        let minimum = parse_minimum_fraction_digits(options)?;
-        let rendered = if let Some(minimum) = minimum {
+        let rendered = if let Some(minimum) = minimum_fraction_digits {
             format_int_or_decimal_with_min_fraction_digits(rendered, minimum)
         } else {
             rendered
         };
-        return Ok(format!(
-            "{}%",
-            format_signed_string(parse_sign_display(options), rendered)
-        ));
+        return Ok(format!("{}%", format_signed_string(sign_display, rendered)));
     }
     let mut number = numeric_operand(value, catalog)? * 100.0;
     if number == -0.0 {
         number = 0.0;
     }
-    let digits = parse_minimum_fraction_digits(options)?;
-    let rendered = if let Some(min) = digits {
+    let rendered = if let Some(min) = minimum_fraction_digits {
         format!("{number:.min$}")
     } else {
         number.to_string()
@@ -1905,10 +1824,12 @@ fn format_test_select(
     value: &Value,
     catalog: &Catalog,
     options: &EffectiveOptions<'_>,
+    selecting: bool,
 ) -> Result<String, FormatError> {
-    if options
-        .get(BuiltinOptionKey::Fails)
-        .is_some_and(|it| it == "select")
+    if selecting
+        && options
+            .get(BuiltinOptionKey::Fails)
+            .is_some_and(|it| it == "select")
     {
         return Err(implementation_failure(ImplementationFailure::TestSelect));
     }
@@ -1962,6 +1883,9 @@ struct EffectiveOptions<'a> {
 
 impl<'a> EffectiveOptions<'a> {
     fn has_runtime(&self, key: BuiltinOptionKey) -> bool {
+        if !self.runtime_options.has_raw_options() {
+            return false;
+        }
         self.option_keys_by_str_id
             .iter()
             .any(|(id, candidate)| *candidate == key && self.runtime_options.was_dynamic(*id))
@@ -2331,37 +2255,6 @@ fn format_number_default_locale(value: f64, locale: &Locale) -> String {
     rendered
 }
 
-fn format_float_with_min_fraction_digits(value: f64, min: usize) -> String {
-    // Fast path: integral values can be rendered once with zero fractional
-    // digits and then padded directly. This avoids an extra `to_string()`
-    // pass before the precision-formatting path for non-integral values.
-    if value.is_finite() && value % 1.0 == 0.0 {
-        let raw = value.to_string();
-        if min == 0 {
-            return raw;
-        }
-        let mut out = raw;
-        out.push('.');
-        for _ in 0..min {
-            out.push('0');
-        }
-        return out;
-    }
-    format!("{value:.min$}")
-}
-
-fn format_int_with_min_fraction_digits(value: i64, min: usize) -> String {
-    if min == 0 {
-        return value.to_string();
-    }
-    let mut rendered = value.to_string();
-    rendered.push('.');
-    for _ in 0..min {
-        rendered.push('0');
-    }
-    rendered
-}
-
 fn exact_i64_to_f64(value: i64) -> Result<f64, FormatError> {
     // Math-heavy builtin paths still use f64 internally. Reject integers that
     // would lose precision instead of silently rounding through the cast.
@@ -2373,10 +2266,13 @@ fn exact_i64_to_f64(value: i64) -> Result<f64, FormatError> {
 }
 
 fn apply_bidi_dir(value: Cow<'_, str>, dir: Option<&str>) -> String {
+    let Some(dir) = dir else {
+        return value.into_owned();
+    };
     if is_bidi_isolated(value.as_ref()) {
         return value.into_owned();
     }
-    let isolate_open = match dir.unwrap_or("auto") {
+    let isolate_open = match dir {
         "ltr" => '\u{2066}',
         "rtl" => '\u{2067}',
         _ => '\u{2068}',
@@ -2455,6 +2351,17 @@ mod tests {
                 fn_id,
                 args,
                 opts,
+                &mut |_| {},
+            )
+        }
+
+        fn project_select(&mut self, fn_id: u16, value: &Value) -> Result<Value, HostCallError> {
+            Host::project_select(
+                &mut self.host,
+                self.catalog,
+                &self.index,
+                fn_id,
+                value,
                 &mut |_| {},
             )
         }
@@ -2776,14 +2683,12 @@ mod tests {
     }
 
     #[test]
-    fn call_select_uses_valid_mode_from_stored_number() {
+    fn project_select_uses_valid_mode_from_stored_number() {
         let mut host = builtin_host(&["number select=plural", "number"]);
         let stored = host
             .call(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("stored number");
-        let selected = host
-            .call_select(1, &[stored], FunctionOptions::new(&[]))
-            .expect("stored selection");
+        let selected = host.project_select(0, &stored).expect("stored selection");
         assert_selector_result(host.catalog, selected, "one");
     }
 
@@ -2817,15 +2722,20 @@ mod tests {
 
     #[test]
     fn builtin_host_rejects_bad_minimum_fraction_digits() {
-        let mut host = builtin_host(&["number minimumFractionDigits=foo"]);
-        let err = host
-            .call(
-                0,
-                &[Value::Str("4.2".to_string())],
-                FunctionOptions::new(&[]),
-            )
-            .expect_err("must fail");
-        assert_function_error(err, MessageFunctionError::BadOption);
+        for function in [
+            "number minimumFractionDigits=foo",
+            "integer minimumFractionDigits=foo",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let err = host
+                .call(
+                    0,
+                    &[Value::Str("4.2".to_string())],
+                    FunctionOptions::new(&[]),
+                )
+                .expect_err("must fail");
+            assert_function_error(err, MessageFunctionError::BadOption);
+        }
     }
 
     #[test]
@@ -2835,6 +2745,20 @@ mod tests {
             .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
+    }
+
+    #[test]
+    fn percent_paths_reject_invalid_sign_display_literal() {
+        for function in [
+            "number style=percent signDisplay=bogus",
+            "percent signDisplay=bogus",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let err = host
+                .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
+                .expect_err("must fail");
+            assert_function_error(err, MessageFunctionError::BadOption);
+        }
     }
 
     #[test]
@@ -3136,12 +3060,8 @@ mod tests {
         let other = host
             .call(0, &[Value::Int(2)], FunctionOptions::new(&[]))
             .expect("formatted");
-        let one_category = host
-            .call_select(0, core::slice::from_ref(&one), FunctionOptions::new(&[]))
-            .expect("selected");
-        let other_category = host
-            .call_select(0, core::slice::from_ref(&other), FunctionOptions::new(&[]))
-            .expect("selected");
+        let one_category = host.project_select(0, &one).expect("selected");
+        let other_category = host.project_select(0, &other).expect("selected");
         assert_selector_result(host.catalog, one_category, "one");
         assert_selector_result(host.catalog, other_category, "other");
         assert_number_rendered(&mut host, one, "1");
@@ -3163,9 +3083,7 @@ mod tests {
         let other = host
             .call(0, &[Value::Int(11)], FunctionOptions::new(&[]))
             .expect("formatted");
-        let two_category = host
-            .call_select(0, core::slice::from_ref(&two), FunctionOptions::new(&[]))
-            .expect("selected");
+        let two_category = host.project_select(0, &two).expect("selected");
         assert_selector_result(host.catalog, two_category, "two");
         assert_number_rendered(&mut host, one, "1");
         assert_number_rendered(&mut host, two, "2");
@@ -3179,6 +3097,28 @@ mod tests {
         let out = host
             .call_select(0, &[Value::Int(1)], FunctionOptions::new(&[]))
             .expect("formatted");
+        assert_selector_result(host.catalog, out, "one");
+    }
+
+    #[test]
+    fn integer_call_select_resolves_string_operand_before_projection() {
+        let mut host = builtin_host(&["integer"]);
+        let out = host
+            .call_select(
+                0,
+                &[Value::Str("1.5".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("selected");
+        assert_selector_result(host.catalog, out, "one");
+    }
+
+    #[test]
+    fn offset_call_select_applies_adjustment_before_projection() {
+        let mut host = builtin_host(&["offset add=1"]);
+        let out = host
+            .call_select(0, &[Value::Str("0".to_string())], FunctionOptions::new(&[]))
+            .expect("selected");
         assert_selector_result(host.catalog, out, "one");
     }
 

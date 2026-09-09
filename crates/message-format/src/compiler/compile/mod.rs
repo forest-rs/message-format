@@ -1104,13 +1104,26 @@ fn collect_manifest_validation_errors(
 ) -> Vec<CompileError> {
     let mut errors = Vec::new();
     for message in messages {
-        collect_manifest_part_errors(&message.parts, manifest, message, &mut errors);
+        let mut selector_slots = BTreeSet::new();
+        let mut format_slots = BTreeSet::new();
+        collect_manifest_slot_uses(&message.parts, &mut format_slots, &mut selector_slots);
+        propagate_manifest_alias_uses(&message.parts, &mut format_slots, &mut selector_slots);
+        collect_manifest_part_errors(
+            &message.parts,
+            &format_slots,
+            &selector_slots,
+            manifest,
+            message,
+            &mut errors,
+        );
     }
     errors
 }
 
 fn collect_manifest_part_errors(
     parts: &[Part],
+    format_slots: &BTreeSet<u32>,
+    selector_slots: &BTreeSet<u32>,
     manifest: &FunctionManifest,
     message: &Message,
     errors: &mut Vec<CompileError>,
@@ -1128,8 +1141,28 @@ fn collect_manifest_part_errors(
                     errors,
                 );
             }
-            Part::Bind { value, .. } => {
-                collect_manifest_value_errors(value, manifest, message, errors);
+            Part::Bind { slot, value, .. } => {
+                let has_format_use = format_slots.contains(slot);
+                let has_select_use = selector_slots.contains(slot);
+                let use_site = if format_slots.contains(slot) {
+                    FunctionUse::Format
+                } else if has_select_use {
+                    FunctionUse::Select
+                } else {
+                    // An unused declaration is still an ordinary eager
+                    // resolution, not a selector call.
+                    FunctionUse::Format
+                };
+                collect_manifest_value_errors(value, use_site, manifest, message, errors);
+                if has_format_use && has_select_use {
+                    collect_manifest_value_usage_error(
+                        value,
+                        FunctionUse::Select,
+                        manifest,
+                        message,
+                        errors,
+                    );
+                }
             }
             Part::Select(SelectExpr {
                 selector,
@@ -1138,9 +1171,23 @@ fn collect_manifest_part_errors(
             }) => {
                 collect_selector_manifest_errors(selector, arms, manifest, message, errors);
                 for arm in arms {
-                    collect_manifest_part_errors(&arm.parts, manifest, message, errors);
+                    collect_manifest_part_errors(
+                        &arm.parts,
+                        format_slots,
+                        selector_slots,
+                        manifest,
+                        message,
+                        errors,
+                    );
                 }
-                collect_manifest_part_errors(default, manifest, message, errors);
+                collect_manifest_part_errors(
+                    default,
+                    format_slots,
+                    selector_slots,
+                    manifest,
+                    message,
+                    errors,
+                );
             }
             Part::Text(_)
             | Part::Literal(_)
@@ -1154,22 +1201,151 @@ fn collect_manifest_part_errors(
     }
 }
 
+fn collect_manifest_slot_uses(
+    parts: &[Part],
+    format_slots: &mut BTreeSet<u32>,
+    selector_slots: &mut BTreeSet<u32>,
+) {
+    for part in parts {
+        match part {
+            Part::Local(slot) => {
+                format_slots.insert(*slot);
+            }
+            Part::Call(call) => collect_manifest_call_slots(call, format_slots),
+            Part::CheckSelector(slot) => {
+                selector_slots.insert(*slot);
+            }
+            Part::Select(SelectExpr {
+                selector,
+                arms,
+                default,
+            }) => {
+                match selector {
+                    crate::compiler::semantic::SelectorExpr::Local { slot, .. }
+                    | crate::compiler::semantic::SelectorExpr::CheckedLocal { slot, .. } => {
+                        selector_slots.insert(*slot);
+                    }
+                    crate::compiler::semantic::SelectorExpr::Call { operand, func } => {
+                        collect_manifest_operand_slots(operand, format_slots);
+                        for option in &func.options {
+                            if let FunctionOptionValue::LocalVar { slot, .. } = option.value {
+                                format_slots.insert(slot);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                for arm in arms {
+                    collect_manifest_slot_uses(&arm.parts, format_slots, selector_slots);
+                }
+                collect_manifest_slot_uses(default, format_slots, selector_slots);
+            }
+            Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => {
+                for option in options {
+                    if let FunctionOptionValue::LocalVar { slot, .. } = option.value {
+                        format_slots.insert(slot);
+                    }
+                }
+            }
+            Part::Bind { .. } | Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}
+        }
+    }
+}
+
+fn propagate_manifest_alias_uses(
+    parts: &[Part],
+    format_slots: &mut BTreeSet<u32>,
+    selector_slots: &mut BTreeSet<u32>,
+) {
+    while propagate_manifest_alias_uses_once(parts, format_slots, selector_slots) {}
+}
+
+fn propagate_manifest_alias_uses_once(
+    parts: &[Part],
+    format_slots: &mut BTreeSet<u32>,
+    selector_slots: &mut BTreeSet<u32>,
+) -> bool {
+    let mut changed = false;
+    for part in parts {
+        match part {
+            Part::Bind { slot, value, .. } => {
+                if let Part::Local(source) = value.as_ref() {
+                    if format_slots.contains(slot) {
+                        changed |= format_slots.insert(*source);
+                    }
+                    if selector_slots.contains(slot) {
+                        changed |= selector_slots.insert(*source);
+                    }
+                } else if let Part::Call(call) = value.as_ref() {
+                    let old_len = format_slots.len();
+                    collect_manifest_call_slots(call, format_slots);
+                    changed |= format_slots.len() != old_len;
+                }
+            }
+            Part::Select(SelectExpr { arms, default, .. }) => {
+                for arm in arms {
+                    changed |= propagate_manifest_alias_uses_once(
+                        &arm.parts,
+                        format_slots,
+                        selector_slots,
+                    );
+                }
+                changed |=
+                    propagate_manifest_alias_uses_once(default, format_slots, selector_slots);
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn collect_manifest_call_slots(call: &CallExpr, slots: &mut BTreeSet<u32>) {
+    collect_manifest_operand_slots(&call.operand, slots);
+    for option in &call.func.options {
+        if let FunctionOptionValue::LocalVar { slot, .. } = option.value {
+            slots.insert(slot);
+        }
+    }
+}
+
+fn collect_manifest_operand_slots(operand: &Operand, slots: &mut BTreeSet<u32>) {
+    match operand {
+        Operand::Local(slot) => {
+            slots.insert(*slot);
+        }
+        Operand::Call(call) => collect_manifest_call_slots(call, slots),
+        Operand::Var(_) | Operand::Literal { .. } => {}
+    }
+}
+
 fn collect_manifest_value_errors(
     value: &Part,
+    use_site: FunctionUse,
     manifest: &FunctionManifest,
     message: &Message,
     errors: &mut Vec<CompileError>,
 ) {
     if let Part::Call(CallExpr { operand, func, .. }) = value {
         collect_operand_manifest_errors(operand, manifest, message, errors);
-        collect_function_spec_errors_into(
-            func,
-            Some(operand),
-            FunctionUse::Select,
-            manifest,
-            message,
-            errors,
-        );
+        collect_function_spec_errors_into(func, Some(operand), use_site, manifest, message, errors);
+    }
+}
+
+fn collect_manifest_value_usage_error(
+    value: &Part,
+    use_site: FunctionUse,
+    manifest: &FunctionManifest,
+    message: &Message,
+    errors: &mut Vec<CompileError>,
+) {
+    let Part::Call(CallExpr { func, .. }) = value else {
+        return;
+    };
+    let Some(schema) = manifest.get(&func.name) else {
+        return;
+    };
+    if let Err(error) = validate_function_usage(schema, func, use_site, message) {
+        errors.push(error);
     }
 }
 

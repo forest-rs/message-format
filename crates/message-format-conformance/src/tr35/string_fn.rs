@@ -125,6 +125,33 @@ fn string_input_reannotates_to_number() {
     );
 }
 
+#[test]
+fn integer_extremes_survive_string_numeric_reannotation() {
+    for value in [i64::MIN, i64::MAX] {
+        assert_format(
+            ".input {$x :string} .local $y = {$x :number} {{{$y}}}",
+            &[("x", Value::Int(value))],
+            &value.to_string(),
+        );
+    }
+}
+
+/// Declaration failures are reported even when the sole use is in an unselected arm.
+#[test]
+fn string_numeric_chain_remains_eager_before_selection() {
+    let output = format_output(
+        ".input {$kind :string} .input {$s :string} .local $n = {$s :number} \
+         .match $kind a {{A}} * {{{$n}}}",
+        &[
+            ("kind", Value::Str("a".into())),
+            ("s", Value::Str("invalid".into())),
+        ],
+    );
+    assert_eq!(output.value, "A");
+    assert_eq!(output.errors.len(), 1, "errors: {:?}", output.errors);
+    assert!(is_bad_operand(&output.errors[0]));
+}
+
 /// A missing string input remains a recoverable missing-argument error.
 #[test]
 fn missing_string_input_reannotation_errors() {
@@ -134,6 +161,20 @@ fn missing_string_input_reannotation_errors() {
     );
     assert_eq!(output.value, "value={$y}");
     assert_errors_multiset(&output.errors, &[FormatError::MissingArg("x".to_string())]);
+}
+
+/// Inlining does not duplicate a non-elidable local string declaration.
+#[test]
+fn local_string_numeric_chain_reports_missing_input_once() {
+    let output = format_output(
+        ".local $s = {$raw :string} .local $n = {$s :number} {{value={$n}}}",
+        &[],
+    );
+    assert_eq!(output.value, "value={$n}");
+    assert_errors_multiset(
+        &output.errors,
+        &[FormatError::MissingArg("raw".to_string())],
+    );
 }
 
 /// Quoted string literals can be consumed by a numeric reannotation.

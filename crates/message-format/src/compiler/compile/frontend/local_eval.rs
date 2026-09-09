@@ -10,7 +10,7 @@ use alloc::{
 use super::bindings::{DeclFunction, LocalValue};
 use super::*;
 use crate::common::text::{
-    SignDisplay, format_signed_number, format_signed_string, parse_number_literal,
+    SignDisplay, format_signed_number, format_signed_string, parse_number_literal, truncate_f64,
 };
 
 pub(super) fn local_function_may_fail_select(function_spec: &FunctionSpec) -> bool {
@@ -100,7 +100,7 @@ pub(super) fn apply_literal_function(
         }
         "integer" => {
             if let Some(value) = parse_number_literal(&literal) {
-                let truncated = libm::trunc(value);
+                let truncated = truncate_f64(value);
                 literal = format_signed_number(parse_sign_display(&options), truncated);
             }
         }
@@ -208,7 +208,10 @@ fn apply_offset(value: f64, options: &BTreeMap<String, String>) -> Option<f64> {
 }
 
 fn apply_bidi_dir(value: String, dir: Option<&str>) -> String {
-    let isolate_open = match dir.unwrap_or("auto") {
+    let Some(dir) = dir else {
+        return value;
+    };
+    let isolate_open = match dir {
         "ltr" => '\u{2066}',
         "rtl" => '\u{2067}',
         _ => '\u{2068}',
