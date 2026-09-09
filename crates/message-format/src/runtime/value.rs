@@ -53,7 +53,7 @@ pub enum Value {
     },
     /// A number resolved by a built-in numeric function.
     #[cfg(feature = "icu4x")]
-    Number(Box<ResolvedNumber>),
+    Number(ResolvedNumber),
     /// A value resolved by the test-only `test:select` function.
     ///
     /// The private payload preserves the function's selected precision across
@@ -138,7 +138,7 @@ pub(crate) enum NumberValue {
     /// Exact signed integer payload.
     Integer(i64),
     /// Exact finite decimal payload.
-    Decimal(Decimal),
+    Decimal(Box<Decimal>),
     /// A floating-point non-finite value retained for compatibility with the
     /// existing runtime rendering behavior.
     NonFinite(f64),
@@ -150,9 +150,9 @@ pub(crate) enum NumberValue {
 #[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NumberFormatOptions {
-    pub(crate) minimum_fraction_digits: Option<usize>,
-    pub(crate) maximum_fraction_digits: Option<usize>,
-    pub(crate) minimum_integer_digits: Option<usize>,
+    pub(crate) minimum_fraction_digits: Option<u8>,
+    pub(crate) maximum_fraction_digits: Option<u8>,
+    pub(crate) minimum_integer_digits: Option<u8>,
     pub(crate) sign_display: NumberSignDisplay,
     pub(crate) notation_scientific: bool,
     pub(crate) grouping: NumberGrouping,

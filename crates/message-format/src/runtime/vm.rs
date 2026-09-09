@@ -2195,12 +2195,12 @@ mod tests {
             .build();
         let catalog = catalog_for_test(&["main", "value", "1", "other"], "Xother", &code);
         let mut formatter = formatter_noop(&catalog);
-        let value = Value::Number(Box::new(ResolvedNumber::new(
+        let value = Value::Number(ResolvedNumber::new(
             NumberValue::Integer(1),
             NumberFormatOptions::DEFAULT,
             NumberSelection::Invalid,
             true,
-        )));
+        ));
         let args = vec![(arg_id(&catalog, "value"), value)];
         let mut sink = String::new();
         let errors = formatter
