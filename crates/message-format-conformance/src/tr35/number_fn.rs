@@ -521,6 +521,22 @@ fn missing_local_option_is_recoverable() {
 }
 
 #[test]
+fn numeric_local_selector_does_not_reresolve_options() {
+    let output = format_output(
+        ".input {$digits :string} .input {$n :number minimumFractionDigits=$digits} .match $n one {{one}} * {{other}}",
+        &[("n", Value::Int(1))],
+    );
+    assert_eq!(output.value, "one");
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("digits"),
+            function_error(MessageFunctionError::BadOption),
+        ],
+    );
+}
+
+#[test]
 fn missing_dynamic_select_is_unselectable_but_formats() {
     let output = format_output(
         ".local $n = {1 :number select=$missing} .match $n 1 {{wrong}} one {{wrong}} * {{other {$n}}}",

@@ -334,8 +334,6 @@ impl BuiltinHost {
         catalog: &Catalog,
         index: &BuiltinHostCatalogIndex,
         locale: &Locale,
-        cardinal_rules: &PluralRules,
-        ordinal_rules: &PluralRules,
         icu_formatters: &mut IcuFormatterCache,
         entry: &BuiltinEntry,
         args: &[Value],
@@ -371,26 +369,12 @@ impl BuiltinHost {
                     minimum_fraction_digits,
                     maximum_fraction_digits,
                 )?;
-                let resolved = resolve_number(
-                    raw_arg,
-                    catalog,
-                    integer_only,
-                    &options,
-                    cardinal_rules,
-                    ordinal_rules,
-                    on_error,
-                )?;
+                let resolved = resolve_number(raw_arg, catalog, integer_only, &options, on_error)?;
                 Ok(Value::Number(resolved))
             }
             BuiltinFn::Percent => Ok(Value::Str(format_percent(raw_arg, catalog, &options)?)),
             BuiltinFn::Currency => Ok(Value::Str(format_currency(raw_arg, catalog, &options)?)),
-            BuiltinFn::Offset => Ok(Value::Number(resolve_offset(
-                raw_arg,
-                catalog,
-                &options,
-                cardinal_rules,
-                ordinal_rules,
-            )?)),
+            BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
                 format_test_select(raw_arg, catalog, &options)?,
             )))),
@@ -532,8 +516,6 @@ impl Host for BuiltinHost {
             catalog,
             index,
             &self.locale,
-            &self.cardinal_rules,
-            &self.ordinal_rules,
             &mut self.icu_formatters,
             entry,
             args,
@@ -567,20 +549,33 @@ impl Host for BuiltinHost {
             }
             return Ok(Value::Null);
         }
-        if matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer)
-            && args.first().is_some_and(|value| {
-                matches!(value, Value::Number(number) if number.selection == NumberSelection::Exact)
-            })
+        if matches!(
+            entry.func,
+            BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
+        ) && let Some(Value::Number(number)) = args.first()
         {
-            return Ok(args.first().cloned().expect("checked above"));
+            match number.selection {
+                NumberSelection::Exact => return Ok(args[0].clone()),
+                NumberSelection::Plural | NumberSelection::Ordinal => {
+                    let rules = if number.selection == NumberSelection::Ordinal {
+                        &self.ordinal_rules
+                    } else {
+                        &self.cardinal_rules
+                    };
+                    let category =
+                        resolved_plural_category(number, rules).map_err(into_host_call_error)?;
+                    return if let Some(str_id) = index.category_pool_ids[category_index(category)] {
+                        Ok(Value::StrRef(str_id))
+                    } else {
+                        Ok(Value::Str(category_name(category).to_string()))
+                    };
+                }
+                NumberSelection::Invalid => return Ok(Value::Null),
+                NumberSelection::None => {}
+            }
         }
         // For number/integer with select=plural|ordinal, compute category and
         // return a StrRef into the string pool instead of allocating.
-        if args.first().is_some_and(|value| {
-            matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid)
-        }) {
-            return Ok(Value::Null);
-        }
         if let Some(rules) = self.plural_rules_for(catalog, index, entry, args, opts) {
             let raw_arg = args
                 .first()
@@ -600,8 +595,6 @@ impl Host for BuiltinHost {
             catalog,
             index,
             &self.locale,
-            &self.cardinal_rules,
-            &self.ordinal_rules,
             &mut self.icu_formatters,
             entry,
             args,
@@ -708,8 +701,6 @@ fn resolve_number(
     catalog: &Catalog,
     integer_only: bool,
     options: &EffectiveOptions<'_>,
-    cardinal_rules: &PluralRules,
-    ordinal_rules: &PluralRules,
     on_error: &mut dyn FnMut(MessageFunctionError),
 ) -> Result<ResolvedNumber, FormatError> {
     let (mut number, inherited_format, inherited_selection, inherited_select) = match value {
@@ -766,27 +757,19 @@ fn resolve_number(
         }
     } else {
         // A number selector uses cardinal plural rules when no explicit
-        // selection mode is present. Retain that mode on the stored value so
-        // direct local/input matching can use the resolved category.
+        // selection mode is present. Retain the mode so `call_select` can
+        // project a stored value to its category without reapplying the call.
         match inherited_selection {
             NumberSelection::None => NumberSelection::Plural,
             selection => selection,
         }
     };
-    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
-    if matches!(
+    Ok(ResolvedNumber::new(
+        number,
+        format,
         selection,
-        NumberSelection::Plural | NumberSelection::Ordinal
-    ) && !matches!(resolved.value, NumberValue::NonFinite(_))
-    {
-        let rules = if selection == NumberSelection::Ordinal {
-            ordinal_rules
-        } else {
-            cardinal_rules
-        };
-        resolved.set_selection_category(Some(resolved_plural_category(&resolved, rules)?));
-    }
-    Ok(resolved)
+        has_explicit_select,
+    ))
 }
 
 fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, FormatError> {
@@ -1733,8 +1716,6 @@ fn resolve_offset(
     value: &Value,
     catalog: &Catalog,
     options: &EffectiveOptions<'_>,
-    cardinal_rules: &PluralRules,
-    ordinal_rules: &PluralRules,
 ) -> Result<ResolvedNumber, FormatError> {
     let (mut number, inherited_format, selection, has_explicit_select) = match value {
         Value::Number(number) => (
@@ -1772,20 +1753,12 @@ fn resolve_offset(
         number = checked_offset(number, adjustment, subtract)?;
     }
     let format = resolve_number_format_options(inherited_format, options, false)?;
-    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
-    if matches!(
+    Ok(ResolvedNumber::new(
+        number,
+        format,
         selection,
-        NumberSelection::Plural | NumberSelection::Ordinal
-    ) && !matches!(resolved.value, NumberValue::NonFinite(_))
-    {
-        let rules = if selection == NumberSelection::Ordinal {
-            ordinal_rules
-        } else {
-            cardinal_rules
-        };
-        resolved.set_selection_category(Some(resolved_plural_category(&resolved, rules)?));
-    }
-    Ok(resolved)
+        has_explicit_select,
+    ))
 }
 
 fn number_text(value: &NumberValue) -> String {
@@ -3116,14 +3089,14 @@ mod tests {
         let other = host
             .call(0, &[Value::Int(2)], FunctionOptions::new(&[]))
             .expect("formatted");
-        let Value::Number(one_number) = &one else {
-            panic!("number function must return a resolved number");
-        };
-        assert_eq!(one_number.selection_category, Some(PluralCategory::One));
-        let Value::Number(other_number) = &other else {
-            panic!("number function must return a resolved number");
-        };
-        assert_eq!(other_number.selection_category, Some(PluralCategory::Other));
+        let one_category = host
+            .call_select(0, core::slice::from_ref(&one), FunctionOptions::new(&[]))
+            .expect("selected");
+        let other_category = host
+            .call_select(0, core::slice::from_ref(&other), FunctionOptions::new(&[]))
+            .expect("selected");
+        assert_selector_result(host.catalog, one_category, "one");
+        assert_selector_result(host.catalog, other_category, "other");
         assert_number_rendered(&mut host, one, "1");
         assert_number_rendered(&mut host, other, "2");
     }
@@ -3143,10 +3116,10 @@ mod tests {
         let other = host
             .call(0, &[Value::Int(11)], FunctionOptions::new(&[]))
             .expect("formatted");
-        let Value::Number(two_number) = &two else {
-            panic!("number function must return a resolved number");
-        };
-        assert_eq!(two_number.selection_category, Some(PluralCategory::Two));
+        let two_category = host
+            .call_select(0, core::slice::from_ref(&two), FunctionOptions::new(&[]))
+            .expect("selected");
+        assert_selector_result(host.catalog, two_category, "two");
         assert_number_rendered(&mut host, one, "1");
         assert_number_rendered(&mut host, two, "2");
         assert_number_rendered(&mut host, few, "3");

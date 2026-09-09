@@ -12,6 +12,7 @@ use alloc::{
 };
 use core::str;
 
+pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 #[cfg(feature = "icu4x")]
 use crate::runtime::value::{NumberSelection, ResolvedNumber};
 use crate::runtime::{
@@ -20,10 +21,6 @@ use crate::runtime::{
     schema::decode_opcode_and_next_pc,
     value::{Args, StrId, Value},
 };
-#[cfg(feature = "icu4x")]
-use icu_plurals::PluralCategory;
-
-pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 
 fn store_value(values: &mut Vec<Value>, value: Value) -> usize {
     let id = values.len();
@@ -383,8 +380,6 @@ enum SelectorValue<'a> {
 enum CaseMatch {
     No,
     Exact,
-    #[cfg(feature = "icu4x")]
-    Category,
 }
 
 enum ExprStatePendingErrors {
@@ -632,7 +627,6 @@ where
     locals.clear();
     let mut selector: Option<SelectorValue<'_>> = None;
     let mut expr_state = ExprState::new(&diagnostics);
-    let mut deferred_case = None;
     let mut remaining_fuel = fuel;
 
     loop {
@@ -741,7 +735,6 @@ where
                     next_pc,
                     base,
                     code,
-                    &mut deferred_case,
                 )? {
                     pc = jump_pc;
                     continue;
@@ -867,17 +860,14 @@ fn handle_select_instruction<'a>(
     next_pc: u32,
     base: usize,
     code: &[u8],
-    deferred_case: &mut Option<u32>,
 ) -> Result<Option<u32>, FormatError> {
     match opcode {
         Opcode::SelectArg => {
-            *deferred_case = None;
             let key_id = read_u32(code, base + 1)?;
             *selector = Some(load_selector_value(args, catalog, key_id, diagnostics));
             Ok(None)
         }
         Opcode::SelectLocal => {
-            *deferred_case = None;
             let slot = local_slot(code, base)?;
             if locals.get(slot).is_none() {
                 return Err(FormatError::Trap(Trap::InvalidLocalSlot));
@@ -886,7 +876,6 @@ fn handle_select_instruction<'a>(
             Ok(None)
         }
         Opcode::SelectBegin => {
-            *deferred_case = None;
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
             check_selector_value(stored_value(values, value)?, diagnostics);
             *selector = Some(SelectorValue::Stored(value));
@@ -899,29 +888,17 @@ fn handle_select_instruction<'a>(
             let case_str_id = read_u32(code, base + 1)?;
             match selector.case_match(values, locals, case_str_id, catalog)? {
                 CaseMatch::Exact => {
-                    *deferred_case = None;
                     let rel = read_i32(code, base + 5)?;
                     apply_rel_jump(pc, next_pc, rel).map(Some)
-                }
-                #[cfg(feature = "icu4x")]
-                CaseMatch::Category => {
-                    let rel = read_i32(code, base + 5)?;
-                    *deferred_case = Some(apply_rel_jump(pc, next_pc, rel)?);
-                    Ok(None)
                 }
                 CaseMatch::No => Ok(None),
             }
         }
         Opcode::CaseDefault => {
             let rel = read_i32(code, base + 1)?;
-            if let Some(jump_pc) = deferred_case.take() {
-                Ok(Some(jump_pc))
-            } else {
-                apply_rel_jump(pc, next_pc, rel).map(Some)
-            }
+            apply_rel_jump(pc, next_pc, rel).map(Some)
         }
         Opcode::SelectEnd => {
-            *deferred_case = None;
             *selector = None;
             Ok(None)
         }
@@ -1143,18 +1120,18 @@ fn handle_call_instruction<H: Host>(
     // A fallback can be propagated from a previously resolved local without
     // leaving a pending error in this expression. Such an operand still
     // short-circuits function resolution per MF2 formatting §16.1.
-    if expr_state.should_skip_call()
-        || call_args
-            .first()
-            .is_some_and(|value| matches!(value, Value::Fallback(_)))
-    {
+    let has_pending_operand_error = expr_state.should_skip_call();
+    let has_propagated_fallback = call_args
+        .first()
+        .is_some_and(|value| matches!(value, Value::Fallback(_)));
+    if has_pending_operand_error || has_propagated_fallback {
         // Option resolution is not reached when operand resolution fails.
         // Discard deferred option diagnostics so they cannot leak into a
         // later expression.
         let _ = expr_state.take_option_errors();
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             let mut pending_errors = pending_errors.into_iter();
-            if opcode == Opcode::CallSelect {
+            if opcode == Opcode::CallSelect && has_pending_operand_error {
                 record_bad_selector(diagnostics, pending_errors.next());
             }
             for error in pending_errors {
@@ -1459,18 +1436,6 @@ impl<'a> ValueView<'a> {
                 NumberSelection::Plural | NumberSelection::Ordinal => {
                     if string_value_matches_case(&v.text(), case) {
                         CaseMatch::Exact
-                    } else if v.selection_category.is_some_and(|category| {
-                        matches!(
-                            (category, case),
-                            (PluralCategory::Zero, "zero")
-                                | (PluralCategory::One, "one")
-                                | (PluralCategory::Two, "two")
-                                | (PluralCategory::Few, "few")
-                                | (PluralCategory::Many, "many")
-                                | (PluralCategory::Other, "other")
-                        )
-                    }) {
-                        CaseMatch::Category
                     } else {
                         CaseMatch::No
                     }

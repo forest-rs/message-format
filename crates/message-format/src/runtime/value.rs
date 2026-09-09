@@ -12,8 +12,6 @@ use crate::runtime::Catalog;
 
 #[cfg(feature = "icu4x")]
 use fixed_decimal::Decimal;
-#[cfg(feature = "icu4x")]
-use icu_plurals::PluralCategory;
 
 /// String-pool identifier.
 pub type StrId = u32;
@@ -125,10 +123,6 @@ pub struct ResolvedNumber {
     pub(crate) selection: NumberSelection,
     /// Whether a `select` option was explicitly resolved for this value.
     pub(crate) has_explicit_select: bool,
-    /// Category computed when this value was resolved by the locale-aware
-    /// built-in host. Stored values can therefore be matched without
-    /// re-running their function call.
-    pub(crate) selection_category: Option<PluralCategory>,
 }
 
 /// Exact numeric payload retained by [`ResolvedNumber`].
@@ -217,12 +211,7 @@ impl ResolvedNumber {
             format,
             selection,
             has_explicit_select,
-            selection_category: None,
         }
-    }
-
-    pub(crate) fn set_selection_category(&mut self, category: Option<PluralCategory>) {
-        self.selection_category = category;
     }
 
     /// Return the exact finite numeric value as an ASCII decimal string.
