@@ -270,6 +270,8 @@ pub enum Trap {
     ProgramCounterOverflow,
     /// A local slot was uninitialized or outside the dense slot range.
     InvalidLocalSlot,
+    /// An internal execution-value index was outside the value arena.
+    InvalidValueIndex,
     /// A multi-formatter catalog slot index was out of range.
     InvalidCatalogIndex,
 }
@@ -483,6 +485,7 @@ impl fmt::Display for Trap {
             Self::InvalidFallbackStringId => "invalid fallback str id",
             Self::ProgramCounterOverflow => "program counter overflow",
             Self::InvalidLocalSlot => "invalid local slot",
+            Self::InvalidValueIndex => "invalid execution value index",
             Self::InvalidCatalogIndex => "invalid catalog index",
         })
     }
