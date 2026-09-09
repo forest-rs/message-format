@@ -20,6 +20,7 @@ icu4x = [
     "dep:icu_plurals",
     "dep:icu_calendar",
     "dep:icu_datetime",
+    "dep:libm",
 ]
 compile = [
     "dep:hashbrown",
