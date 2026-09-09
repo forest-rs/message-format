@@ -12,6 +12,7 @@ use alloc::{
 };
 use core::str;
 
+pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 #[cfg(feature = "icu4x")]
 use crate::runtime::value::{NumberSelection, ResolvedNumber};
 use crate::runtime::{
@@ -20,10 +21,18 @@ use crate::runtime::{
     schema::decode_opcode_and_next_pc,
     value::{Args, StrId, Value},
 };
-#[cfg(feature = "icu4x")]
-use icu_plurals::PluralCategory;
 
-pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
+fn store_value(values: &mut Vec<Value>, value: Value) -> usize {
+    let id = values.len();
+    values.push(value);
+    id
+}
+
+fn stored_value(values: &[Value], id: usize) -> Result<&Value, FormatError> {
+    values
+        .get(id)
+        .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))
+}
 
 /// Resolved message handle for repeated formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +96,11 @@ impl<'a> FunctionOptions<'a> {
         self.raw
             .iter()
             .any(|(candidate, value)| *candidate == key && matches!(value, Value::Fallback(_)))
+    }
+
+    #[cfg(feature = "icu4x")]
+    pub(crate) fn has_raw_options(self) -> bool {
+        !self.raw.is_empty()
     }
 }
 
@@ -364,15 +378,13 @@ enum SelectorValue<'a> {
     /// Message-local selector resolved lazily for each case comparison.
     Local(usize),
     InvalidBorrowed,
-    Owned(Value),
+    Stored(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CaseMatch {
     No,
     Exact,
-    #[cfg(feature = "icu4x")]
-    Category,
 }
 
 enum ExprStatePendingErrors {
@@ -430,20 +442,25 @@ impl<'a> SelectorValue<'a> {
 
     fn case_match(
         &self,
-        locals: &[Value],
+        values: &[Value],
+        locals: &[usize],
         case_str_id: u32,
         catalog: &Catalog,
     ) -> Result<CaseMatch, FormatError> {
         if let Self::Local(slot) = self {
-            let value = locals
+            let value_id = locals
                 .get(*slot)
                 .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
+            let value = stored_value(values, *value_id)?;
+            if matches!(value, Value::StrRef(id) if *id == case_str_id) {
+                return Ok(CaseMatch::Exact);
+            }
             let case = catalog
                 .string(case_str_id)
                 .map_err(|_| FormatError::Trap(Trap::InvalidCaseStringId))?;
             return Ok(value_case_match(value, case, catalog));
         }
-        if self.fast_str_id().is_some_and(|id| id == case_str_id) {
+        if self.fast_str_id(values).is_some_and(|id| id == case_str_id) {
             return Ok(CaseMatch::Exact);
         }
 
@@ -454,17 +471,19 @@ impl<'a> SelectorValue<'a> {
             Self::Borrowed { view, .. } => view.case_match(case),
             Self::Local(_) => unreachable!("local selectors are handled above"),
             Self::InvalidBorrowed => CaseMatch::No,
-            Self::Owned(value) => value_case_match(value, case, catalog),
+            Self::Stored(value) => value_case_match(stored_value(values, *value)?, case, catalog),
         })
     }
 
-    fn fast_str_id(&self) -> Option<u32> {
+    fn fast_str_id(&self, values: &[Value]) -> Option<u32> {
         match self {
             Self::Borrowed { str_id, .. } => *str_id,
             Self::Local(_) => None,
             Self::InvalidBorrowed => None,
-            Self::Owned(Value::StrRef(id)) => Some(*id),
-            Self::Owned(_) => None,
+            Self::Stored(value_id) => match values.get(*value_id) {
+                Some(Value::StrRef(id)) => Some(*id),
+                _ => None,
+            },
         }
     }
 }
@@ -527,13 +546,9 @@ impl ExprState {
         self.fallback_id.is_some()
     }
 
-    fn push_fallback(
-        &mut self,
-        stack: &mut Vec<Value>,
-        catalog: &Catalog,
-    ) -> Result<(), FormatError> {
+    fn take_fallback(&mut self, catalog: &Catalog) -> Result<Value, FormatError> {
         let fallback_id = self.fallback_id.take();
-        push_expr_fallback(stack, catalog, fallback_id)
+        expr_fallback_value(catalog, fallback_id)
     }
 
     fn take_pending_errors(&mut self) -> Option<Vec<FormatError>> {
@@ -561,32 +576,34 @@ impl ExprState {
 
     fn finish_declaration(
         &mut self,
-        value: Value,
+        value_id: usize,
+        values: &mut Vec<Value>,
         catalog: &Catalog,
         diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
-    ) -> Result<Value, FormatError> {
-        let failed = self.should_skip_call() || matches!(value, Value::Fallback(_));
+    ) -> Result<usize, FormatError> {
+        let failed = self.should_skip_call()
+            || matches!(stored_value(values, value_id)?, Value::Fallback(_));
         if let Some(pending_errors) = self.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
             }
         }
 
-        let value = if failed {
+        let value_id = if failed {
             if let Some(fallback_id) = self.fallback_id.take() {
                 catalog
                     .string(fallback_id)
                     .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
-                Value::Fallback(fallback_id)
+                store_value(values, Value::Fallback(fallback_id))
             } else {
-                value
+                value_id
             }
         } else {
-            value
+            value_id
         };
 
         self.clear_fallback();
-        Ok(value)
+        Ok(value_id)
     }
 }
 
@@ -597,8 +614,9 @@ pub(crate) fn run_bytecode<H: Host, S>(
     entry_pc: u32,
     args: &dyn Args,
     fuel: Option<u64>,
-    stack: &mut Vec<Value>,
-    locals: &mut Vec<Value>,
+    values: &mut Vec<Value>,
+    stack: &mut Vec<usize>,
+    locals: &mut Vec<usize>,
     sink: &mut S,
     mut diagnostics: Option<&mut dyn DiagnosticsSink>,
     call_args: &mut Vec<Value>,
@@ -609,11 +627,11 @@ where
 {
     let code = catalog.code();
     let mut pc = entry_pc;
+    values.clear();
     stack.clear();
     locals.clear();
     let mut selector: Option<SelectorValue<'_>> = None;
     let mut expr_state = ExprState::new(&diagnostics);
-    let mut deferred_case = None;
     let mut remaining_fuel = fuel;
 
     loop {
@@ -634,7 +652,7 @@ where
             }
             Opcode::JmpIfFalse => {
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-                if is_falsey(&value, catalog) {
+                if is_falsey(stored_value(values, value)?, catalog) {
                     pc = apply_rel_jump(pc, next_pc, read_i32(code, base + 1)?)?;
                     continue;
                 }
@@ -644,23 +662,24 @@ where
                 if catalog.pool_string_len_opt(id).is_none() {
                     return Err(FormatError::Trap(Trap::InvalidConstStringId));
                 }
-                stack.push(Value::StrRef(id));
+                stack.push(store_value(values, Value::StrRef(id)));
             }
             Opcode::LoadArg => {
                 let id = read_u32(code, base + 1)?;
                 let value = load_arg_value(args, catalog, id, &mut expr_state);
-                stack.push(value);
+                stack.push(store_value(values, value));
             }
             Opcode::LoadOptionArg => {
                 let id = read_u32(code, base + 1)?;
                 let fallback_id = read_u32(code, base + 5)?;
                 let value = load_option_arg_value(args, catalog, id, fallback_id, &mut expr_state)?;
-                stack.push(value);
+                stack.push(store_value(values, value));
             }
             Opcode::StoreLocal => {
                 let slot = local_slot(code, base)?;
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-                let value = expr_state.finish_declaration(value, catalog, &mut diagnostics)?;
+                let value =
+                    expr_state.finish_declaration(value, values, catalog, &mut diagnostics)?;
                 if slot == locals.len() {
                     locals.push(value);
                 } else if let Some(existing) = locals.get_mut(slot) {
@@ -671,18 +690,17 @@ where
             }
             Opcode::LoadLocal => {
                 let slot = local_slot(code, base)?;
-                let value = locals
-                    .get(slot)
-                    .cloned()
-                    .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
-                stack.push(value);
+                if locals.get(slot).is_none() {
+                    return Err(FormatError::Trap(Trap::InvalidLocalSlot));
+                }
+                stack.push(locals[slot]);
             }
             Opcode::CheckSelector => {
                 let slot = local_slot(code, base)?;
                 let value = locals
                     .get(slot)
                     .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
-                check_selector_value(value, &mut diagnostics);
+                check_selector_value(stored_value(values, *value)?, &mut diagnostics);
             }
             Opcode::OutLit
             | Opcode::OutSlice
@@ -693,7 +711,9 @@ where
                     sink,
                     host,
                     index,
+                    values,
                     stack,
+                    locals,
                     catalog,
                     args,
                     &mut diagnostics,
@@ -709,6 +729,7 @@ where
             | Opcode::SelectEnd => {
                 if let Some(jump_pc) = handle_select_instruction(
                     args,
+                    values,
                     stack,
                     locals,
                     &mut selector,
@@ -719,7 +740,6 @@ where
                     next_pc,
                     base,
                     code,
-                    &mut deferred_case,
                 )? {
                     pc = jump_pc;
                     continue;
@@ -732,6 +752,7 @@ where
                 handle_call_opcode(
                     host,
                     index,
+                    values,
                     stack,
                     catalog,
                     opcode,
@@ -744,7 +765,16 @@ where
                 )?;
             }
             Opcode::MarkupOpen | Opcode::MarkupClose => {
-                handle_markup_instruction(sink, stack, catalog, opcode, base, code, call_options)?;
+                handle_markup_instruction(
+                    sink,
+                    values,
+                    stack,
+                    catalog,
+                    opcode,
+                    base,
+                    code,
+                    call_options,
+                )?;
             }
         }
 
@@ -781,7 +811,9 @@ fn handle_output_instruction<H: Host, S>(
     sink: &mut S,
     host: &mut H,
     index: &H::CatalogIndex,
-    stack: &mut Vec<Value>,
+    values: &[Value],
+    stack: &mut Vec<usize>,
+    _locals: &[usize],
     catalog: &Catalog,
     args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
@@ -808,7 +840,7 @@ where
         }
         Opcode::OutVal => {
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-            emit_output_value(sink, host, index, catalog, &value);
+            emit_output_value(sink, host, index, catalog, stored_value(values, value)?);
         }
         Opcode::OutArg => {
             let key_id = read_u32(catalog.code(), base + 1)?;
@@ -822,8 +854,9 @@ where
 
 fn handle_select_instruction<'a>(
     args: &'a dyn Args,
-    stack: &mut Vec<Value>,
-    locals: &[Value],
+    values: &[Value],
+    stack: &mut Vec<usize>,
+    locals: &[usize],
     selector: &mut Option<SelectorValue<'a>>,
     catalog: &'a Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
@@ -832,17 +865,14 @@ fn handle_select_instruction<'a>(
     next_pc: u32,
     base: usize,
     code: &[u8],
-    deferred_case: &mut Option<u32>,
 ) -> Result<Option<u32>, FormatError> {
     match opcode {
         Opcode::SelectArg => {
-            *deferred_case = None;
             let key_id = read_u32(code, base + 1)?;
             *selector = Some(load_selector_value(args, catalog, key_id, diagnostics));
             Ok(None)
         }
         Opcode::SelectLocal => {
-            *deferred_case = None;
             let slot = local_slot(code, base)?;
             if locals.get(slot).is_none() {
                 return Err(FormatError::Trap(Trap::InvalidLocalSlot));
@@ -851,10 +881,9 @@ fn handle_select_instruction<'a>(
             Ok(None)
         }
         Opcode::SelectBegin => {
-            *deferred_case = None;
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-            check_selector_value(&value, diagnostics);
-            *selector = Some(SelectorValue::Owned(value));
+            check_selector_value(stored_value(values, value)?, diagnostics);
+            *selector = Some(SelectorValue::Stored(value));
             Ok(None)
         }
         Opcode::CaseStr => {
@@ -862,31 +891,19 @@ fn handle_select_instruction<'a>(
                 .as_ref()
                 .ok_or(FormatError::Trap(Trap::CaseStringWithoutSelector))?;
             let case_str_id = read_u32(code, base + 1)?;
-            match selector.case_match(locals, case_str_id, catalog)? {
+            match selector.case_match(values, locals, case_str_id, catalog)? {
                 CaseMatch::Exact => {
-                    *deferred_case = None;
                     let rel = read_i32(code, base + 5)?;
                     apply_rel_jump(pc, next_pc, rel).map(Some)
-                }
-                #[cfg(feature = "icu4x")]
-                CaseMatch::Category => {
-                    let rel = read_i32(code, base + 5)?;
-                    *deferred_case = Some(apply_rel_jump(pc, next_pc, rel)?);
-                    Ok(None)
                 }
                 CaseMatch::No => Ok(None),
             }
         }
         Opcode::CaseDefault => {
             let rel = read_i32(code, base + 1)?;
-            if let Some(jump_pc) = deferred_case.take() {
-                Ok(Some(jump_pc))
-            } else {
-                apply_rel_jump(pc, next_pc, rel).map(Some)
-            }
+            apply_rel_jump(pc, next_pc, rel).map(Some)
         }
         Opcode::SelectEnd => {
-            *deferred_case = None;
             *selector = None;
             Ok(None)
         }
@@ -907,7 +924,7 @@ fn load_selector_value<'a>(
             diagnostics,
             Some(FormatError::MissingArg(format_id(catalog, key_id))),
         );
-        SelectorValue::Owned(Value::Null)
+        SelectorValue::InvalidBorrowed
     }
 }
 
@@ -943,19 +960,16 @@ fn load_option_arg_value(
     Ok(Value::Fallback(fallback_id))
 }
 
-fn decode_call_operands(
-    stack: &mut Vec<Value>,
-    catalog: &Catalog,
+fn decode_call_args(
+    values: &[Value],
+    stack: &mut Vec<usize>,
     arg_count: usize,
-    optc: usize,
     call_args: &mut Vec<Value>,
-    call_options: &mut Vec<(u32, Value)>,
 ) -> Result<(), FormatError> {
-    decode_option_pairs(stack, catalog, optc, call_options, resolve_call_option_key)?;
-
     call_args.clear();
     for _ in 0..arg_count {
-        call_args.push(stack.pop().ok_or(FormatError::StackUnderflow)?);
+        call_args
+            .push(stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone());
     }
     call_args.reverse();
 
@@ -963,7 +977,8 @@ fn decode_call_operands(
 }
 
 fn decode_option_pairs(
-    stack: &mut Vec<Value>,
+    values: &[Value],
+    stack: &mut Vec<usize>,
     catalog: &Catalog,
     optc: usize,
     options: &mut Vec<(u32, Value)>,
@@ -971,8 +986,8 @@ fn decode_option_pairs(
 ) -> Result<(), FormatError> {
     options.clear();
     for _ in 0..optc {
-        let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-        let key = stack.pop().ok_or(FormatError::StackUnderflow)?;
+        let value = stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone();
+        let key = stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone();
         let key_id = resolve_key(key, catalog)?;
         options.push((key_id, value));
     }
@@ -1006,7 +1021,8 @@ fn resolve_markup_option_key(key: Value, _catalog: &Catalog) -> Result<u32, Form
 fn handle_call_opcode<H: Host>(
     host: &mut H,
     index: &H::CatalogIndex,
-    stack: &mut Vec<Value>,
+    values: &mut Vec<Value>,
+    stack: &mut Vec<usize>,
     catalog: &Catalog,
     opcode: Opcode,
     base: usize,
@@ -1020,24 +1036,49 @@ fn handle_call_opcode<H: Host>(
     let arg_count = code[base + 3] as usize;
     let optc = code[base + 4] as usize;
 
-    decode_call_operands(stack, catalog, arg_count, optc, call_args, call_options)?;
-    handle_call_instruction(
-        host,
-        index,
-        opcode,
-        fn_id,
-        call_args,
-        call_options,
+    decode_option_pairs(
+        values,
         stack,
         catalog,
-        diagnostics,
-        expr_state,
-    )
+        optc,
+        call_options,
+        resolve_call_option_key,
+    )?;
+    let result = if arg_count == 1 {
+        let arg = stack.pop().ok_or(FormatError::StackUnderflow)?;
+        handle_call_instruction(
+            host,
+            index,
+            opcode,
+            fn_id,
+            core::slice::from_ref(stored_value(values, arg)?),
+            call_options,
+            catalog,
+            diagnostics,
+            expr_state,
+        )?
+    } else {
+        decode_call_args(values, stack, arg_count, call_args)?;
+        handle_call_instruction(
+            host,
+            index,
+            opcode,
+            fn_id,
+            call_args,
+            call_options,
+            catalog,
+            diagnostics,
+            expr_state,
+        )?
+    };
+    stack.push(store_value(values, result));
+    Ok(())
 }
 
 fn handle_markup_instruction<S>(
     sink: &mut S,
-    stack: &mut Vec<Value>,
+    values: &[Value],
+    stack: &mut Vec<usize>,
     catalog: &Catalog,
     opcode: Opcode,
     base: usize,
@@ -1050,6 +1091,7 @@ where
     let name_str_id = read_u32(code, base + 1)?;
     let optc = code[base + 5] as usize;
     decode_option_pairs(
+        values,
         stack,
         catalog,
         optc,
@@ -1073,29 +1115,28 @@ fn handle_call_instruction<H: Host>(
     fn_id: u16,
     call_args: &[Value],
     call_options: &[(u32, Value)],
-    stack: &mut Vec<Value>,
     catalog: &Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
-) -> Result<(), FormatError> {
+) -> Result<Value, FormatError> {
     // If a missing variable was loaded as an operand for this function call,
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
     // TR35 §16.
     // A fallback can be propagated from a previously resolved local without
     // leaving a pending error in this expression. Such an operand still
     // short-circuits function resolution per MF2 formatting §16.1.
-    if expr_state.should_skip_call()
-        || call_args
-            .first()
-            .is_some_and(|value| matches!(value, Value::Fallback(_)))
-    {
+    let has_pending_operand_error = expr_state.should_skip_call();
+    let has_propagated_fallback = call_args
+        .first()
+        .is_some_and(|value| matches!(value, Value::Fallback(_)));
+    if has_pending_operand_error || has_propagated_fallback {
         // Option resolution is not reached when operand resolution fails.
         // Discard deferred option diagnostics so they cannot leak into a
         // later expression.
         let _ = expr_state.take_option_errors();
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             let mut pending_errors = pending_errors.into_iter();
-            if opcode == Opcode::CallSelect {
+            if opcode == Opcode::CallSelect && has_pending_operand_error {
                 record_bad_selector(diagnostics, pending_errors.next());
             }
             for error in pending_errors {
@@ -1104,13 +1145,36 @@ fn handle_call_instruction<H: Host>(
         }
         if opcode == Opcode::CallSelect {
             expr_state.clear_fallback();
-            stack.push(Value::Null);
+            Ok(Value::Null)
         } else {
-            expr_state.push_fallback(stack, catalog)?;
+            expr_state.take_fallback(catalog)
         }
-        return Ok(());
+    } else {
+        handle_resolved_call(
+            host,
+            index,
+            opcode,
+            fn_id,
+            call_args,
+            call_options,
+            catalog,
+            diagnostics,
+            expr_state,
+        )
     }
+}
 
+fn handle_resolved_call<H: Host>(
+    host: &mut H,
+    index: &H::CatalogIndex,
+    opcode: Opcode,
+    fn_id: u16,
+    call_args: &[Value],
+    call_options: &[(u32, Value)],
+    catalog: &Catalog,
+    diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
+    expr_state: &mut ExprState,
+) -> Result<Value, FormatError> {
     if let Some(option_errors) = expr_state.take_option_errors() {
         for error in option_errors {
             record_diagnostic(diagnostics, error);
@@ -1158,8 +1222,7 @@ fn handle_call_instruction<H: Host>(
                 // error.
                 record_bad_selector(diagnostics, None);
             }
-            stack.push(result);
-            Ok(())
+            Ok(result)
         }
         Err(err) => {
             let err = match err {
@@ -1170,12 +1233,11 @@ fn handle_call_instruction<H: Host>(
                 record_diagnostic(diagnostics, into_bad_selector(err));
                 expr_state.clear_fallback();
                 expr_state.clear_pending_errors();
-                stack.push(Value::Null);
-                Ok(())
+                Ok(Value::Null)
             } else if expr_state.has_fallback() {
                 record_diagnostic(diagnostics, err);
                 expr_state.clear_pending_errors();
-                expr_state.push_fallback(stack, catalog)
+                expr_state.take_fallback(catalog)
             } else {
                 Err(err)
             }
@@ -1183,20 +1245,15 @@ fn handle_call_instruction<H: Host>(
     }
 }
 
-fn push_expr_fallback(
-    stack: &mut Vec<Value>,
-    catalog: &Catalog,
-    fallback_id: Option<u32>,
-) -> Result<(), FormatError> {
+fn expr_fallback_value(catalog: &Catalog, fallback_id: Option<u32>) -> Result<Value, FormatError> {
     if let Some(fb_id) = fallback_id {
         catalog
             .string(fb_id)
             .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
-        stack.push(Value::Fallback(fb_id));
+        Ok(Value::Fallback(fb_id))
     } else {
-        stack.push(Value::Null);
+        Ok(Value::Null)
     }
-    Ok(())
 }
 
 fn apply_rel_jump(pc: u32, next_pc: u32, rel32: i32) -> Result<u32, FormatError> {
@@ -1384,18 +1441,6 @@ impl<'a> ValueView<'a> {
                 NumberSelection::Plural | NumberSelection::Ordinal => {
                     if string_value_matches_case(&v.text(), case) {
                         CaseMatch::Exact
-                    } else if v.selection_category.is_some_and(|category| {
-                        matches!(
-                            (category, case),
-                            (PluralCategory::Zero, "zero")
-                                | (PluralCategory::One, "one")
-                                | (PluralCategory::Two, "two")
-                                | (PluralCategory::Few, "few")
-                                | (PluralCategory::Many, "many")
-                                | (PluralCategory::Other, "other")
-                        )
-                    }) {
-                        CaseMatch::Category
                     } else {
                         CaseMatch::No
                     }
@@ -2102,11 +2147,9 @@ mod tests {
     #[test]
     fn expr_fallback_uses_strref_when_catalog_string_exists() {
         let catalog = catalog_for_test(&["main", "{$name}"], "", &[Opcode::Halt as u8]);
-        let mut stack = Vec::new();
+        let value = expr_fallback_value(&catalog, Some(1)).expect("fallback");
 
-        push_expr_fallback(&mut stack, &catalog, Some(1)).expect("fallback");
-
-        assert_eq!(stack, vec![Value::Fallback(1)]);
+        assert_eq!(value, Value::Fallback(1));
     }
 
     #[test]
@@ -2195,12 +2238,12 @@ mod tests {
             .build();
         let catalog = catalog_for_test(&["main", "value", "1", "other"], "Xother", &code);
         let mut formatter = formatter_noop(&catalog);
-        let value = Value::Number(Box::new(ResolvedNumber::new(
+        let value = Value::Number(ResolvedNumber::new(
             NumberValue::Integer(1),
             NumberFormatOptions::DEFAULT,
             NumberSelection::Invalid,
             true,
-        )));
+        ));
         let args = vec![(arg_id(&catalog, "value"), value)];
         let mut sink = String::new();
         let errors = formatter

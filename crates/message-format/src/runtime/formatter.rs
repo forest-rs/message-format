@@ -16,10 +16,21 @@ use crate::runtime::{
 #[derive(Default)]
 pub(crate) struct VmState {
     pub(crate) fuel: Option<u64>,
-    pub(crate) stack: Vec<Value>,
-    pub(crate) locals: Vec<Value>,
+    pub(crate) values: Vec<Value>,
+    pub(crate) stack: Vec<usize>,
+    pub(crate) locals: Vec<usize>,
     pub(crate) call_args: Vec<Value>,
     pub(crate) call_options: Vec<(u32, Value)>,
+}
+
+impl VmState {
+    fn clear_execution(&mut self) {
+        self.values.clear();
+        self.stack.clear();
+        self.locals.clear();
+        self.call_args.clear();
+        self.call_options.clear();
+    }
 }
 
 /// Formatter executes catalog messages with caller-provided arguments and host functions.
@@ -120,6 +131,7 @@ impl<'a, H: Host> Formatter<'a, H> {
             message.entry_pc,
             args,
             self.vm.fuel,
+            &mut self.vm.values,
             &mut self.vm.stack,
             &mut self.vm.locals,
             sink,
@@ -127,7 +139,7 @@ impl<'a, H: Host> Formatter<'a, H> {
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         );
-        self.vm.locals.clear();
+        self.vm.clear_execution();
         result?;
         Ok(())
     }
@@ -292,6 +304,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             message.entry_pc,
             args,
             self.vm.fuel,
+            &mut self.vm.values,
             &mut self.vm.stack,
             &mut self.vm.locals,
             sink,
@@ -299,7 +312,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             &mut self.vm.call_args,
             &mut self.vm.call_options,
         );
-        self.vm.locals.clear();
+        self.vm.clear_execution();
         result?;
         Ok(())
     }
@@ -429,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn formatter_reuses_local_scratch_capacity() {
+    fn formatter_reuses_execution_storage_capacity() {
         let code = TestOps::new()
             .push_const(1)
             .store_local(0)
@@ -444,21 +457,29 @@ mod tests {
         formatter
             .format_to(message, &vec![] as &Vec<(u32, Value)>, &mut first, None)
             .unwrap();
-        let capacity = formatter.vm.locals.capacity();
-        assert!(capacity >= 1);
+        let values_capacity = formatter.vm.values.capacity();
+        let stack_capacity = formatter.vm.stack.capacity();
+        let locals_capacity = formatter.vm.locals.capacity();
+        assert!(values_capacity >= 1);
+        assert!(stack_capacity >= 1);
+        assert!(locals_capacity >= 1);
+        assert!(formatter.vm.values.is_empty());
+        assert!(formatter.vm.stack.is_empty());
         assert!(formatter.vm.locals.is_empty());
 
         let mut second = String::new();
         formatter
             .format_to(message, &vec![] as &Vec<(u32, Value)>, &mut second, None)
             .unwrap();
-        assert_eq!(formatter.vm.locals.capacity(), capacity);
+        assert_eq!(formatter.vm.values.capacity(), values_capacity);
+        assert_eq!(formatter.vm.stack.capacity(), stack_capacity);
+        assert_eq!(formatter.vm.locals.capacity(), locals_capacity);
         assert_eq!(first, "value");
         assert_eq!(second, "value");
     }
 
     #[test]
-    fn formatter_clears_locals_after_trap() {
+    fn formatter_clears_execution_storage_after_trap() {
         let first_code = TestOps::new().push_const(1).store_local(0).halt().build();
         let second_code = TestOps::new().push_const(2).store_local(0).halt().build();
         let mut code = first_code.clone();
@@ -487,8 +508,14 @@ mod tests {
         formatter
             .format_to(first, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
             .unwrap();
-        let capacity = formatter.vm.locals.capacity();
-        assert!(capacity >= 1);
+        let values_capacity = formatter.vm.values.capacity();
+        let stack_capacity = formatter.vm.stack.capacity();
+        let locals_capacity = formatter.vm.locals.capacity();
+        assert!(values_capacity >= 1);
+        assert!(stack_capacity >= 1);
+        assert!(locals_capacity >= 1);
+        assert!(formatter.vm.values.is_empty());
+        assert!(formatter.vm.stack.is_empty());
         assert!(formatter.vm.locals.is_empty());
 
         formatter.set_fuel(Some(2));
@@ -498,15 +525,23 @@ mod tests {
                 .unwrap_err(),
             FormatError::Trap(Trap::FuelExhausted)
         );
+        assert!(formatter.vm.values.is_empty());
+        assert!(formatter.vm.stack.is_empty());
         assert!(formatter.vm.locals.is_empty());
-        assert_eq!(formatter.vm.locals.capacity(), capacity);
+        assert_eq!(formatter.vm.values.capacity(), values_capacity);
+        assert_eq!(formatter.vm.stack.capacity(), stack_capacity);
+        assert_eq!(formatter.vm.locals.capacity(), locals_capacity);
 
         formatter.set_fuel(None);
         formatter
             .format_to(second, &vec![] as &Vec<(u32, Value)>, &mut sink, None)
             .expect("rerun after clearing fuel");
+        assert!(formatter.vm.values.is_empty());
+        assert!(formatter.vm.stack.is_empty());
         assert!(formatter.vm.locals.is_empty());
-        assert_eq!(formatter.vm.locals.capacity(), capacity);
+        assert_eq!(formatter.vm.values.capacity(), values_capacity);
+        assert_eq!(formatter.vm.stack.capacity(), stack_capacity);
+        assert_eq!(formatter.vm.locals.capacity(), locals_capacity);
     }
 
     #[test]

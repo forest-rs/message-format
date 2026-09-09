@@ -500,20 +500,25 @@ fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSele
             }
         }
         SelectorExpr::Call { .. } => None,
-        // A stored numeric value already contains both its exact text and
-        // plural/ordinal category. Reuse the one loaded local for both passes;
-        // the nested IR controls whether numeric keys or category keys are
-        // considered, without re-running the function call.
         SelectorExpr::Local {
-            func: Some(func), ..
+            slot,
+            func: Some(func),
         }
         | SelectorExpr::CheckedLocal {
-            func: Some(func), ..
+            slot,
+            func: Some(func),
         } => match builtin_numeric_selector_mode_for_func(func)? {
             BuiltinNumericSelectorMode::Plural | BuiltinNumericSelectorMode::Ordinal => {
                 Some(NumericSelectorLoweringPlan {
                     exact_selector: selector.clone(),
-                    keyword_selector: selector.clone(),
+                    // Project the already-resolved local through the selector
+                    // entry point only when category matching is needed. The
+                    // built-in host reads the retained numeric value and does
+                    // not reapply the declaration function.
+                    keyword_selector: SelectorExpr::Call {
+                        operand: Operand::Local(*slot),
+                        func: FunctionSpec::new(func.name.clone()),
+                    },
                 })
             }
             BuiltinNumericSelectorMode::Exact | BuiltinNumericSelectorMode::Dynamic => None,
