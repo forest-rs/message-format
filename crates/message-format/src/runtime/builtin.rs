@@ -380,17 +380,17 @@ impl BuiltinHost {
                     ordinal_rules,
                     on_error,
                 )?;
-                Ok(Value::Number(Box::new(resolved)))
+                Ok(Value::Number(resolved))
             }
             BuiltinFn::Percent => Ok(Value::Str(format_percent(raw_arg, catalog, &options)?)),
             BuiltinFn::Currency => Ok(Value::Str(format_currency(raw_arg, catalog, &options)?)),
-            BuiltinFn::Offset => Ok(Value::Number(Box::new(resolve_offset(
+            BuiltinFn::Offset => Ok(Value::Number(resolve_offset(
                 raw_arg,
                 catalog,
                 &options,
                 cardinal_rules,
                 ordinal_rules,
-            )?))),
+            )?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
                 format_test_select(raw_arg, catalog, &options)?,
             )))),
@@ -742,7 +742,9 @@ fn resolve_number(
         } else if let Ok(value) = integer_text.parse::<i64>() {
             NumberValue::Integer(value)
         } else {
-            NumberValue::Decimal(Decimal::from_str(&integer_text).map_err(|_| bad_operand())?)
+            NumberValue::Decimal(Box::new(
+                Decimal::from_str(&integer_text).map_err(|_| bad_operand())?,
+            ))
         };
     }
     let format = resolve_number_format_options(inherited_format, options, integer_only)?;
@@ -792,9 +794,9 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
         && value.is_sign_negative()
         && *value == 0.0
     {
-        return Ok(NumberValue::Decimal(
+        return Ok(NumberValue::Decimal(Box::new(
             Decimal::from_str("-0").map_err(|_| bad_operand())?,
-        ));
+        )));
     }
     if let Value::Float(value) = value
         && !value.is_finite()
@@ -816,9 +818,9 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
     // Parsing integers before any floating-point conversion is essential: an
     // i64 such as 9007199254740993 must remain exact.
     if text == "-0" {
-        return Ok(NumberValue::Decimal(
+        return Ok(NumberValue::Decimal(Box::new(
             Decimal::from_str(&text).map_err(|_| bad_operand())?,
-        ));
+        )));
     }
     if let Ok(value) = text.parse::<i64>() {
         if parse_number_literal(&text).is_none() {
@@ -836,7 +838,7 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
             Decimal::from_str(&value.to_string()).map_err(|_| bad_operand())?
         }
     };
-    Ok(NumberValue::Decimal(trim_decimal_end(decimal)))
+    Ok(NumberValue::Decimal(Box::new(trim_decimal_end(decimal))))
 }
 
 /// Convert an integral float to an integer only while every integer in its
@@ -882,7 +884,10 @@ fn resolve_number_format_options(
             MAX_FRACTION_DIGITS,
         )?
     };
-    validate_digit_range_relationship(minimum_fraction_digits, maximum_fraction_digits)?;
+    validate_digit_range_relationship(
+        minimum_fraction_digits.map(usize::from),
+        maximum_fraction_digits.map(usize::from),
+    )?;
     let minimum_integer_digits = parse_digit_option_or_inherited(
         options,
         BuiltinOptionKey::MinimumIntegerDigits,
@@ -922,15 +927,15 @@ fn resolve_number_format_options(
 fn parse_digit_option_or_inherited(
     options: &EffectiveOptions<'_>,
     key: BuiltinOptionKey,
-    inherited: Option<usize>,
+    inherited: Option<u8>,
     max: usize,
-) -> Result<Option<usize>, FormatError> {
+) -> Result<Option<u8>, FormatError> {
     if let Some(value) = options.get(key) {
         let value = value.parse::<usize>().map_err(|_| bad_option())?;
         if value > max {
             return Err(bad_option());
         }
-        return Ok(Some(value));
+        return u8::try_from(value).map(Some).map_err(|_| bad_option());
     }
     Ok(inherited)
 }
@@ -959,9 +964,9 @@ fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option
     }
     let text = format_int_or_decimal_with_min_fraction_digits(
         number.text(),
-        format.minimum_fraction_digits.unwrap_or(0),
+        format.minimum_fraction_digits.map_or(0, usize::from),
     );
-    let text = apply_maximum_fraction_digits(text, format.maximum_fraction_digits);
+    let text = apply_maximum_fraction_digits(text, format.maximum_fraction_digits.map(usize::from));
     let text = format_signed_string(
         match format.sign_display {
             NumberSignDisplay::Auto => SignDisplay::Auto,
@@ -970,7 +975,7 @@ fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option
         },
         text,
     );
-    let text = apply_minimum_integer_digits(text, format.minimum_integer_digits);
+    let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
     Some(apply_grouping_strategy(
         text,
         match format.grouping {
@@ -1044,7 +1049,7 @@ fn plural_category(
             }
             Value::Number(number) => match &number.value {
                 NumberValue::Integer(value) => Ok(rules.category_for(*value)),
-                NumberValue::Decimal(value) => Ok(rules.category_for(value)),
+                NumberValue::Decimal(value) => Ok(rules.category_for(value.as_ref())),
                 NumberValue::NonFinite(_) => Err(bad_operand()),
             },
             _ => {
@@ -1075,33 +1080,31 @@ fn resolved_plural_category(
 ) -> Result<PluralCategory, FormatError> {
     let minimum_fraction_digits = number.format.minimum_fraction_digits;
     let maximum_fraction_digits = number.format.maximum_fraction_digits;
-    validate_digit_range_relationship(minimum_fraction_digits, maximum_fraction_digits)?;
+    validate_digit_range_relationship(
+        minimum_fraction_digits.map(usize::from),
+        maximum_fraction_digits.map(usize::from),
+    )?;
     if minimum_fraction_digits.is_none() && maximum_fraction_digits.is_none() {
         return match &number.value {
             NumberValue::Integer(value) => Ok(rules.category_for(*value)),
-            NumberValue::Decimal(value) => Ok(rules.category_for(value)),
+            NumberValue::Decimal(value) => Ok(rules.category_for(value.as_ref())),
             NumberValue::NonFinite(_) => Err(bad_operand()),
         };
     }
     let mut decimal = match &number.value {
         NumberValue::Integer(value) => Decimal::from(*value),
-        NumberValue::Decimal(value) => value.clone(),
+        NumberValue::Decimal(value) => value.as_ref().clone(),
         NumberValue::NonFinite(_) => return Err(bad_operand()),
     };
 
     if let Some(minimum) = minimum_fraction_digits {
-        // The supported option range is small, but keep the conversion
-        // checked because fixed-decimal positions are i16.
-        let minimum = i16::try_from(minimum)
-            .map_err(|_| bad_option())?
-            .checked_neg()
-            .ok_or_else(bad_option)?;
+        let minimum = -i16::from(minimum);
         if *decimal.magnitude_range().start() > minimum {
             decimal.pad_end(minimum);
         }
     }
     if let Some(maximum) = maximum_fraction_digits {
-        let maximum = i16::try_from(maximum).map_err(|_| bad_option())?;
+        let maximum = i16::from(maximum);
         let current_fraction_digits = decimal
             .magnitude_range()
             .start()
@@ -1195,7 +1198,8 @@ fn parse_number_digit_option(
             number.format.minimum_fraction_digits
         } else {
             number.format.maximum_fraction_digits
-        });
+        }
+        .map(usize::from));
     }
     Ok(None)
 }
@@ -1802,7 +1806,7 @@ fn parse_number_text(value: &str) -> Result<NumberValue, FormatError> {
         return Ok(NumberValue::Integer(value));
     }
     Decimal::from_str(value)
-        .map(|value| NumberValue::Decimal(trim_decimal_end(value)))
+        .map(|value| NumberValue::Decimal(Box::new(trim_decimal_end(value))))
         .map_err(|_| bad_operand())
 }
 
@@ -3447,12 +3451,14 @@ mod tests {
     ) -> Result<PluralCategory, FormatError> {
         let minimum = number.format.minimum_fraction_digits;
         let maximum = number.format.maximum_fraction_digits;
-        validate_digit_range_relationship(minimum, maximum)?;
+        validate_digit_range_relationship(minimum.map(usize::from), maximum.map(usize::from))?;
         let text = minimum.map_or_else(
             || number.text(),
-            |minimum| format_int_or_decimal_with_min_fraction_digits(number.text(), minimum),
+            |minimum| {
+                format_int_or_decimal_with_min_fraction_digits(number.text(), usize::from(minimum))
+            },
         );
-        let text = apply_maximum_fraction_digits(text, maximum);
+        let text = apply_maximum_fraction_digits(text, maximum.map(usize::from));
         let decimal = Decimal::from_str(&text).map_err(|_| bad_operand())?;
         Ok(rules.category_for(&decimal))
     }
@@ -3477,7 +3483,7 @@ mod tests {
             let host = BuiltinHost::new(&locale).expect("host");
             for (text, minimum, maximum) in cases {
                 let number = ResolvedNumber::new(
-                    NumberValue::Decimal(Decimal::from_str(text).expect("decimal")),
+                    NumberValue::Decimal(Box::new(Decimal::from_str(text).expect("decimal"))),
                     NumberFormatOptions {
                         minimum_fraction_digits: minimum,
                         maximum_fraction_digits: maximum,
@@ -3522,7 +3528,7 @@ mod tests {
         assert_eq!(
             number_text(
                 &checked_offset(
-                    NumberValue::Decimal(Decimal::from_str("0.5").expect("decimal")),
+                    NumberValue::Decimal(Box::new(Decimal::from_str("0.5").expect("decimal"))),
                     1,
                     false,
                 )
