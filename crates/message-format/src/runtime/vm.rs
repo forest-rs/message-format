@@ -97,6 +97,11 @@ impl<'a> FunctionOptions<'a> {
             .iter()
             .any(|(candidate, value)| *candidate == key && matches!(value, Value::Fallback(_)))
     }
+
+    #[cfg(feature = "icu4x")]
+    pub(crate) fn has_raw_options(self) -> bool {
+        !self.raw.is_empty()
+    }
 }
 
 /// Iterator over resolved function options.

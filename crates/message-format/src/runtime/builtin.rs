@@ -359,20 +359,39 @@ impl BuiltinHost {
                 }) {
                     on_error(MessageFunctionError::BadOption);
                 }
-                if options.get(BuiltinOptionKey::Style).as_deref() == Some("percent") {
-                    return Ok(Value::Str(format_percent(raw_arg, catalog, &options)?));
+                match options.get(BuiltinOptionKey::Style).as_deref() {
+                    Some("percent") => {
+                        let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
+                        let maximum_fraction_digits = parse_maximum_fraction_digits(&options)?;
+                        let _ = parse_minimum_integer_digits(&options)?;
+                        validate_digit_range_relationship(
+                            minimum_fraction_digits,
+                            maximum_fraction_digits,
+                        )?;
+                        let sign_display = parse_sign_display(&options)?;
+                        return Ok(Value::Str(format_percent(
+                            raw_arg,
+                            catalog,
+                            minimum_fraction_digits,
+                            sign_display,
+                        )?));
+                    }
+                    Some(_) => return Err(bad_option()),
+                    None => {}
                 }
-                let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
-                let maximum_fraction_digits = parse_maximum_fraction_digits(&options)?;
-                let _ = parse_minimum_integer_digits(&options)?;
-                validate_digit_range_relationship(
-                    minimum_fraction_digits,
-                    maximum_fraction_digits,
-                )?;
                 let resolved = resolve_number(raw_arg, catalog, integer_only, &options, on_error)?;
                 Ok(Value::Number(resolved))
             }
-            BuiltinFn::Percent => Ok(Value::Str(format_percent(raw_arg, catalog, &options)?)),
+            BuiltinFn::Percent => {
+                let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
+                let sign_display = parse_sign_display(&options)?;
+                Ok(Value::Str(format_percent(
+                    raw_arg,
+                    catalog,
+                    minimum_fraction_digits,
+                    sign_display,
+                )?))
+            }
             BuiltinFn::Currency => Ok(Value::Str(format_currency(raw_arg, catalog, &options)?)),
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
@@ -753,7 +772,7 @@ fn resolve_number(
             "plural" => NumberSelection::Plural,
             "ordinal" => NumberSelection::Ordinal,
             "exact" => NumberSelection::Exact,
-            _ => NumberSelection::Invalid,
+            _ => return Err(bad_option()),
         }
     } else {
         // A number selector uses cardinal plural rules when no explicit
@@ -847,26 +866,18 @@ fn resolve_number_format_options(
     options: &EffectiveOptions<'_>,
     integer_only: bool,
 ) -> Result<NumberFormatOptions, FormatError> {
-    let minimum_fraction_digits = if integer_only {
-        None
-    } else {
-        parse_digit_option_or_inherited(
-            options,
-            BuiltinOptionKey::MinimumFractionDigits,
-            inherited.minimum_fraction_digits,
-            MAX_FRACTION_DIGITS,
-        )?
-    };
-    let maximum_fraction_digits = if integer_only {
-        None
-    } else {
-        parse_digit_option_or_inherited(
-            options,
-            BuiltinOptionKey::MaximumFractionDigits,
-            inherited.maximum_fraction_digits,
-            MAX_FRACTION_DIGITS,
-        )?
-    };
+    let minimum_fraction_digits = parse_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MinimumFractionDigits,
+        inherited.minimum_fraction_digits,
+        MAX_FRACTION_DIGITS,
+    )?;
+    let maximum_fraction_digits = parse_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MaximumFractionDigits,
+        inherited.maximum_fraction_digits,
+        MAX_FRACTION_DIGITS,
+    )?;
     validate_digit_range_relationship(
         minimum_fraction_digits.map(usize::from),
         maximum_fraction_digits.map(usize::from),
@@ -898,8 +909,16 @@ fn resolve_number_format_options(
         Some(_) => return Err(bad_option()),
     };
     Ok(NumberFormatOptions {
-        minimum_fraction_digits,
-        maximum_fraction_digits,
+        minimum_fraction_digits: if integer_only {
+            None
+        } else {
+            minimum_fraction_digits
+        },
+        maximum_fraction_digits: if integer_only {
+            None
+        } else {
+            maximum_fraction_digits
+        },
         minimum_integer_digits,
         sign_display,
         notation_scientific,
@@ -1243,25 +1262,7 @@ fn validate_builtin_option_values(
 ) -> Result<(), FormatError> {
     validate_enum_option(options, BuiltinOptionKey::UDir, &["ltr", "rtl", "auto"])?;
     match func {
-        BuiltinFn::Number | BuiltinFn::Integer => {
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::SignDisplay,
-                &["auto", "always", "never"],
-            )?;
-            validate_enum_option(options, BuiltinOptionKey::Style, &["percent"])?;
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::Select,
-                &["exact", "plural", "ordinal"],
-            )?;
-            validate_enum_option(options, BuiltinOptionKey::Notation, &["scientific"])?;
-            validate_enum_option(
-                options,
-                BuiltinOptionKey::UseGrouping,
-                &["auto", "always", "never", "min2"],
-            )?;
-        }
+        BuiltinFn::Number | BuiltinFn::Integer => {}
         BuiltinFn::Date => {
             validate_enum_option(
                 options,
@@ -1473,13 +1474,15 @@ fn parse_minimum_integer_digits(
     )
 }
 
-fn parse_sign_display(options: &EffectiveOptions<'_>) -> SignDisplay {
-    match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
-        Some("always") => SignDisplay::Always,
-        Some("never") => SignDisplay::Never,
-        Some("auto") | None => SignDisplay::Auto,
-        Some(other) => unreachable!("unexpected validated signDisplay value: {other}"),
-    }
+fn parse_sign_display(options: &EffectiveOptions<'_>) -> Result<SignDisplay, FormatError> {
+    Ok(
+        match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
+            Some("always") => SignDisplay::Always,
+            Some("never") => SignDisplay::Never,
+            Some("auto") | None => SignDisplay::Auto,
+            Some(_) => return Err(bad_option()),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1601,33 +1604,26 @@ fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError>
 fn format_percent(
     value: &Value,
     catalog: &Catalog,
-    options: &EffectiveOptions<'_>,
+    minimum_fraction_digits: Option<usize>,
+    sign_display: SignDisplay,
 ) -> Result<String, FormatError> {
     if let Value::Number(number) = value {
         if let NumberValue::NonFinite(value) = number.value {
-            return Ok(format_signed_string(
-                parse_sign_display(options),
-                format!("{}%", value),
-            ));
+            return Ok(format_signed_string(sign_display, format!("{}%", value)));
         }
         let rendered = multiply_decimal_by_100(&number.text())?;
-        let minimum = parse_minimum_fraction_digits(options)?;
-        let rendered = if let Some(minimum) = minimum {
+        let rendered = if let Some(minimum) = minimum_fraction_digits {
             format_int_or_decimal_with_min_fraction_digits(rendered, minimum)
         } else {
             rendered
         };
-        return Ok(format!(
-            "{}%",
-            format_signed_string(parse_sign_display(options), rendered)
-        ));
+        return Ok(format!("{}%", format_signed_string(sign_display, rendered)));
     }
     let mut number = numeric_operand(value, catalog)? * 100.0;
     if number == -0.0 {
         number = 0.0;
     }
-    let digits = parse_minimum_fraction_digits(options)?;
-    let rendered = if let Some(min) = digits {
+    let rendered = if let Some(min) = minimum_fraction_digits {
         format!("{number:.min$}")
     } else {
         number.to_string()
@@ -1915,6 +1911,9 @@ struct EffectiveOptions<'a> {
 
 impl<'a> EffectiveOptions<'a> {
     fn has_runtime(&self, key: BuiltinOptionKey) -> bool {
+        if !self.runtime_options.has_raw_options() {
+            return false;
+        }
         self.option_keys_by_str_id
             .iter()
             .any(|(id, candidate)| *candidate == key && self.runtime_options.was_dynamic(*id))
@@ -2770,15 +2769,20 @@ mod tests {
 
     #[test]
     fn builtin_host_rejects_bad_minimum_fraction_digits() {
-        let mut host = builtin_host(&["number minimumFractionDigits=foo"]);
-        let err = host
-            .call(
-                0,
-                &[Value::Str("4.2".to_string())],
-                FunctionOptions::new(&[]),
-            )
-            .expect_err("must fail");
-        assert_function_error(err, MessageFunctionError::BadOption);
+        for function in [
+            "number minimumFractionDigits=foo",
+            "integer minimumFractionDigits=foo",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let err = host
+                .call(
+                    0,
+                    &[Value::Str("4.2".to_string())],
+                    FunctionOptions::new(&[]),
+                )
+                .expect_err("must fail");
+            assert_function_error(err, MessageFunctionError::BadOption);
+        }
     }
 
     #[test]
@@ -2788,6 +2792,20 @@ mod tests {
             .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
             .expect_err("must fail");
         assert_function_error(err, MessageFunctionError::BadOption);
+    }
+
+    #[test]
+    fn percent_paths_reject_invalid_sign_display_literal() {
+        for function in [
+            "number style=percent signDisplay=bogus",
+            "percent signDisplay=bogus",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let err = host
+                .call(0, &[Value::Int(5)], FunctionOptions::new(&[]))
+                .expect_err("must fail");
+            assert_function_error(err, MessageFunctionError::BadOption);
+        }
     }
 
     #[test]
