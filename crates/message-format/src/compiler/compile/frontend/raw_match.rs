@@ -148,10 +148,10 @@ fn analyze_selector(
         .map(selector_expr_from_decl_function)
         .unwrap_or_else(|| SelectorExpr::Var(name.clone()));
     if let Some(slot) = bindings.slots.get(&name).copied()
-        && !bindings
+        && bindings
             .locals
             .get(&name)
-            .is_some_and(|value| value.as_literal().is_some())
+            .is_none_or(|value| value.as_literal().is_none())
     {
         if let Some(function) = bindings
             .local_functions

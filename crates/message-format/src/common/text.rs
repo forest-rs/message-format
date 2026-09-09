@@ -110,6 +110,7 @@ pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> 
     }
 }
 
+#[cfg(any(feature = "compile", test))]
 pub(crate) fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
     format_signed_string(sign_display, value.to_string())
 }

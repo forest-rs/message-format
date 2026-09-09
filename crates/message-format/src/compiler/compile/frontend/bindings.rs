@@ -98,10 +98,10 @@ pub(super) fn collect_declaration_bindings(
                 .locals
                 .iter()
                 .filter(|decl| {
-                    !local_analysis
+                    local_analysis
                         .values
                         .get(&decl.canonical)
-                        .is_some_and(|value| value.as_literal().is_some())
+                        .is_none_or(|value| value.as_literal().is_none())
                 })
                 .map(|decl| (decl.expr.node.span.start, decl.canonical.as_str())),
         )

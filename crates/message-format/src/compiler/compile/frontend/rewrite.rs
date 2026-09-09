@@ -210,10 +210,10 @@ fn lower_part_with_bindings(
 }
 
 fn slot_is_runtime(bindings: &DeclarationBindings, name: &str) -> bool {
-    !bindings
+    bindings
         .locals
         .get(name)
-        .is_some_and(|value| value.as_literal().is_some())
+        .is_none_or(|value| value.as_literal().is_none())
 }
 
 fn input_function_operand(function: DeclFunction) -> Operand {

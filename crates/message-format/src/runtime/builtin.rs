@@ -814,7 +814,7 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
         ));
     }
     if let Ok(value) = text.parse::<i64>() {
-        if !parse_number_literal(&text).is_some() {
+        if parse_number_literal(&text).is_none() {
             return Err(bad_operand());
         }
         return Ok(NumberValue::Integer(value));
