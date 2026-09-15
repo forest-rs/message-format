@@ -74,27 +74,12 @@ pub enum Value {
 pub struct ResolvedFormatted {
     pub(crate) source: Value,
     pub(crate) formatted: String,
-    pub(crate) kind: ResolvedFormatKind,
-}
-
-#[cfg(feature = "icu4x")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResolvedFormatKind {
-    Percent,
-    Currency,
-    Date,
-    Time,
-    DateTime,
 }
 
 #[cfg(feature = "icu4x")]
 impl ResolvedFormatted {
-    pub(crate) fn new(source: Value, formatted: String, kind: ResolvedFormatKind) -> Self {
-        Self {
-            source,
-            formatted,
-            kind,
-        }
+    pub(crate) fn new(source: Value, formatted: String) -> Self {
+        Self { source, formatted }
     }
 
     /// Return the formatted presentation used for interpolation.

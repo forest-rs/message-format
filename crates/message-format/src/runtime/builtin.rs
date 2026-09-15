@@ -32,8 +32,7 @@ use crate::runtime::{
     },
     value::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
-        ResolvedFormatKind, ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString,
-        StringDirection, Value,
+        ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
     vm::{FormatSink, FunctionOptions, Host, format_i64},
 };
@@ -388,19 +387,11 @@ impl BuiltinHost {
                 let sign_display = parse_sign_display(&options)?;
                 let formatted =
                     format_percent(raw_arg, catalog, minimum_fraction_digits, sign_display)?;
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    ResolvedFormatKind::Percent,
-                ))
+                Ok(resolved_formatted(raw_arg, formatted))
             }
             BuiltinFn::Currency => {
                 let formatted = format_currency(raw_arg, catalog, &options)?;
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    ResolvedFormatKind::Currency,
-                ))
+                Ok(resolved_formatted(raw_arg, formatted))
             }
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
@@ -419,11 +410,7 @@ impl BuiltinHost {
                 let style = resolve_date_style(&options);
                 let formatted =
                     format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    ResolvedFormatKind::Date,
-                ))
+                Ok(resolved_formatted(raw_arg, formatted))
             }
             BuiltinFn::Time => {
                 let time_str = validate_time_operand(raw_arg, catalog)?;
@@ -431,11 +418,7 @@ impl BuiltinHost {
                 let style = resolve_time_style(&options);
                 let formatted =
                     format_icu_time_cached(locale, &mut icu_formatters.time, time, style)?;
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    ResolvedFormatKind::Time,
-                ))
+                Ok(resolved_formatted(raw_arg, formatted))
             }
             BuiltinFn::DateTime => {
                 validate_datetime_style_field_exclusivity(&options)?;
@@ -451,11 +434,7 @@ impl BuiltinHost {
                     date_style,
                     time_style,
                 )?;
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    ResolvedFormatKind::DateTime,
-                ))
+                Ok(resolved_formatted(raw_arg, formatted))
             }
         }
     }
@@ -806,12 +785,12 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
     }
 }
 
-fn resolved_formatted(value: &Value, formatted: String, kind: ResolvedFormatKind) -> Value {
+fn resolved_formatted(value: &Value, formatted: String) -> Value {
     let source = match value {
         Value::Formatted(value) => value.source.clone(),
         value => value.clone(),
     };
-    Value::Formatted(Box::new(ResolvedFormatted::new(source, formatted, kind)))
+    Value::Formatted(Box::new(ResolvedFormatted::new(source, formatted)))
 }
 
 fn resolve_number(
@@ -1696,7 +1675,7 @@ fn format_currency(
 ) -> Result<String, FormatError> {
     let Some(currency) = options.get(BuiltinOptionKey::Currency) else {
         if let Value::Formatted(value) = value
-            && value.kind == ResolvedFormatKind::Currency
+            && looks_like_currency_literal(&value.formatted)
         {
             return Ok(value.formatted.clone());
         }
