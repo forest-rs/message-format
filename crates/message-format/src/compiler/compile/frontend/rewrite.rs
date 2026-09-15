@@ -15,16 +15,6 @@ use crate::compiler::semantic::SelectorExpr;
 use super::bindings::resolve_alias;
 use super::bindings::{DeclFunction, DeclarationBindings, LocalLiteral};
 
-pub(super) fn lower_parts_with_declaration_bindings(
-    parts: &mut [Part],
-    bindings: &DeclarationBindings,
-    repeat_local_pass_after_alias: bool,
-) -> Result<(), CompileError> {
-    walk_parts_mut(parts, &bindings.literals, &mut |part| {
-        lower_part_with_bindings(part, bindings, repeat_local_pass_after_alias, None)
-    })
-}
-
 pub(super) fn lower_declaration_prelude(
     source: &str,
     declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
@@ -248,7 +238,7 @@ fn remap_slot(slot: &mut u32, remap: &BTreeMap<u32, u32>) -> Result<(), CompileE
     Ok(())
 }
 
-fn lower_part_with_bindings(
+pub(super) fn lower_part_with_bindings(
     part: &mut Part,
     bindings: &DeclarationBindings,
     repeat_local_pass_after_alias: bool,
@@ -470,27 +460,4 @@ pub(super) fn rewrite_selector_expr_from_locals(
     if let Operand::Call(nested) = operand {
         rewrite_call_options_from_locals(nested, locals, slots);
     }
-}
-
-fn walk_parts_mut(
-    parts: &mut [Part],
-    locals: &BTreeMap<String, LocalLiteral>,
-    f: &mut impl FnMut(&mut Part) -> Result<(), CompileError>,
-) -> Result<(), CompileError> {
-    for part in parts {
-        f(part)?;
-        if let Part::Select(SelectExpr {
-            selector,
-            arms,
-            default,
-        }) = part
-        {
-            rewrite_selector_expr_from_locals(selector, locals, &BTreeMap::new());
-            for arm in arms {
-                walk_parts_mut(&mut arm.parts, locals, f)?;
-            }
-            walk_parts_mut(default, locals, f)?;
-        }
-    }
-    Ok(())
 }

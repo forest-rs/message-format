@@ -14,7 +14,7 @@ use super::matching::{
     builtin_selector_variant_key_expectation, lower_match_declaration_prelude,
 };
 use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
-use super::rewrite::{lower_parts_with_declaration_bindings, rewrite_selector_expr_from_locals};
+use super::rewrite::rewrite_selector_expr_from_locals;
 
 struct AnalyzedSelectors {
     parts: Vec<SelectorExpr>,
@@ -304,9 +304,14 @@ fn lower_match_arm_patterns(
             }
             other => other,
         };
-        let mut parts =
-            lower_pattern_node_to_parts(source, &arm.pattern, arm_ctx, options, function_origin)?;
-        lower_parts_with_declaration_bindings(&mut parts, bindings, false)?;
+        let parts = lower_pattern_node_to_parts(
+            source,
+            &arm.pattern,
+            arm_ctx,
+            options,
+            function_origin,
+            Some((bindings, false)),
+        )?;
         out.push(LoweredMatchArm {
             keys: arm.keys,
             parts,

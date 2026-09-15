@@ -7,6 +7,8 @@ use core::ops::Range;
 use crate::common::text::parse_number_literal;
 use crate::compiler::syntax::{ident::canonicalize_identifier, span::quoted_snippet};
 
+use super::bindings::DeclarationBindings;
+use super::rewrite::lower_part_with_bindings;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -21,6 +23,7 @@ pub(super) fn lower_pattern_node_to_parts(
     ctx: SourceContext,
     options: CompileOptions,
     function_origin: Option<FunctionOriginContext>,
+    bindings: Option<(&DeclarationBindings, bool)>,
 ) -> Result<Vec<Part>, CompileError> {
     if pattern.span.start > pattern.span.end || pattern.span.end > source.len() {
         let (line, _) = ctx.location(source, 0);
@@ -49,7 +52,7 @@ pub(super) fn lower_pattern_node_to_parts(
                 }
             }
             crate::compiler::syntax::ast::PatternSegmentNode::Expression(expr) => {
-                let part = lower_expression_node_to_part_with_context(
+                let mut part = lower_expression_node_to_part_with_context(
                     source,
                     expr.as_ref(),
                     ExpressionLoweringContext {
@@ -59,6 +62,14 @@ pub(super) fn lower_pattern_node_to_parts(
                         function_origin,
                     },
                 )?;
+                if let Some((bindings, repeat_local_pass_after_alias)) = bindings {
+                    lower_part_with_bindings(
+                        &mut part,
+                        bindings,
+                        repeat_local_pass_after_alias,
+                        None,
+                    )?;
+                }
                 // Self-closing markup: emit open + close in sequence.
                 if is_self_close_markup(expr)
                     && let Part::MarkupOpen { ref name, .. } = part
