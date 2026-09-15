@@ -56,12 +56,52 @@ pub enum Value {
     /// A number resolved by a built-in numeric function.
     #[cfg(feature = "icu4x")]
     Number(ResolvedNumber),
+    /// A resolved formatter value that retains its semantic source for a
+    /// subsequent annotation while exposing its formatted presentation.
+    #[cfg(feature = "icu4x")]
+    Formatted(Box<ResolvedFormatted>),
     /// A value resolved by the test-only `test:select` function.
     ///
     /// The private payload preserves the function's selected precision across
     /// aliases and reannotations. Raw strings continue to follow ordinary
     /// string/numeric conversion rules.
     ResolvedSelect(Box<ResolvedSelect>),
+}
+
+/// Output of a non-selecting built-in formatter with its source value intact.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedFormatted {
+    pub(crate) source: Value,
+    pub(crate) formatted: String,
+    pub(crate) kind: ResolvedFormatKind,
+}
+
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedFormatKind {
+    Percent,
+    Currency,
+    Date,
+    Time,
+    DateTime,
+}
+
+#[cfg(feature = "icu4x")]
+impl ResolvedFormatted {
+    pub(crate) fn new(source: Value, formatted: String, kind: ResolvedFormatKind) -> Self {
+        Self {
+            source,
+            formatted,
+            kind,
+        }
+    }
+
+    /// Return the formatted presentation used for interpolation.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.formatted
+    }
 }
 
 impl Value {

@@ -32,7 +32,8 @@ use crate::runtime::{
     },
     value::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
-        ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
+        ResolvedFormatKind, ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString,
+        StringDirection, Value,
     },
     vm::{FormatSink, FunctionOptions, Host, format_i64},
 };
@@ -385,14 +386,22 @@ impl BuiltinHost {
             BuiltinFn::Percent => {
                 let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
                 let sign_display = parse_sign_display(&options)?;
-                Ok(Value::Str(format_percent(
+                let formatted =
+                    format_percent(raw_arg, catalog, minimum_fraction_digits, sign_display)?;
+                Ok(resolved_formatted(
                     raw_arg,
-                    catalog,
-                    minimum_fraction_digits,
-                    sign_display,
-                )?))
+                    formatted,
+                    ResolvedFormatKind::Percent,
+                ))
             }
-            BuiltinFn::Currency => Ok(Value::Str(format_currency(raw_arg, catalog, &options)?)),
+            BuiltinFn::Currency => {
+                let formatted = format_currency(raw_arg, catalog, &options)?;
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    ResolvedFormatKind::Currency,
+                ))
+            }
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
                 format_test_select(raw_arg, catalog, &options, selecting)?,
@@ -408,38 +417,45 @@ impl BuiltinHost {
                 let text = validate_date_operand(raw_arg, catalog)?;
                 let (date, _) = parse_iso_datetime(text)?;
                 let style = resolve_date_style(&options);
-                Ok(Value::Str(format_icu_date_cached(
-                    locale,
-                    &mut icu_formatters.date,
-                    date,
-                    style,
-                )?))
+                let formatted =
+                    format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    ResolvedFormatKind::Date,
+                ))
             }
             BuiltinFn::Time => {
                 let time_str = validate_time_operand(raw_arg, catalog)?;
                 let (_, time) = parse_iso_datetime(&time_str)?;
                 let style = resolve_time_style(&options);
-                Ok(Value::Str(format_icu_time_cached(
-                    locale,
-                    &mut icu_formatters.time,
-                    time,
-                    style,
-                )?))
+                let formatted =
+                    format_icu_time_cached(locale, &mut icu_formatters.time, time, style)?;
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    ResolvedFormatKind::Time,
+                ))
             }
             BuiltinFn::DateTime => {
                 validate_datetime_style_field_exclusivity(&options)?;
                 let text = validate_datetime_operand(raw_arg, catalog)?;
-                let (date, time) = parse_iso_datetime(text)?;
+                let (date, time) = parse_iso_datetime(&text)?;
                 let date_style = resolve_date_style(&options);
                 let time_style = resolve_time_style(&options);
-                Ok(Value::Str(format_icu_datetime_cached(
+                let formatted = format_icu_datetime_cached(
                     locale,
                     &mut icu_formatters.datetime,
                     date,
                     time,
                     date_style,
                     time_style,
-                )?))
+                )?;
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    ResolvedFormatKind::DateTime,
+                ))
             }
         }
     }
@@ -565,6 +581,16 @@ impl Host for BuiltinHost {
         }
         if matches!(
             entry.func,
+            BuiltinFn::Percent
+                | BuiltinFn::Currency
+                | BuiltinFn::Date
+                | BuiltinFn::Time
+                | BuiltinFn::DateTime
+        ) {
+            return Ok(Value::Null);
+        }
+        if matches!(
+            entry.func,
             BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
         ) {
             let resolved = Self::apply(
@@ -654,6 +680,7 @@ impl Host for BuiltinHost {
         match value {
             Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
             Value::Number(number) => render_resolved_number(catalog, number),
+            Value::Formatted(value) => Some(value.text().to_string()),
             Value::String(value) => {
                 let direction = match value.direction {
                     StringDirection::Unspecified => None,
@@ -723,6 +750,7 @@ fn plain_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Cow<'a, str> {
             .map(Cow::Borrowed)
             .unwrap_or_else(|| Cow::Owned(format!("{off}:{len}"))),
         Value::Number(number) => Cow::Owned(number.text()),
+        Value::Formatted(value) => Cow::Borrowed(value.text()),
         Value::ResolvedSelect(value) => Cow::Borrowed(value.text()),
     }
 }
@@ -772,9 +800,18 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
         Value::LitRef { off, len } => catalog.literal_opt(*off, *len),
         Value::ResolvedSelect(value) => Some(value.text()),
         Value::String(value) => Some(value.text()),
+        Value::Formatted(value) => value_text(catalog, &value.source),
         Value::Fallback(_) | Value::FunctionFallback(_) => None,
         _ => None,
     }
+}
+
+fn resolved_formatted(value: &Value, formatted: String, kind: ResolvedFormatKind) -> Value {
+    let source = match value {
+        Value::Formatted(value) => value.source.clone(),
+        value => value.clone(),
+    };
+    Value::Formatted(Box::new(ResolvedFormatted::new(source, formatted, kind)))
 }
 
 fn resolve_number(
@@ -874,6 +911,7 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
     }
     match value {
         Value::Int(value) => return Ok(NumberValue::Integer(*value)),
+        Value::Formatted(value) => return parse_number_value(&value.source, catalog),
         Value::String(value) if let Some(value) = value.integer_hint() => {
             return Ok(NumberValue::Integer(value));
         }
@@ -1571,6 +1609,7 @@ fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError>
         Value::Int(v) => exact_i64_to_f64(*v),
         Value::Float(v) => Ok(*v),
         Value::Number(number) => number.text().parse::<f64>().map_err(|_| bad_operand()),
+        Value::Formatted(value) => numeric_operand(&value.source, catalog),
         _ => value_text(catalog, value)
             .and_then(parse_number_literal)
             .ok_or_else(bad_operand),
@@ -1656,6 +1695,11 @@ fn format_currency(
     options: &EffectiveOptions<'_>,
 ) -> Result<String, FormatError> {
     let Some(currency) = options.get(BuiltinOptionKey::Currency) else {
+        if let Value::Formatted(value) = value
+            && value.kind == ResolvedFormatKind::Currency
+        {
+            return Ok(value.formatted.clone());
+        }
         if let Some(raw) = value_text(catalog, value)
             && looks_like_currency_literal(raw)
         {
@@ -1997,10 +2041,15 @@ fn validate_time_operand(value: &Value, catalog: &Catalog) -> Result<String, For
 fn validate_datetime_operand<'a>(
     value: &'a Value,
     catalog: &'a Catalog,
-) -> Result<&'a str, FormatError> {
+) -> Result<Cow<'a, str>, FormatError> {
     let text = value_text(catalog, value).ok_or_else(bad_operand)?;
     if text.contains('T') && text.chars().nth(4) == Some('-') {
-        Ok(text)
+        Ok(Cow::Borrowed(text))
+    } else if text.len() >= 10
+        && text.chars().nth(4) == Some('-')
+        && text.chars().nth(7) == Some('-')
+    {
+        Ok(Cow::Owned(format!("{text}T00:00:00")))
     } else {
         Err(bad_operand())
     }
@@ -2578,6 +2627,38 @@ mod tests {
             panic!("test:select must return a resolved selector");
         };
         assert_eq!(value.text(), "1");
+    }
+
+    #[test]
+    fn formatted_values_retain_their_source_for_reannotation() {
+        let mut host = builtin_host(&[
+            "datetime dateLength=long timePrecision=second",
+            "date",
+            "percent",
+            "currency currency=EUR",
+            "currency",
+        ]);
+        let datetime = host
+            .call(
+                0,
+                &[Value::Str("2006-01-02T15:04:06".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("datetime resolves");
+        host.call(1, &[datetime], FunctionOptions::new(&[]))
+            .expect("datetime can be reannotated as a date");
+
+        let percent = host
+            .call(2, &[Value::Float(0.01)], FunctionOptions::new(&[]))
+            .expect("percent resolves");
+        host.call(2, &[percent], FunctionOptions::new(&[]))
+            .expect("percent can be reannotated");
+
+        let currency = host
+            .call(3, &[Value::Int(42)], FunctionOptions::new(&[]))
+            .expect("currency resolves");
+        host.call(4, &[currency], FunctionOptions::new(&[]))
+            .expect("currency inherits its required option");
     }
 
     #[test]
@@ -3387,7 +3468,13 @@ mod tests {
                 FunctionOptions::new(&[]),
             )
             .expect("formatted");
-        assert_eq!(without_seconds, with_seconds);
+        let Value::Formatted(without_seconds) = without_seconds else {
+            panic!("time must produce a resolved formatted value");
+        };
+        let Value::Formatted(with_seconds) = with_seconds else {
+            panic!("time must produce a resolved formatted value");
+        };
+        assert_eq!(without_seconds.text(), with_seconds.text());
     }
 
     #[test]

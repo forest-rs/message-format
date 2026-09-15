@@ -215,9 +215,9 @@ pub use error::{
 };
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
-#[cfg(feature = "icu4x")]
-pub use value::ResolvedNumber;
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, ResolvedString, StrId, Value};
+#[cfg(feature = "icu4x")]
+pub use value::{ResolvedFormatted, ResolvedNumber};
 pub use vm::{FormatOption, FormatSink, FunctionOptions, Host, HostFn, MessageHandle, NoopHost};
 
 /// Catalog decoding and verification.

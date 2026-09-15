@@ -3111,6 +3111,21 @@ fn local_test_select_decimal_places_is_evaluated_by_the_host() {
     assert_eq!(out, "A");
 }
 
+#[cfg(feature = "icu4x")]
+#[test]
+fn resolved_test_selector_preserves_exact_decimal_text() {
+    let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1 {{integer}} 1.0 {{decimal}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en-US".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let out = formatter
+        .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
+        .expect("formatted");
+    assert_eq!(out, "decimal");
+}
+
 #[test]
 fn raw_match_with_dynamic_select_option_uses_default_arm() {
     let source =

@@ -1586,6 +1586,8 @@ enum ValueView<'a> {
     Fallback(&'a str),
     ResolvedSelect(&'a str),
     #[cfg(feature = "icu4x")]
+    Formatted(&'a str),
+    #[cfg(feature = "icu4x")]
     Number(&'a ResolvedNumber),
 }
 
@@ -1604,6 +1606,8 @@ impl<'a> ValueView<'a> {
             Value::LitRef { off, len } => catalog.literal_opt(*off, *len).map(Self::Text),
             Value::ResolvedSelect(value) => Some(Self::ResolvedSelect(value.text())),
             #[cfg(feature = "icu4x")]
+            Value::Formatted(value) => Some(Self::Formatted(value.text())),
+            #[cfg(feature = "icu4x")]
             Value::Number(value) => Some(Self::Number(value)),
         }
     }
@@ -1621,6 +1625,8 @@ impl<'a> ValueView<'a> {
             Self::ExactText(v) => sink.expression(v),
             Self::Fallback(v) => sink.expression(v),
             Self::ResolvedSelect(v) => sink.expression(v),
+            #[cfg(feature = "icu4x")]
+            Self::Formatted(v) => sink.expression(v),
             #[cfg(feature = "icu4x")]
             Self::Number(v) => match &v.value {
                 NumberValue::Integer(value) => {
@@ -1643,6 +1649,8 @@ impl<'a> ValueView<'a> {
             Self::ExactText(v) => Cow::Borrowed(v),
             Self::Fallback(v) => Cow::Borrowed(v),
             Self::ResolvedSelect(v) => Cow::Borrowed(v),
+            #[cfg(feature = "icu4x")]
+            Self::Formatted(v) => Cow::Borrowed(v),
             #[cfg(feature = "icu4x")]
             Self::Number(v) => Cow::Owned(v.text()),
         }
@@ -1693,12 +1701,14 @@ impl<'a> ValueView<'a> {
             }
             Self::Fallback(_) => CaseMatch::No,
             Self::ResolvedSelect(v) => {
-                if string_value_matches_case(v, case) {
+                if v == case {
                     CaseMatch::Exact
                 } else {
                     CaseMatch::No
                 }
             }
+            #[cfg(feature = "icu4x")]
+            Self::Formatted(_) => CaseMatch::No,
             #[cfg(feature = "icu4x")]
             Self::Number(v) => match v.selection {
                 NumberSelection::Invalid => CaseMatch::No,
@@ -1720,6 +1730,8 @@ impl<'a> ValueView<'a> {
             Self::ExactText(value) => value == case,
             Self::ResolvedSelect(value) => value == case,
             #[cfg(feature = "icu4x")]
+            Self::Formatted(_) => false,
+            #[cfg(feature = "icu4x")]
             Self::Number(value) => resolved_number_matches_case(value, case) == CaseMatch::Exact,
         };
         if matches {
@@ -1739,6 +1751,8 @@ impl<'a> ValueView<'a> {
             Self::ExactText(v) => v.is_empty(),
             Self::Fallback(v) => v.is_empty(),
             Self::ResolvedSelect(v) => v == "0",
+            #[cfg(feature = "icu4x")]
+            Self::Formatted(v) => v.is_empty(),
             #[cfg(feature = "icu4x")]
             Self::Number(v) => match &v.value {
                 NumberValue::Integer(value) => *value == 0,
