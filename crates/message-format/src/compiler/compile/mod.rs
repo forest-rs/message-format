@@ -40,9 +40,7 @@ mod lowering;
 use encoder::{encode_catalog, sort_messages};
 pub use error::{CompileError, DiagnosticContext};
 use frontend::parse_single_message_with_source;
-use interning::{
-    collect_functions, collect_strings, escape_fallback_literal, function_dynamic_options,
-};
+use interning::{collect_catalog_items, escape_fallback_literal, function_dynamic_options};
 use lowering::{LiteralPool, lower_parts};
 
 /// Literal-pool optimization mode for compiler-emitted `LITS` bytes.
@@ -819,11 +817,10 @@ fn encode_messages(
     messages: &[Message],
     options: CompileOptions,
 ) -> Result<EncodedMessages, CompileError> {
-    let mut all_strings = BTreeSet::new();
-    collect_strings(messages, &mut all_strings);
+    let items = collect_catalog_items(messages)?;
 
     let mut string_map = BTreeMap::new();
-    for (idx, key) in all_strings.into_iter().enumerate() {
+    for (idx, key) in items.strings.into_iter().enumerate() {
         let id = u32::try_from(idx).map_err(|_| CompileError::TooManyStrings)?;
         string_map.insert(key, id);
     }
@@ -833,9 +830,8 @@ fn encode_messages(
         strings[*id as usize] = value;
     }
 
-    let (collected_funcs, func_map) = collect_functions(messages)?;
-
-    let func_entries: Vec<FuncEntry> = collected_funcs
+    let func_entries: Vec<FuncEntry> = items
+        .functions
         .iter()
         .map(|cf| {
             let name_str_id = *string_map
@@ -879,7 +875,7 @@ fn encode_messages(
         lower_parts(
             &message.parts,
             &string_map,
-            &func_map,
+            &items.function_ids,
             &mut literals,
             &mut code,
         )?;
