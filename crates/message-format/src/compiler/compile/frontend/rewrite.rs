@@ -9,6 +9,7 @@ use alloc::{
 };
 
 use super::*;
+use crate::compiler::compile::analysis::DeclarationUses;
 use crate::compiler::semantic::SelectorExpr;
 
 use super::bindings::{DeclFunction, DeclarationBindings, LocalValue};
@@ -81,8 +82,7 @@ pub(super) fn compact_declaration_slots(
     body: &mut [Part],
 ) -> Result<(), CompileError> {
     let inlined_string_slots = inline_adjacent_string_numeric_chains(declarations, body);
-    let mut live = BTreeSet::new();
-    collect_part_slots(body, &mut live);
+    let mut live = DeclarationUses::analyze(body).referenced_slots();
     let mut retain = vec![true; declarations.len()];
     for (index, declaration) in declarations.iter().enumerate().rev() {
         let Part::Bind { slot, value, .. } = declaration else {
@@ -94,7 +94,9 @@ pub(super) fn compact_declaration_slots(
             retain[index] = false;
             continue;
         }
-        collect_part_slots(core::slice::from_ref(value.as_ref()), &mut live);
+        live.extend(
+            DeclarationUses::analyze(core::slice::from_ref(value.as_ref())).referenced_slots(),
+        );
     }
 
     let mut remap = BTreeMap::new();
@@ -125,6 +127,7 @@ fn inline_adjacent_string_numeric_chains(
     declarations: &mut [Part],
     body: &[Part],
 ) -> BTreeSet<u32> {
+    let uses = DeclarationUses::analyze_pair(declarations, body);
     let candidates = declarations
         .iter()
         .enumerate()
@@ -142,15 +145,7 @@ fn inline_adjacent_string_numeric_chains(
     let mut inlined_slots = BTreeSet::new();
 
     for (index, slot, string_call) in candidates {
-        let uses = declarations
-            .iter()
-            .map(|part| count_slot_uses(part, slot))
-            .sum::<usize>()
-            + body
-                .iter()
-                .map(|part| count_slot_uses(part, slot))
-                .sum::<usize>();
-        if uses != 1 {
+        if uses.reference_count(slot) != 1 {
             continue;
         }
         let Some(Part::Bind { value, .. }) = declarations.get_mut(index + 1) else {
@@ -170,158 +165,11 @@ fn inline_adjacent_string_numeric_chains(
     inlined_slots
 }
 
-fn count_slot_uses(part: &Part, target: u32) -> usize {
-    match part {
-        Part::Local(slot) | Part::CheckSelector(slot) => usize::from(*slot == target),
-        Part::Call(call) => {
-            count_operand_slot_uses(&call.operand, target)
-                + call
-                    .func
-                    .options
-                    .iter()
-                    .filter(|option| {
-                        matches!(
-                            option.value,
-                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
-                        )
-                    })
-                    .count()
-        }
-        Part::Select(select) => {
-            count_selector_slot_uses(&select.selector, target)
-                + select
-                    .arms
-                    .iter()
-                    .flat_map(|arm| &arm.parts)
-                    .map(|part| count_slot_uses(part, target))
-                    .sum::<usize>()
-                + select
-                    .default
-                    .iter()
-                    .map(|part| count_slot_uses(part, target))
-                    .sum::<usize>()
-        }
-        Part::Bind { value, .. } => count_slot_uses(value, target),
-        Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => options
-            .iter()
-            .filter(|option| {
-                matches!(
-                    option.value,
-                    FunctionOptionValue::LocalVar { slot, .. } if slot == target
-                )
-            })
-            .count(),
-        Part::Text(_) | Part::Literal(_) | Part::Var(_) => 0,
-    }
-}
-
-fn count_selector_slot_uses(selector: &SelectorExpr, target: u32) -> usize {
-    match selector {
-        SelectorExpr::Local { slot, .. } | SelectorExpr::CheckedLocal { slot, .. } => {
-            usize::from(*slot == target)
-        }
-        SelectorExpr::Call { operand, func } => {
-            count_operand_slot_uses(operand, target)
-                + func
-                    .options
-                    .iter()
-                    .filter(|option| {
-                        matches!(
-                            option.value,
-                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
-                        )
-                    })
-                    .count()
-        }
-        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => 0,
-    }
-}
-
-fn count_operand_slot_uses(operand: &Operand, target: u32) -> usize {
-    match operand {
-        Operand::Local(slot) => usize::from(*slot == target),
-        Operand::Call(call) => {
-            count_operand_slot_uses(&call.operand, target)
-                + call
-                    .func
-                    .options
-                    .iter()
-                    .filter(|option| {
-                        matches!(
-                            option.value,
-                            FunctionOptionValue::LocalVar { slot, .. } if slot == target
-                        )
-                    })
-                    .count()
-        }
-        Operand::Var(_) | Operand::Literal { .. } => 0,
-    }
-}
-
 fn binding_is_elidable(binding: &Part) -> bool {
     let Part::Bind { value, .. } = binding else {
         return false;
     };
     matches!(value.as_ref(), Part::Local(_))
-}
-
-pub(super) fn collect_part_slots(parts: &[Part], slots: &mut BTreeSet<u32>) {
-    for part in parts {
-        match part {
-            Part::Local(slot) | Part::CheckSelector(slot) => {
-                slots.insert(*slot);
-            }
-            Part::Call(call) => collect_call_slots(call, slots),
-            Part::Select(select) => {
-                collect_selector_slots(&select.selector, slots);
-                for arm in &select.arms {
-                    collect_part_slots(&arm.parts, slots);
-                }
-                collect_part_slots(&select.default, slots);
-            }
-            Part::Bind { value, .. } => collect_part_slots(core::slice::from_ref(value), slots),
-            Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => {
-                collect_option_slots(options, slots);
-            }
-            Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}
-        }
-    }
-}
-
-fn collect_selector_slots(selector: &SelectorExpr, slots: &mut BTreeSet<u32>) {
-    match selector {
-        SelectorExpr::Local { slot, .. } | SelectorExpr::CheckedLocal { slot, .. } => {
-            slots.insert(*slot);
-        }
-        SelectorExpr::Call { operand, func } => {
-            collect_operand_slots(operand, slots);
-            collect_option_slots(&func.options, slots);
-        }
-        SelectorExpr::Var(_) | SelectorExpr::Literal(_) => {}
-    }
-}
-
-fn collect_call_slots(call: &CallExpr, slots: &mut BTreeSet<u32>) {
-    collect_operand_slots(&call.operand, slots);
-    collect_option_slots(&call.func.options, slots);
-}
-
-fn collect_operand_slots(operand: &Operand, slots: &mut BTreeSet<u32>) {
-    match operand {
-        Operand::Local(slot) => {
-            slots.insert(*slot);
-        }
-        Operand::Call(call) => collect_call_slots(call, slots),
-        Operand::Var(_) | Operand::Literal { .. } => {}
-    }
-}
-
-fn collect_option_slots(options: &[FunctionOption], slots: &mut BTreeSet<u32>) {
-    for option in options {
-        if let FunctionOptionValue::LocalVar { slot, .. } = &option.value {
-            slots.insert(*slot);
-        }
-    }
 }
 
 fn remap_part_slots(parts: &mut [Part], remap: &BTreeMap<u32, u32>) -> Result<(), CompileError> {
@@ -409,146 +257,137 @@ fn lower_part_with_bindings(
     rewrite_dynamic_option_vars_from_locals(part, &bindings.locals, &bindings.slots);
     match part {
         Part::Var(var) => {
-            let canonical = canonicalize_identifier(var);
-            let _ = resolve_alias(&canonical, &bindings.aliases)?;
-            if excluded == Some(canonical.as_str()) {
-                return Ok(());
-            }
-            if excluded != Some(canonical.as_str())
-                && slot_is_runtime(bindings, &canonical)
-                && let Some(slot) = bindings.slots.get(&canonical)
-            {
-                *part = Part::Local(*slot);
-                return Ok(());
-            }
-            if let Some(LocalValue::Literal { value, .. }) = bindings.locals.get(&canonical) {
-                *part = Part::Literal(value.clone());
-                return Ok(());
-            }
-
-            let aliased = resolve_alias(&canonical, &bindings.aliases)?;
-            if excluded != Some(aliased.as_str())
-                && slot_is_runtime(bindings, &aliased)
-                && let Some(slot) = bindings.slots.get(&aliased)
-            {
-                *part = Part::Local(*slot);
-                return Ok(());
-            }
-            if repeat_local_pass_after_alias
-                && let Some(LocalValue::Literal { value, .. }) = bindings.locals.get(&aliased)
-            {
-                *part = Part::Literal(value.clone());
-                return Ok(());
-            }
-            if let Some(function) = bindings.input_functions.get(&aliased).cloned() {
-                let fb = format!("{{${aliased}}}");
-                let mut lowered = function.into_part(Some(fb));
-                rewrite_dynamic_option_vars_from_locals(
-                    &mut lowered,
-                    &bindings.locals,
-                    &bindings.slots,
-                );
-                *part = lowered;
-                return Ok(());
-            }
-            if let Some(declared) = bindings.input_aliases.get(&aliased) {
-                *var = declared.clone();
-            } else {
-                *var = aliased;
+            match resolve_bound_reference(var, bindings, repeat_local_pass_after_alias, excluded)? {
+                BoundReference::Unchanged => {}
+                BoundReference::Local { slot, .. } => *part = Part::Local(slot),
+                BoundReference::Literal { value, .. } => *part = Part::Literal(value),
+                BoundReference::Input { function, name } => {
+                    *part = function.into_part(Some(format!("{{${name}}}")));
+                    rewrite_dynamic_option_vars_from_locals(
+                        part,
+                        &bindings.locals,
+                        &bindings.slots,
+                    );
+                }
+                BoundReference::Argument(name) => *var = name,
             }
         }
-        Part::Call(CallExpr {
-            operand: Operand::Var(var),
-            func,
-            fallback,
-        }) => {
-            let retained_fallback = fallback.clone();
-            let canonical = canonicalize_identifier(var);
-            let _ = resolve_alias(&canonical, &bindings.aliases)?;
-            if excluded == Some(canonical.as_str()) {
-                return Ok(());
+        Part::Call(call) if matches!(call.operand, Operand::Var(_)) => {
+            let Operand::Var(var) = &call.operand else {
+                unreachable!("guarded variable operand");
+            };
+            let reference =
+                resolve_bound_reference(var, bindings, repeat_local_pass_after_alias, excluded)?;
+            let fallback_name = reference.fallback_name().map(ToString::to_string);
+            match reference {
+                BoundReference::Unchanged => return Ok(()),
+                BoundReference::Local { slot, .. } => call.operand = Operand::Local(slot),
+                BoundReference::Literal { value, kind, .. } => {
+                    call.operand = Operand::Literal { value, kind };
+                }
+                BoundReference::Input { function, .. } => {
+                    call.operand = input_function_operand(function);
+                }
+                BoundReference::Argument(name) => call.operand = Operand::Var(name),
             }
-            if excluded != Some(canonical.as_str())
-                && slot_is_runtime(bindings, &canonical)
-                && let Some(slot) = bindings.slots.get(&canonical)
+            if call.fallback.is_none()
+                && let Some(name) = fallback_name
             {
-                *part = Part::Call(CallExpr {
-                    operand: Operand::Local(*slot),
-                    func: func.clone(),
-                    fallback: retained_fallback
-                        .clone()
-                        .or_else(|| Some(format!("{{${canonical}}}"))),
-                });
-                return Ok(());
+                call.fallback = Some(format!("{{${name}}}"));
             }
-            if let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&canonical) {
-                *part = Part::Call(CallExpr {
-                    operand: Operand::Literal {
-                        value: value.clone(),
-                        kind: *kind,
-                    },
-                    func: func.clone(),
-                    fallback: retained_fallback
-                        .clone()
-                        .or_else(|| Some(format!("{{${canonical}}}"))),
-                });
-                return Ok(());
-            }
-
-            let aliased = resolve_alias(&canonical, &bindings.aliases)?;
-            if excluded != Some(aliased.as_str())
-                && slot_is_runtime(bindings, &aliased)
-                && let Some(slot) = bindings.slots.get(&aliased)
-            {
-                *part = Part::Call(CallExpr {
-                    operand: Operand::Local(*slot),
-                    func: func.clone(),
-                    fallback: retained_fallback
-                        .clone()
-                        .or_else(|| Some(format!("{{${aliased}}}"))),
-                });
-                return Ok(());
-            }
-            if repeat_local_pass_after_alias
-                && let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&aliased)
-            {
-                *part = Part::Call(CallExpr {
-                    operand: Operand::Literal {
-                        value: value.clone(),
-                        kind: *kind,
-                    },
-                    func: func.clone(),
-                    fallback: retained_fallback
-                        .clone()
-                        .or_else(|| Some(format!("{{${aliased}}}"))),
-                });
-                return Ok(());
-            }
-            if let Some(function) = bindings.input_functions.get(&aliased).cloned() {
-                let mut lowered = Part::Call(CallExpr {
-                    operand: input_function_operand(function),
-                    func: func.clone(),
-                    fallback: retained_fallback
-                        .clone()
-                        .or_else(|| Some(format!("{{${aliased}}}"))),
-                });
-                rewrite_dynamic_option_vars_from_locals(
-                    &mut lowered,
-                    &bindings.locals,
-                    &bindings.slots,
-                );
-                *part = lowered;
-                return Ok(());
-            }
-            if let Some(declared) = bindings.input_aliases.get(&aliased) {
-                *var = declared.clone();
-            } else {
-                *var = aliased;
-            }
+            rewrite_call_options_from_locals(call, &bindings.locals, &bindings.slots);
         }
         _ => {}
     }
     Ok(())
+}
+
+enum BoundReference {
+    Unchanged,
+    Local {
+        slot: u32,
+        name: String,
+    },
+    Literal {
+        value: String,
+        kind: OperandLiteralKind,
+        name: String,
+    },
+    Input {
+        function: DeclFunction,
+        name: String,
+    },
+    Argument(String),
+}
+
+impl BoundReference {
+    fn fallback_name(&self) -> Option<&str> {
+        match self {
+            Self::Local { name, .. } | Self::Literal { name, .. } | Self::Input { name, .. } => {
+                Some(name)
+            }
+            Self::Unchanged | Self::Argument(_) => None,
+        }
+    }
+}
+
+fn resolve_bound_reference(
+    name: &str,
+    bindings: &DeclarationBindings,
+    repeat_local_pass_after_alias: bool,
+    excluded: Option<&str>,
+) -> Result<BoundReference, CompileError> {
+    let canonical = canonicalize_identifier(name);
+    let aliased = resolve_alias(&canonical, &bindings.aliases)?;
+    if excluded == Some(canonical.as_str()) {
+        return Ok(BoundReference::Unchanged);
+    }
+    if slot_is_runtime(bindings, &canonical)
+        && let Some(slot) = bindings.slots.get(&canonical)
+    {
+        return Ok(BoundReference::Local {
+            slot: *slot,
+            name: canonical,
+        });
+    }
+    if let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&canonical) {
+        return Ok(BoundReference::Literal {
+            value: value.clone(),
+            kind: *kind,
+            name: canonical,
+        });
+    }
+    if excluded != Some(aliased.as_str())
+        && slot_is_runtime(bindings, &aliased)
+        && let Some(slot) = bindings.slots.get(&aliased)
+    {
+        return Ok(BoundReference::Local {
+            slot: *slot,
+            name: aliased,
+        });
+    }
+    if repeat_local_pass_after_alias
+        && let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&aliased)
+    {
+        return Ok(BoundReference::Literal {
+            value: value.clone(),
+            kind: *kind,
+            name: aliased,
+        });
+    }
+    if let Some(function) = bindings.input_functions.get(&aliased).cloned() {
+        return Ok(BoundReference::Input {
+            function,
+            name: aliased,
+        });
+    }
+    Ok(BoundReference::Argument(
+        bindings
+            .input_aliases
+            .get(&aliased)
+            .cloned()
+            .unwrap_or(aliased),
+    ))
 }
 
 fn slot_is_runtime(bindings: &DeclarationBindings, name: &str) -> bool {
