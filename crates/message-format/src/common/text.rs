@@ -72,34 +72,6 @@ pub(crate) fn parse_number_literal(value: &str) -> Option<f64> {
     None
 }
 
-/// Truncate a floating-point value toward zero without requiring a platform
-/// math library.
-///
-/// Finite `f64` values whose magnitude is at least 2^52 have no fractional
-/// bits. Smaller values fit in `i64` after truncation. Signed zero is retained
-/// because number formatting observes its sign.
-#[cfg(any(feature = "compile", test))]
-pub(crate) fn truncate_f64(value: f64) -> f64 {
-    const FIRST_INTEGER_ONLY_MAGNITUDE: f64 = 4_503_599_627_370_496.0;
-
-    if value == 0.0
-        || !value.is_finite()
-        || !(-FIRST_INTEGER_ONLY_MAGNITUDE..FIRST_INTEGER_ONLY_MAGNITUDE).contains(&value)
-    {
-        return value;
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the range check makes this an intentional toward-zero truncation"
-    )]
-    let integer = value as i64;
-    if integer == 0 && value.is_sign_negative() {
-        -0.0
-    } else {
-        integer as f64
-    }
-}
-
 pub(crate) fn is_bidi_control(ch: char) -> bool {
     matches!(
         ch,
@@ -136,11 +108,6 @@ pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> 
             }
         }
     }
-}
-
-#[cfg(any(feature = "compile", test))]
-pub(crate) fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
-    format_signed_string(sign_display, value.to_string())
 }
 
 #[cfg(test)]
@@ -189,20 +156,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_f64_preserves_toward_zero_edge_cases() {
-        assert_eq!(truncate_f64(1.9), 1.0);
-        assert_eq!(truncate_f64(-1.9), -1.0);
-        assert_eq!(
-            truncate_f64(4_503_599_627_370_496.0),
-            4_503_599_627_370_496.0
-        );
-        assert_eq!(truncate_f64(f64::INFINITY), f64::INFINITY);
-        assert!(truncate_f64(f64::NAN).is_nan());
-        assert_eq!(truncate_f64(-0.9).to_bits(), (-0.0_f64).to_bits());
-        assert_eq!(truncate_f64(-0.0).to_bits(), (-0.0_f64).to_bits());
-    }
-
-    #[test]
     fn bidi_control_detection() {
         assert!(is_bidi_control('\u{061C}'));
         assert!(is_bidi_control('\u{200E}'));
@@ -238,16 +191,5 @@ mod tests {
         assert_eq!(format_signed_string(SignDisplay::Never, "-5".into()), "5");
         assert_eq!(format_signed_string(SignDisplay::Never, "+3".into()), "3");
         assert_eq!(format_signed_string(SignDisplay::Never, "42".into()), "42");
-    }
-
-    #[test]
-    fn format_signed_number_uses_shortest_repr() {
-        assert_eq!(
-            format_signed_number(SignDisplay::Auto, 1e23),
-            "100000000000000000000000"
-        );
-        assert_eq!(format_signed_number(SignDisplay::Auto, 2.75), "2.75");
-        assert_eq!(format_signed_number(SignDisplay::Always, 0.0), "+0");
-        assert_eq!(format_signed_number(SignDisplay::Never, -0.0), "0");
     }
 }

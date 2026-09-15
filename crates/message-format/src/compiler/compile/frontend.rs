@@ -6,7 +6,6 @@ use crate::compiler::syntax::span::SourceContext;
 
 mod bindings;
 mod document;
-mod local_eval;
 mod matching;
 mod pattern;
 mod raw_match;

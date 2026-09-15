@@ -7,8 +7,8 @@ use super::*;
 use crate::compiler::semantic::SelectorExpr;
 use crate::compiler::syntax::span::byte_to_line_col;
 
-use super::bindings::{DeclFunction, DeclarationBindings, LocalValue};
-use super::local_eval::resolve_alias;
+use super::bindings::resolve_alias;
+use super::bindings::{DeclFunction, DeclarationBindings, LocalLiteral};
 use super::matching::{
     LoweredMatchArm, MatchArm, build_nested_match_ir, builtin_selector_accepts_variant_key,
     builtin_selector_variant_key_expectation, lower_match_declaration_prelude,
@@ -139,9 +139,9 @@ fn analyze_selector(
 ) -> Result<AnalyzedSelector, CompileError> {
     let name = resolve_alias(selector, &bindings.aliases)?;
     let literal = bindings
-        .locals
+        .literals
         .get(&name)
-        .and_then(LocalValue::as_literal)
+        .map(LocalLiteral::as_str)
         .map(ToOwned::to_owned);
     let mut part = bindings
         .local_functions
@@ -150,12 +150,7 @@ fn analyze_selector(
         .or_else(|| bindings.input_functions.get(&name).cloned())
         .map(selector_expr_from_decl_function)
         .unwrap_or_else(|| SelectorExpr::Var(name.clone()));
-    if let Some(slot) = bindings.slots.get(&name).copied()
-        && bindings
-            .locals
-            .get(&name)
-            .is_none_or(|value| value.as_literal().is_none())
-    {
+    if let Some(slot) = bindings.slots.get(&name).copied() {
         if let Some(function) = bindings
             .local_functions
             .get(&name)
@@ -169,7 +164,7 @@ fn analyze_selector(
             part = SelectorExpr::Local { slot, func: None };
         }
     } else {
-        rewrite_selector_expr_from_locals(&mut part, &bindings.locals, &bindings.slots);
+        rewrite_selector_expr_from_locals(&mut part, &bindings.literals, &bindings.slots);
     }
     if matches!(part, SelectorExpr::Var(_)) {
         let (line, col) = ctx.location(source, 0);

@@ -14,7 +14,7 @@ use alloc::{
 
 use crate::runtime::schema::{self, FuncEntry, MessageEntry};
 
-use crate::common::text::{parse_number_literal, strip_bidi_controls};
+use crate::common::text::parse_number_literal;
 use crate::compiler::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionSchema, FunctionSelectorKeyKind,
 };

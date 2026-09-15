@@ -12,15 +12,15 @@ use super::*;
 use crate::compiler::compile::analysis::DeclarationUses;
 use crate::compiler::semantic::SelectorExpr;
 
-use super::bindings::{DeclFunction, DeclarationBindings, LocalValue};
-use super::local_eval::resolve_alias;
+use super::bindings::resolve_alias;
+use super::bindings::{DeclFunction, DeclarationBindings, LocalLiteral};
 
 pub(super) fn lower_parts_with_declaration_bindings(
     parts: &mut [Part],
     bindings: &DeclarationBindings,
     repeat_local_pass_after_alias: bool,
 ) -> Result<(), CompileError> {
-    walk_parts_mut(parts, &bindings.locals, &mut |part| {
+    walk_parts_mut(parts, &bindings.literals, &mut |part| {
         lower_part_with_bindings(part, bindings, repeat_local_pass_after_alias, None)
     })
 }
@@ -254,7 +254,7 @@ fn lower_part_with_bindings(
     repeat_local_pass_after_alias: bool,
     excluded: Option<&str>,
 ) -> Result<(), CompileError> {
-    rewrite_dynamic_option_vars_from_locals(part, &bindings.locals, &bindings.slots);
+    rewrite_dynamic_option_vars_from_locals(part, &bindings.literals, &bindings.slots);
     match part {
         Part::Var(var) => {
             match resolve_bound_reference(var, bindings, repeat_local_pass_after_alias, excluded)? {
@@ -265,7 +265,7 @@ fn lower_part_with_bindings(
                     *part = function.into_part(Some(format!("{{${name}}}")));
                     rewrite_dynamic_option_vars_from_locals(
                         part,
-                        &bindings.locals,
+                        &bindings.literals,
                         &bindings.slots,
                     );
                 }
@@ -295,7 +295,7 @@ fn lower_part_with_bindings(
             {
                 call.fallback = Some(format!("{{${name}}}"));
             }
-            rewrite_call_options_from_locals(call, &bindings.locals, &bindings.slots);
+            rewrite_call_options_from_locals(call, &bindings.literals, &bindings.slots);
         }
         _ => {}
     }
@@ -350,7 +350,7 @@ fn resolve_bound_reference(
             name: canonical,
         });
     }
-    if let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&canonical) {
+    if let Some(LocalLiteral { value, kind }) = bindings.literals.get(&canonical) {
         return Ok(BoundReference::Literal {
             value: value.clone(),
             kind: *kind,
@@ -367,7 +367,7 @@ fn resolve_bound_reference(
         });
     }
     if repeat_local_pass_after_alias
-        && let Some(LocalValue::Literal { value, kind }) = bindings.locals.get(&aliased)
+        && let Some(LocalLiteral { value, kind }) = bindings.literals.get(&aliased)
     {
         return Ok(BoundReference::Literal {
             value: value.clone(),
@@ -391,10 +391,7 @@ fn resolve_bound_reference(
 }
 
 fn slot_is_runtime(bindings: &DeclarationBindings, name: &str) -> bool {
-    bindings
-        .locals
-        .get(name)
-        .is_none_or(|value| value.as_literal().is_none())
+    !bindings.literals.contains_key(name)
 }
 
 fn input_function_operand(function: DeclFunction) -> Operand {
@@ -407,7 +404,7 @@ fn input_function_operand(function: DeclFunction) -> Operand {
 
 fn rewrite_dynamic_option_vars_from_locals(
     part: &mut Part,
-    locals: &BTreeMap<String, LocalValue>,
+    locals: &BTreeMap<String, LocalLiteral>,
     slots: &BTreeMap<String, u32>,
 ) {
     let Part::Call(call) = part else { return };
@@ -416,7 +413,7 @@ fn rewrite_dynamic_option_vars_from_locals(
 
 fn rewrite_call_options_from_locals(
     call: &mut CallExpr,
-    locals: &BTreeMap<String, LocalValue>,
+    locals: &BTreeMap<String, LocalLiteral>,
     slots: &BTreeMap<String, u32>,
 ) {
     let func = &mut call.func;
@@ -424,7 +421,7 @@ fn rewrite_call_options_from_locals(
         let FunctionOptionValue::Var(var) = &option.value else {
             continue;
         };
-        let Some(local_value) = locals.get(var).and_then(LocalValue::as_literal) else {
+        let Some(local_value) = locals.get(var).map(LocalLiteral::as_str) else {
             if let Some(slot) = slots.get(var) {
                 option.value = FunctionOptionValue::LocalVar {
                     name: var.clone(),
@@ -448,7 +445,7 @@ fn rewrite_call_options_from_locals(
 
 pub(super) fn rewrite_selector_expr_from_locals(
     selector: &mut SelectorExpr,
-    locals: &BTreeMap<String, LocalValue>,
+    locals: &BTreeMap<String, LocalLiteral>,
     slots: &BTreeMap<String, u32>,
 ) {
     let (operand, func) = match selector {
@@ -462,7 +459,7 @@ pub(super) fn rewrite_selector_expr_from_locals(
         let FunctionOptionValue::Var(var) = &option.value else {
             continue;
         };
-        let Some(local_value) = locals.get(var).and_then(LocalValue::as_literal) else {
+        let Some(local_value) = locals.get(var).map(LocalLiteral::as_str) else {
             continue;
         };
         option.value = FunctionOptionValue::ResolvedVar {
@@ -477,7 +474,7 @@ pub(super) fn rewrite_selector_expr_from_locals(
 
 fn walk_parts_mut(
     parts: &mut [Part],
-    locals: &BTreeMap<String, LocalValue>,
+    locals: &BTreeMap<String, LocalLiteral>,
     f: &mut impl FnMut(&mut Part) -> Result<(), CompileError>,
 ) -> Result<(), CompileError> {
     for part in parts {

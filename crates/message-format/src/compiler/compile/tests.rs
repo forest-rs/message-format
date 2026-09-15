@@ -3094,11 +3094,12 @@ fn local_integer_function_is_evaluated() {
 }
 
 #[test]
-fn local_test_select_decimal_places_is_evaluated() {
+fn local_test_select_decimal_places_is_evaluated_by_the_host() {
     let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1.0 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let host = HostFn(|_, _: &[Value], _: FunctionOptions<'_>| Ok(Value::Str(String::from("1.0"))));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -3135,11 +3136,11 @@ fn raw_match_with_unstable_selector_chain_uses_default_arm() {
 }
 
 #[test]
-fn raw_match_with_two_local_selectors_resolves_at_compile_time() {
+fn raw_match_with_two_local_selectors_resolves_through_the_host() {
     let source = ".local $x = {1 :test:select} .local $y = {0 :test:select} .match $x $y 1 1 {{1,1}} 1 * {{1,*}} * 1 {{*,1}} * * {{*,*}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");

@@ -5,15 +5,12 @@ use alloc::{borrow::ToOwned, string::String};
 
 use super::*;
 
-use super::local_eval::{
-    apply_literal_function, local_function_may_fail_select, normalize_local_function_expression,
-};
 use super::lower_expression_node_to_part;
 use super::pattern::FunctionOriginContext;
 use crate::common::text::parse_number_literal;
 
 pub(super) struct DeclarationBindings {
-    pub(super) locals: BTreeMap<String, LocalValue>,
+    pub(super) literals: BTreeMap<String, LocalLiteral>,
     pub(super) aliases: BTreeMap<String, String>,
     pub(super) input_aliases: BTreeMap<String, String>,
     pub(super) local_functions: BTreeMap<String, DeclFunction>,
@@ -27,27 +24,20 @@ struct InputDeclarationBindings {
 }
 
 struct LocalDeclarationAnalysis {
-    values: BTreeMap<String, LocalValue>,
+    literals: BTreeMap<String, LocalLiteral>,
     aliases: BTreeMap<String, String>,
     functions: BTreeMap<String, DeclFunction>,
 }
 
 #[derive(Clone)]
-pub(super) enum LocalValue {
-    Literal {
-        value: String,
-        kind: OperandLiteralKind,
-    },
-    Call,
-    UnknownFunction,
+pub(super) struct LocalLiteral {
+    pub(super) value: String,
+    pub(super) kind: OperandLiteralKind,
 }
 
-impl LocalValue {
-    pub(super) fn as_literal(&self) -> Option<&str> {
-        match self {
-            Self::Literal { value, .. } => Some(value.as_str()),
-            Self::Call | Self::UnknownFunction => None,
-        }
+impl LocalLiteral {
+    pub(super) fn as_str(&self) -> &str {
+        self.value.as_str()
     }
 }
 
@@ -97,12 +87,7 @@ pub(super) fn collect_declaration_bindings(
             declarations
                 .locals
                 .iter()
-                .filter(|decl| {
-                    local_analysis
-                        .values
-                        .get(&decl.canonical)
-                        .is_none_or(|value| value.as_literal().is_none())
-                })
+                .filter(|decl| !local_analysis.literals.contains_key(&decl.canonical))
                 .map(|decl| (decl.expr.node.span.start, decl.canonical.as_str())),
         )
         .collect::<Vec<_>>();
@@ -118,7 +103,7 @@ pub(super) fn collect_declaration_bindings(
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     Ok(DeclarationBindings {
-        locals: local_analysis.values,
+        literals: local_analysis.literals,
         aliases: local_analysis.aliases,
         input_aliases: input_bindings.aliases,
         local_functions: local_analysis.functions,
@@ -163,7 +148,7 @@ fn analyze_local_declarations(
     function_origin: Option<FunctionOriginContext>,
     input_functions: &BTreeMap<String, DeclFunction>,
 ) -> Result<LocalDeclarationAnalysis, CompileError> {
-    let mut values = BTreeMap::new();
+    let mut literals = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     let mut functions = BTreeMap::new();
 
@@ -179,8 +164,8 @@ fn analyze_local_declarations(
             // value binding as well so later re-annotations preserve the
             // structured numeric call instead of falling back to a runtime
             // variable lookup for the alias name.
-            if let Some(value) = values.get(&canonicalize_identifier(alias)).cloned() {
-                values.insert(name.clone(), value);
+            if let Some(value) = literals.get(&canonicalize_identifier(alias)).cloned() {
+                literals.insert(name.clone(), value);
             }
         }
 
@@ -188,13 +173,13 @@ fn analyze_local_declarations(
             functions.insert(name.clone(), function);
         }
 
-        if let Some(value) = evaluate_local_value(parsed, direct_literal_kind, &values) {
-            values.insert(name, value);
+        if let Some(value) = evaluate_local_literal(parsed, direct_literal_kind) {
+            literals.insert(name, value);
         }
     }
 
     Ok(LocalDeclarationAnalysis {
-        values,
+        literals,
         aliases,
         functions,
     })
@@ -225,46 +210,49 @@ fn normalize_declared_function_part(
         .map(|function| normalize_local_function_expression(function, input_functions))
 }
 
-fn evaluate_local_value(
+fn normalize_local_function_expression(
+    expression: DeclFunction,
+    input_functions: &BTreeMap<String, DeclFunction>,
+) -> DeclFunction {
+    let Operand::Var(operand) = &expression.operand else {
+        return expression;
+    };
+    let Some(input_expression) = input_functions.get(operand) else {
+        return expression;
+    };
+    DeclFunction {
+        operand: Operand::Call(Box::new(CallExpr {
+            operand: input_expression.operand.clone(),
+            func: input_expression.func.clone(),
+            fallback: None,
+        })),
+        func: expression.func,
+    }
+}
+
+pub(super) fn resolve_alias(
+    name: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<String, CompileError> {
+    let mut name = name.to_owned();
+    for _ in 0..8 {
+        let Some(next) = aliases.get(&name).cloned() else {
+            return Ok(name);
+        };
+        name = next;
+    }
+    Err(CompileError::alias_resolution_overflow(name))
+}
+
+fn evaluate_local_literal(
     part: Part,
     direct_literal_kind: Option<OperandLiteralKind>,
-    known_values: &BTreeMap<String, LocalValue>,
-) -> Option<LocalValue> {
+) -> Option<LocalLiteral> {
     match part {
-        Part::Literal(value) => Some(LocalValue::Literal {
+        Part::Literal(value) => Some(LocalLiteral {
             value,
             kind: direct_literal_kind.unwrap_or(OperandLiteralKind::String),
         }),
-        Part::Call(CallExpr { operand, func, .. }) => {
-            if local_function_may_fail_select(&func) {
-                return None;
-            }
-            let base = match operand {
-                Operand::Literal { value, kind } => Some(Operand::Literal { value, kind }),
-                Operand::Var(var) => match known_values.get(&var) {
-                    Some(LocalValue::Literal { value, kind }) => Some(Operand::Literal {
-                        value: value.clone(),
-                        kind: *kind,
-                    }),
-                    Some(LocalValue::Call) | Some(LocalValue::UnknownFunction) | None => None,
-                },
-                Operand::Local(_) | Operand::Call(_) => None,
-            };
-            // Numeric calls and calls over a non-literal declaration remain
-            // runtime values; folding them would lose exact payload/options.
-            if matches!(
-                func.name.as_str(),
-                "string" | "number" | "integer" | "offset"
-            ) || base.is_none()
-            {
-                Some(LocalValue::Call)
-            } else {
-                let Some(Operand::Literal { value, .. }) = base else {
-                    return None;
-                };
-                Some(apply_literal_function(value, &func))
-            }
-        }
         _ => None,
     }
 }

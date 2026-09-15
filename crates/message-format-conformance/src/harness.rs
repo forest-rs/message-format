@@ -156,7 +156,7 @@ fn cases() -> Vec<Case> {
             args: Vec::new(),
             expected: include_str!("../../../fixtures/expected/raw_match_two_locals.txt")
                 .trim_end(),
-            host_mode: HostMode::Noop,
+            host_mode: HostMode::Builtin { locale: "en-US" },
         },
         Case {
             source: include_str!("../../../fixtures/mf2/icu_default_float.mf2"),
