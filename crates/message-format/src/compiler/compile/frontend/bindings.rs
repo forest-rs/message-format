@@ -159,12 +159,14 @@ fn analyze_local_declarations(
         let direct_literal_kind = local_literal_kind(source, &declaration.expr.node);
 
         if let Part::Var(alias) = &parsed {
-            aliases.insert(name.clone(), alias.clone());
+            let canonical = canonicalize_identifier(alias);
+            let target = aliases.get(&canonical).cloned().unwrap_or(canonical);
+            aliases.insert(name.clone(), target.clone());
             // A local alias still denotes the already-analyzed value. Keep a
             // value binding as well so later re-annotations preserve the
             // structured numeric call instead of falling back to a runtime
             // variable lookup for the alias name.
-            if let Some(value) = literals.get(&canonicalize_identifier(alias)).cloned() {
+            if let Some(value) = literals.get(&target).cloned() {
                 literals.insert(name.clone(), value);
             }
         }
@@ -230,18 +232,11 @@ fn normalize_local_function_expression(
     }
 }
 
-pub(super) fn resolve_alias(
-    name: &str,
-    aliases: &BTreeMap<String, String>,
-) -> Result<String, CompileError> {
-    let mut name = name.to_owned();
-    for _ in 0..8 {
-        let Some(next) = aliases.get(&name).cloned() else {
-            return Ok(name);
-        };
-        name = next;
-    }
-    Err(CompileError::alias_resolution_overflow(name))
+pub(super) fn resolve_alias(name: &str, aliases: &BTreeMap<String, String>) -> String {
+    aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_owned())
 }
 
 fn evaluate_local_literal(

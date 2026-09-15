@@ -137,7 +137,7 @@ fn analyze_selector(
     selector: &str,
     bindings: &DeclarationBindings,
 ) -> Result<AnalyzedSelector, CompileError> {
-    let name = resolve_alias(selector, &bindings.aliases)?;
+    let name = resolve_alias(selector, &bindings.aliases);
     let literal = bindings
         .literals
         .get(&name)

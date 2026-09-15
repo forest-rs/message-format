@@ -3059,8 +3059,8 @@ fn chained_local_aliases_are_substituted() {
 }
 
 #[test]
-fn alias_cycle_reports_resolution_overflow() {
-    let err = compile_str(
+fn long_alias_chain_is_substituted() {
+    let bytes = compile_str(
         ".input {$seed} \
          .local $a = {$seed} \
          .local $b = {$a} \
@@ -3074,9 +3074,14 @@ fn alias_cycle_reports_resolution_overflow() {
          .local $j = {$i} \
          {{Hello {$j}!}}",
     )
-    .expect_err("must fail");
-
-    assert!(matches!(err, CompileError::AliasResolutionOverflow { .. }));
+    .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let args = vec![arg(&catalog, "seed", Value::Str("Chain".to_string()))];
+    let out = formatter
+        .format_by_id_for_test("main", &args)
+        .expect("formatted");
+    assert_eq!(out, "Hello Chain!");
 }
 
 #[cfg(feature = "icu4x")]

@@ -247,11 +247,6 @@ pub enum CompileError {
         /// Human-readable adapter failure detail.
         detail: String,
     },
-    /// Alias resolution exceeded the compiler's supported chain depth.
-    AliasResolutionOverflow {
-        /// Alias name that could not be resolved safely.
-        alias: String,
-    },
     /// Internal compiler consistency error (should not be reachable from valid frontend output).
     InternalError {
         /// Description of the consistency failure.
@@ -268,12 +263,6 @@ impl CompileError {
 
     pub(crate) fn size_overflow(what: &'static str) -> Self {
         Self::SizeOverflow { what }
-    }
-
-    pub(crate) fn alias_resolution_overflow(alias: impl Into<String>) -> Self {
-        Self::AliasResolutionOverflow {
-            alias: alias.into(),
-        }
     }
 
     pub(crate) fn invalid_expr(line: usize) -> Self {
@@ -895,7 +884,6 @@ impl CompileError {
             | Self::TooManyStrings
             | Self::SizeOverflow { .. }
             | Self::ResourceInputError { .. }
-            | Self::AliasResolutionOverflow { .. }
             | Self::InternalError { .. } => None,
         }
     }
@@ -1161,9 +1149,6 @@ impl fmt::Display for CompileError {
             Self::TooManyStrings => write!(f, "too many interned strings"),
             Self::SizeOverflow { what } => write!(f, "{what} overflow"),
             Self::ResourceInputError { detail } => write!(f, "invalid resource input: {detail}"),
-            Self::AliasResolutionOverflow { alias } => {
-                write!(f, "alias resolution exceeded maximum depth for {alias:?}")
-            }
             Self::InternalError { detail } => write!(f, "internal compiler error: {detail}"),
         }
     }

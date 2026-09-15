@@ -338,7 +338,7 @@ fn resolve_bound_reference(
     excluded: Option<&str>,
 ) -> Result<BoundReference, CompileError> {
     let canonical = canonicalize_identifier(name);
-    let aliased = resolve_alias(&canonical, &bindings.aliases)?;
+    let aliased = resolve_alias(&canonical, &bindings.aliases);
     if excluded == Some(canonical.as_str()) {
         return Ok(BoundReference::Unchanged);
     }

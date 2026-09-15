@@ -621,7 +621,6 @@ fn map_compile_error(error: &CompileError) -> &'static str {
         | CompileError::TooManyStrings
         | CompileError::SizeOverflow { .. }
         | CompileError::ResourceInputError { .. }
-        | CompileError::AliasResolutionOverflow { .. }
         | CompileError::InternalError { .. } => "data-model-error",
     }
 }
