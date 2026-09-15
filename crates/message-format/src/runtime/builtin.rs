@@ -680,6 +680,10 @@ impl Host for BuiltinHost {
         value: &Value,
         sink: &mut dyn FormatSink,
     ) -> bool {
+        if let Value::Formatted(value) = value {
+            sink.expression(value.text());
+            return true;
+        }
         if let Value::String(value) = value
             && value.direction == StringDirection::Unspecified
         {
@@ -800,6 +804,7 @@ fn resolve_number(
     options: &EffectiveOptions<'_>,
     on_error: &mut dyn FnMut(MessageFunctionError),
 ) -> Result<ResolvedNumber, FormatError> {
+    let value = numeric_source(value);
     let (mut number, inherited_format, inherited_selection, inherited_select) = match value {
         Value::Number(number) => (
             number.value.clone(),
@@ -870,6 +875,7 @@ fn resolve_number(
 }
 
 fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, FormatError> {
+    let value = numeric_source(value);
     if let Value::Float(value) = value
         && value.is_sign_negative()
         && *value == 0.0
@@ -890,7 +896,7 @@ fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, F
     }
     match value {
         Value::Int(value) => return Ok(NumberValue::Integer(*value)),
-        Value::Formatted(value) => return parse_number_value(&value.source, catalog),
+        Value::Number(value) => return Ok(value.value.clone()),
         Value::String(value) if let Some(value) = value.integer_hint() => {
             return Ok(NumberValue::Integer(value));
         }
@@ -1584,11 +1590,11 @@ fn apply_grouping_min2(value: String) -> String {
 }
 
 fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError> {
+    let value = numeric_source(value);
     match value {
         Value::Int(v) => exact_i64_to_f64(*v),
         Value::Float(v) => Ok(*v),
         Value::Number(number) => number.text().parse::<f64>().map_err(|_| bad_operand()),
-        Value::Formatted(value) => numeric_operand(&value.source, catalog),
         _ => value_text(catalog, value)
             .and_then(parse_number_literal)
             .ok_or_else(bad_operand),
@@ -1601,6 +1607,7 @@ fn format_percent(
     minimum_fraction_digits: Option<usize>,
     sign_display: SignDisplay,
 ) -> Result<String, FormatError> {
+    let value = numeric_source(value);
     if let Value::Number(number) = value {
         if let NumberValue::NonFinite(value) = number.value {
             return Ok(format_signed_string(sign_display, format!("{}%", value)));
@@ -1686,11 +1693,22 @@ fn format_currency(
         }
         return Err(bad_operand());
     };
+    let value = numeric_source(value);
     if let Value::Int(v) = value {
         return Ok(format!("{} {v}", currency));
     }
+    if let Value::Number(number) = value {
+        return Ok(format!("{} {}", currency, number.text()));
+    }
     let number = numeric_operand(value, catalog)?;
     Ok(format!("{} {number}", currency))
+}
+
+fn numeric_source(mut value: &Value) -> &Value {
+    while let Value::Formatted(formatted) = value {
+        value = &formatted.source;
+    }
+    value
 }
 
 fn looks_like_currency_literal(value: &str) -> bool {
@@ -1712,6 +1730,7 @@ fn resolve_offset(
     catalog: &Catalog,
     options: &EffectiveOptions<'_>,
 ) -> Result<ResolvedNumber, FormatError> {
+    let value = numeric_source(value);
     let (mut number, inherited_format, selection, has_explicit_select) = match value {
         Value::Number(number) => (
             number.value.clone(),

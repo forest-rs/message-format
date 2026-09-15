@@ -7,8 +7,9 @@ use core::ops::Range;
 use crate::common::text::parse_number_literal;
 use crate::compiler::syntax::{ident::canonicalize_identifier, span::quoted_snippet};
 
-use super::bindings::DeclarationBindings;
-use super::rewrite::lower_part_with_bindings;
+use super::bindings::{
+    DeclarationPlan, PlannedValue, ResolvedReference, ResolvedValue, ordered_declarations,
+};
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -23,7 +24,7 @@ pub(super) fn lower_pattern_node_to_parts(
     ctx: SourceContext,
     options: CompileOptions,
     function_origin: Option<FunctionOriginContext>,
-    bindings: Option<(&DeclarationBindings, bool)>,
+    plan: Option<&DeclarationPlan>,
 ) -> Result<Vec<Part>, CompileError> {
     if pattern.span.start > pattern.span.end || pattern.span.end > source.len() {
         let (line, _) = ctx.location(source, 0);
@@ -52,24 +53,17 @@ pub(super) fn lower_pattern_node_to_parts(
                 }
             }
             crate::compiler::syntax::ast::PatternSegmentNode::Expression(expr) => {
-                let mut part = lower_expression_node_to_part_with_context(
+                let part = lower_expression_node_to_part_with_context(
                     source,
                     expr.as_ref(),
                     ExpressionLoweringContext {
                         default_bidi_isolation: options.default_bidi_isolation,
-                        allow_default_bidi_rewrite: true,
                         ctx,
                         function_origin,
                     },
+                    plan,
+                    None,
                 )?;
-                if let Some((bindings, repeat_local_pass_after_alias)) = bindings {
-                    lower_part_with_bindings(
-                        &mut part,
-                        bindings,
-                        repeat_local_pass_after_alias,
-                        None,
-                    )?;
-                }
                 // Self-closing markup: emit open + close in sequence.
                 if is_self_close_markup(expr)
                     && let Part::MarkupOpen { ref name, .. } = part
@@ -99,26 +93,47 @@ pub(super) fn lower_expression_node_to_part(
     lower_expression_node_to_part_with_context(
         source,
         expr,
-        ExpressionLoweringContext::without_default_bidi_rewrite(ctx, function_origin),
+        ExpressionLoweringContext::without_default_bidi(ctx, function_origin),
+        None,
+        None,
     )
+}
+
+pub(super) fn lower_declaration_prelude(
+    declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
+    plan: &DeclarationPlan,
+) -> Result<Vec<Part>, CompileError> {
+    let ordered = ordered_declarations(declarations);
+    let mut parts = Vec::with_capacity(ordered.len());
+    for (_, name, _) in ordered {
+        let Some((slot, value)) = plan.declaration(name) else {
+            continue;
+        };
+        let fallback = format!("{{${name}}}");
+        let value = materialize_planned_value(value, name, plan, &fallback)?;
+        parts.push(Part::Bind {
+            slot,
+            fallback,
+            value: Box::new(value),
+        });
+    }
+    Ok(parts)
 }
 
 #[derive(Clone, Copy)]
 struct ExpressionLoweringContext {
     default_bidi_isolation: bool,
-    allow_default_bidi_rewrite: bool,
     ctx: SourceContext,
     function_origin: Option<FunctionOriginContext>,
 }
 
 impl ExpressionLoweringContext {
-    const fn without_default_bidi_rewrite(
+    const fn without_default_bidi(
         ctx: SourceContext,
         function_origin: Option<FunctionOriginContext>,
     ) -> Self {
         Self {
             default_bidi_isolation: false,
-            allow_default_bidi_rewrite: false,
             ctx,
             function_origin,
         }
@@ -129,11 +144,13 @@ fn lower_expression_node_to_part_with_context(
     source: &str,
     expr: &crate::compiler::syntax::ast::ExpressionNode<'_>,
     context: ExpressionLoweringContext,
+    plan: Option<&DeclarationPlan>,
+    excluded: Option<&str>,
 ) -> Result<Part, CompileError> {
     let Some(payload) = &expr.payload else {
         return infer_non_select_payload_error(source, expr, context.ctx);
     };
-    lower_expression_payload_node_to_part(source, payload, context)
+    lower_expression_payload_node_to_part(source, payload, context, plan, excluded)
 }
 
 fn infer_non_select_payload_error(
@@ -172,6 +189,8 @@ fn lower_expression_payload_node_to_part(
     source: &str,
     payload: &crate::compiler::syntax::ast::ExpressionPayloadNode<'_>,
     context: ExpressionLoweringContext,
+    plan: Option<&DeclarationPlan>,
+    excluded: Option<&str>,
 ) -> Result<Part, CompileError> {
     let ctx = context.ctx;
     let (line, _) = ctx.location(source, 0);
@@ -184,12 +203,21 @@ fn lower_expression_payload_node_to_part(
             let var = crate::compiler::syntax::semantic::parse_prefixed_variable_token(
                 &full, line, column,
             )?;
-            if context.default_bidi_isolation && context.allow_default_bidi_rewrite {
-                return Ok(Part::Call(CallExpr {
+            if context.default_bidi_isolation {
+                let mut call = CallExpr {
                     operand: Operand::Var(var),
                     func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
                     fallback: None,
-                }));
+                };
+                resolve_call(&mut call, plan, excluded);
+                return Ok(Part::Call(call));
+            }
+            if let Some(plan) = plan {
+                return Ok(part_from_reference(
+                    plan.resolve_reference(&var, excluded),
+                    var,
+                    plan,
+                ));
             }
             Ok(Part::Var(var))
         }
@@ -210,18 +238,24 @@ fn lower_expression_payload_node_to_part(
                     let var = crate::compiler::syntax::semantic::parse_prefixed_variable_token(
                         &full, line, column,
                     )?;
-                    Ok(Part::Call(CallExpr {
+                    let mut call = CallExpr {
                         operand: Operand::Var(var),
                         func: func_spec,
                         fallback: None,
-                    }))
+                    };
+                    resolve_call(&mut call, plan, excluded);
+                    Ok(Part::Call(call))
                 }
                 crate::compiler::syntax::ast::CallOperandNode::Literal { .. } => {
-                    Ok(Part::Call(CallExpr {
+                    let mut call = CallExpr {
                         operand: lower_operand_literal(source, &call.operand, line)?,
                         func: func_spec,
                         fallback: None,
-                    }))
+                    };
+                    if let Some(plan) = plan {
+                        resolve_call_options(&mut call, plan);
+                    }
+                    Ok(Part::Call(call))
                 }
             }
         }
@@ -256,14 +290,18 @@ fn lower_expression_payload_node_to_part(
                 } else {
                     parse_literal_text(literal.value.trim(), line)?
                 };
-                return Ok(Part::Call(CallExpr {
+                let mut call = CallExpr {
                     operand: lower_literal_expression_operand(&literal.value_span, value, source),
                     func: func_spec,
                     fallback: None,
-                }));
+                };
+                if let Some(plan) = plan {
+                    resolve_call_options(&mut call, plan);
+                }
+                return Ok(Part::Call(call));
             }
             let value = parse_literal_text(literal.value.trim(), line)?;
-            if context.default_bidi_isolation && context.allow_default_bidi_rewrite {
+            if context.default_bidi_isolation {
                 return Ok(Part::Call(CallExpr {
                     operand: lower_literal_expression_operand(&literal.value_span, value, source),
                     func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
@@ -275,9 +313,113 @@ fn lower_expression_payload_node_to_part(
     }
 }
 
+fn materialize_planned_value(
+    value: &PlannedValue,
+    name: &str,
+    plan: &DeclarationPlan,
+    fallback: &str,
+) -> Result<Part, CompileError> {
+    match value {
+        PlannedValue::Function(function) => {
+            let mut function = function.clone();
+            function.fallback = Some(fallback.to_string());
+            resolve_call(&mut function, Some(plan), Some(name));
+            Ok(Part::Call(function))
+        }
+        PlannedValue::Alias { evaluation, .. } => Ok(part_from_reference(
+            plan.resolve_reference(evaluation, Some(name)),
+            evaluation.clone(),
+            plan,
+        )),
+        PlannedValue::Argument(_) | PlannedValue::Literal(_) | PlannedValue::Unresolved => {
+            Err(CompileError::internal("unstored planned declaration"))
+        }
+    }
+}
+
+fn resolve_call(call: &mut CallExpr, plan: Option<&DeclarationPlan>, excluded: Option<&str>) {
+    if let Some(plan) = plan
+        && let Operand::Var(var) = &call.operand
+    {
+        let var = var.clone();
+        let reference = plan.resolve_reference(&var, excluded);
+        if call.fallback.is_none()
+            && let Some(name) = reference.fallback.as_deref()
+        {
+            call.fallback = Some(format!("{{${name}}}"));
+        }
+        call.operand = operand_from_reference(reference, var, plan);
+    }
+    if let Some(plan) = plan {
+        resolve_call_options(call, plan);
+    }
+}
+
+fn part_from_reference(
+    reference: ResolvedReference,
+    original: String,
+    plan: &DeclarationPlan,
+) -> Part {
+    match reference.value {
+        ResolvedValue::Unchanged => Part::Var(original),
+        ResolvedValue::Local(slot) => Part::Local(slot),
+        ResolvedValue::Literal(literal) => Part::Literal(literal.value),
+        ResolvedValue::Function(mut function) => {
+            resolve_call(&mut function, Some(plan), reference.fallback.as_deref());
+            function.fallback = reference.fallback.map(|name| format!("{{${name}}}"));
+            Part::Call(function)
+        }
+        ResolvedValue::Argument(name) => Part::Var(name),
+    }
+}
+
+fn operand_from_reference(
+    reference: ResolvedReference,
+    original: String,
+    plan: &DeclarationPlan,
+) -> Operand {
+    match reference.value {
+        ResolvedValue::Unchanged => Operand::Var(original),
+        ResolvedValue::Local(slot) => Operand::Local(slot),
+        ResolvedValue::Literal(literal) => Operand::Literal {
+            value: literal.value,
+            kind: literal.kind,
+        },
+        ResolvedValue::Function(mut function) => {
+            resolve_call(&mut function, Some(plan), reference.fallback.as_deref());
+            function.fallback = None;
+            Operand::Call(Box::new(function))
+        }
+        ResolvedValue::Argument(name) => Operand::Var(name),
+    }
+}
+
+pub(super) fn resolve_call_options(call: &mut CallExpr, plan: &DeclarationPlan) {
+    for option in &mut call.func.options {
+        let FunctionOptionValue::Var(var) = &option.value else {
+            continue;
+        };
+        let Some(local_value) = plan.literal(var).map(|literal| literal.value.as_str()) else {
+            if let Some(slot) = plan.slot(var) {
+                option.value = FunctionOptionValue::LocalVar {
+                    name: var.clone(),
+                    slot,
+                };
+            }
+            continue;
+        };
+        option.value = FunctionOptionValue::ResolvedVar {
+            name: var.clone(),
+            value: local_value.to_string(),
+        };
+    }
+    if let Operand::Call(nested) = &mut call.operand {
+        resolve_call_options(nested, plan);
+    }
+}
+
 fn apply_default_bidi_direction(func: &mut FunctionSpec, context: ExpressionLoweringContext) {
     if context.default_bidi_isolation
-        && context.allow_default_bidi_rewrite
         && func.name == "string"
         && !func.options.iter().any(|option| option.key == "u:dir")
     {

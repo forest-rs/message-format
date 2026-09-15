@@ -302,15 +302,6 @@ impl CompileError {
         }
     }
 
-    pub(crate) fn missing_default_arm(line: usize) -> Self {
-        Self::MissingDefaultArm {
-            line,
-            column: 1,
-            expected: None,
-            found: None,
-        }
-    }
-
     pub(crate) fn missing_default_arm_detail(
         line: usize,
         column: usize,

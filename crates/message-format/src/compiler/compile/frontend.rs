@@ -9,10 +9,15 @@ mod document;
 mod matching;
 mod pattern;
 mod raw_match;
-mod rewrite;
 
 use document::parse_single_message;
 pub(crate) use matching::{BuiltinNumericSelectorMode, builtin_numeric_selector_mode};
+
+fn extract_quoted_pattern(source: &str) -> Option<&str> {
+    let start = source.find("{{")?;
+    let end = source.rfind("}}")?;
+    (end >= start + 2).then(|| &source[start + 2..end])
+}
 use pattern::FunctionOriginContext;
 
 #[cfg(test)]

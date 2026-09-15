@@ -1730,7 +1730,7 @@ impl<'a> ValueView<'a> {
             Self::ExactText(value) => value == case,
             Self::ResolvedSelect(value) => value == case,
             #[cfg(feature = "icu4x")]
-            Self::Formatted(_) => false,
+            Self::Formatted(value) => value == case,
             #[cfg(feature = "icu4x")]
             Self::Number(value) => resolved_number_matches_case(value, case) == CaseMatch::Exact,
         };

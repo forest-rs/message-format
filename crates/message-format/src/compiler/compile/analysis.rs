@@ -1,10 +1,7 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use crate::compiler::semantic::{
     CallExpr, FunctionOption, FunctionOptionValue, Operand, Part, SelectExpr, SelectorExpr,
@@ -12,55 +9,35 @@ use crate::compiler::semantic::{
 
 /// How declaration results are consumed after eager evaluation.
 #[derive(Clone, Copy, Default)]
-pub(super) struct DeclarationUse {
-    format: bool,
-    select: bool,
-}
+pub(super) struct DeclarationUse(u8);
 
 impl DeclarationUse {
     pub(super) fn formats(self) -> bool {
-        self.format
+        self.0 & Self::format().0 != 0
     }
 
     pub(super) fn selects(self) -> bool {
-        self.select
+        self.0 & Self::select().0 != 0
     }
 
     fn merge(&mut self, other: Self) -> bool {
         let previous = *self;
-        self.format |= other.format;
-        self.select |= other.select;
-        self.format != previous.format || self.select != previous.select
+        self.0 |= other.0;
+        self.0 != previous.0
     }
 }
 
-/// One analysis of declaration references shared by validation and rewriting.
+/// How declaration results are used, including uses propagated through aliases.
 #[derive(Default)]
 pub(super) struct DeclarationUses {
-    slots: BTreeMap<u32, SlotAnalysis>,
-}
-
-#[derive(Default)]
-struct SlotAnalysis {
-    use_kind: DeclarationUse,
-    references: usize,
+    slots: BTreeMap<u32, DeclarationUse>,
 }
 
 impl DeclarationUses {
     pub(super) fn analyze(parts: &[Part]) -> Self {
-        Self::analyze_slices(&[parts])
-    }
-
-    pub(super) fn analyze_pair(first: &[Part], second: &[Part]) -> Self {
-        Self::analyze_slices(&[first, second])
-    }
-
-    fn analyze_slices(slices: &[&[Part]]) -> Self {
         let mut analysis = Self::default();
         let mut aliases = Vec::new();
-        for parts in slices {
-            analysis.visit_parts(parts, &mut aliases);
-        }
+        analysis.visit_parts(parts, &mut aliases);
 
         while aliases.iter().fold(false, |changed, &(target, source)| {
             let use_kind = analysis.use_of(target);
@@ -71,23 +48,7 @@ impl DeclarationUses {
     }
 
     pub(super) fn use_of(&self, slot: u32) -> DeclarationUse {
-        self.slots
-            .get(&slot)
-            .map(|analysis| analysis.use_kind)
-            .unwrap_or_default()
-    }
-
-    pub(super) fn reference_count(&self, slot: u32) -> usize {
-        self.slots
-            .get(&slot)
-            .map_or(0, |analysis| analysis.references)
-    }
-
-    pub(super) fn referenced_slots(&self) -> BTreeSet<u32> {
-        self.slots
-            .iter()
-            .filter_map(|(slot, analysis)| (analysis.references != 0).then_some(*slot))
-            .collect()
+        self.slots.get(&slot).copied().unwrap_or_default()
     }
 
     fn visit_parts(&mut self, parts: &[Part], aliases: &mut Vec<(u32, u32)>) {
@@ -101,7 +62,6 @@ impl DeclarationUses {
                 Part::Bind { slot, value, .. } => {
                     if let Part::Local(source) = value.as_ref() {
                         aliases.push((*slot, *source));
-                        self.count_reference(*source);
                     } else {
                         self.visit_parts(core::slice::from_ref(value), aliases);
                     }
@@ -163,30 +123,19 @@ impl DeclarationUses {
 
     fn record(&mut self, slot: u32, use_kind: DeclarationUse) {
         self.mark(slot, use_kind);
-        self.count_reference(slot);
     }
 
     fn mark(&mut self, slot: u32, use_kind: DeclarationUse) -> bool {
-        self.slots.entry(slot).or_default().use_kind.merge(use_kind)
-    }
-
-    fn count_reference(&mut self, slot: u32) {
-        self.slots.entry(slot).or_default().references += 1;
+        self.slots.entry(slot).or_default().merge(use_kind)
     }
 }
 
 impl DeclarationUse {
     const fn format() -> Self {
-        Self {
-            format: true,
-            select: false,
-        }
+        Self(1)
     }
 
     const fn select() -> Self {
-        Self {
-            format: false,
-            select: true,
-        }
+        Self(2)
     }
 }
