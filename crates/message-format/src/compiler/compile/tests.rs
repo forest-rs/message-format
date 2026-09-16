@@ -3220,6 +3220,29 @@ fn raw_match_with_numeric_local_selector_falls_back_to_plural_category() {
 
 #[cfg(feature = "icu4x")]
 #[test]
+fn raw_match_with_percent_input_selects_the_scaled_plural_category() {
+    let source = ".input {$n :percent} .match $n one {{one}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+
+    for (value, expected) in [(0.01, "one"), (1.0, "other")] {
+        let args = vec![arg(&catalog, "n", Value::Float(value))];
+        let message = formatter.resolve("main").expect("message");
+        let mut output = String::new();
+        let mut diagnostics = Vec::new();
+        formatter
+            .format_to(message, &args, &mut output, Some(&mut diagnostics))
+            .expect("formatted");
+        assert_eq!(output, expected, "value={value}");
+        assert!(diagnostics.is_empty(), "value={value}: {diagnostics:?}");
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
 fn raw_match_rechecks_each_source_local_selector_once() {
     let source =
         ".input {$n :number} .match $n $n 1 1 {{exact}} one one {{category}} * * {{fallback}}";
