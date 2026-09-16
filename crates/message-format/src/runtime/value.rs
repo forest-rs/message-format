@@ -323,6 +323,8 @@ pub(crate) enum NumberValue {
 pub(crate) struct NumberFormatOptions {
     pub(crate) minimum_fraction_digits: Option<u8>,
     pub(crate) maximum_fraction_digits: Option<u8>,
+    pub(crate) minimum_significant_digits: Option<u8>,
+    pub(crate) maximum_significant_digits: Option<u8>,
     pub(crate) minimum_integer_digits: Option<u8>,
     pub(crate) sign_display: NumberSignDisplay,
     pub(crate) notation_scientific: bool,
@@ -333,6 +335,8 @@ impl NumberFormatOptions {
     pub(crate) const DEFAULT: Self = Self {
         minimum_fraction_digits: None,
         maximum_fraction_digits: None,
+        minimum_significant_digits: None,
+        maximum_significant_digits: None,
         minimum_integer_digits: None,
         sign_display: NumberSignDisplay::Auto,
         notation_scientific: false,

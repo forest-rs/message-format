@@ -135,9 +135,11 @@ enum BuiltinOptionKey {
     TimePrecision,
     CurrencyDisplay,
     CurrencySign,
+    MinimumSignificantDigits,
+    MaximumSignificantDigits,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 32;
+const BUILTIN_OPTION_KEY_COUNT: usize = 34;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
@@ -174,6 +176,8 @@ impl BuiltinOptionKey {
             Self::TimePrecision => 29,
             Self::CurrencyDisplay => 30,
             Self::CurrencySign => 31,
+            Self::MinimumSignificantDigits => 32,
+            Self::MaximumSignificantDigits => 33,
         }
     }
 }
@@ -1204,6 +1208,20 @@ fn resolve_number_format_options(
         inherited.minimum_integer_digits,
         MAX_INTEGER_DIGITS,
     )?;
+    let minimum_significant_digits = parse_significant_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MinimumSignificantDigits,
+        inherited.minimum_significant_digits,
+    )?;
+    let maximum_significant_digits = parse_significant_digit_option_or_inherited(
+        options,
+        BuiltinOptionKey::MaximumSignificantDigits,
+        inherited.maximum_significant_digits,
+    )?;
+    validate_digit_range_relationship(
+        minimum_significant_digits.map(usize::from),
+        maximum_significant_digits.map(usize::from),
+    )?;
     let sign_display = match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
         None => inherited.sign_display,
         Some("auto") => NumberSignDisplay::Auto,
@@ -1237,6 +1255,12 @@ fn resolve_number_format_options(
         } else {
             maximum_fraction_digits
         },
+        minimum_significant_digits: if integer_only {
+            None
+        } else {
+            minimum_significant_digits
+        },
+        maximum_significant_digits,
         minimum_integer_digits,
         sign_display,
         notation_scientific,
@@ -1260,6 +1284,21 @@ fn parse_digit_option_or_inherited(
     Ok(inherited)
 }
 
+fn parse_significant_digit_option_or_inherited(
+    options: &EffectiveOptions<'_>,
+    key: BuiltinOptionKey,
+    inherited: Option<u8>,
+) -> Result<Option<u8>, FormatError> {
+    let Some(value) = options.get(key) else {
+        return Ok(inherited);
+    };
+    let value = value.parse::<u8>().map_err(|_| bad_option())?;
+    if !(1..=21).contains(&value) {
+        return Err(bad_option());
+    }
+    Ok(Some(value))
+}
+
 fn render_resolved_number(
     locale: &Locale,
     cache: &mut Option<CachedDecimalFormatter>,
@@ -1279,6 +1318,16 @@ fn render_resolved_number(
         ));
     }
     if format.notation_scientific {
+        let text = if format.minimum_significant_digits.is_some()
+            || format.maximum_significant_digits.is_some()
+        {
+            let mut decimal = Decimal::from_str(&number.text())
+                .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+            apply_significant_digits(&mut decimal, format);
+            decimal.to_string()
+        } else {
+            number.text()
+        };
         return Ok(format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
@@ -1287,14 +1336,23 @@ fn render_resolved_number(
                 NumberSignDisplay::Negative => SignDisplay::Negative,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
-            format_scientific_text(&number.text()),
+            format_scientific_text(&text, format.minimum_significant_digits.is_some()),
         ));
     }
-    let text = format_int_or_decimal_with_min_fraction_digits(
-        number.text(),
-        format.minimum_fraction_digits.map_or(0, usize::from),
-    );
-    let text = apply_maximum_fraction_digits(text, format.maximum_fraction_digits.map(usize::from));
+    let text = if format.minimum_significant_digits.is_some()
+        || format.maximum_significant_digits.is_some()
+    {
+        let mut decimal = Decimal::from_str(&number.text())
+            .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        apply_significant_digits(&mut decimal, format);
+        decimal.to_string()
+    } else {
+        let text = format_int_or_decimal_with_min_fraction_digits(
+            number.text(),
+            format.minimum_fraction_digits.map_or(0, usize::from),
+        );
+        apply_maximum_fraction_digits(text, format.maximum_fraction_digits.map(usize::from))
+    };
     let text = format_signed_string(
         match format.sign_display {
             NumberSignDisplay::Auto => SignDisplay::Auto,
@@ -1336,7 +1394,7 @@ fn render_resolved_number(
         .to_string())
 }
 
-fn format_scientific_text(value: &str) -> String {
+fn format_scientific_text(value: &str, preserve_trailing_zeros: bool) -> String {
     let (sign, unsigned) = if let Some(value) = value.strip_prefix('-') {
         ("-", value)
     } else if let Some(value) = value.strip_prefix('+') {
@@ -1353,7 +1411,11 @@ fn format_scientific_text(value: &str) -> String {
     let significant = &digits[leading..];
     let exponent = integer.len().cast_signed() - leading.cast_signed() - 1;
     let mut mantissa = significant[..1].to_string();
-    let rest = significant[1..].trim_end_matches('0');
+    let rest = if preserve_trailing_zeros {
+        &significant[1..]
+    } else {
+        significant[1..].trim_end_matches('0')
+    };
     if !rest.is_empty() {
         mantissa.push('.');
         mantissa.push_str(rest);
@@ -1385,6 +1447,17 @@ fn resolved_plural_category(
     number: &ResolvedNumber,
     rules: &PluralRules,
 ) -> Result<PluralCategory, FormatError> {
+    let minimum_significant_digits = number.format.minimum_significant_digits;
+    let maximum_significant_digits = number.format.maximum_significant_digits;
+    if minimum_significant_digits.is_some() || maximum_significant_digits.is_some() {
+        let mut decimal = match &number.value {
+            NumberValue::Integer(value) => Decimal::from(*value),
+            NumberValue::Decimal(value) => value.as_ref().clone(),
+            NumberValue::NonFinite(_) => return Err(bad_operand()),
+        };
+        apply_significant_digits(&mut decimal, number.format);
+        return Ok(rules.category_for(&decimal));
+    }
     let minimum_fraction_digits = number.format.minimum_fraction_digits;
     let maximum_fraction_digits = number.format.maximum_fraction_digits;
     validate_digit_range_relationship(
@@ -1426,6 +1499,24 @@ fn resolved_plural_category(
         }
     }
     Ok(rules.category_for(&decimal))
+}
+
+fn apply_significant_digits(decimal: &mut Decimal, format: NumberFormatOptions) {
+    if let Some(maximum) = format.maximum_significant_digits {
+        let position = decimal
+            .nonzero_magnitude_start()
+            .saturating_sub(i16::from(maximum) - 1);
+        decimal.round_with_mode(
+            position,
+            SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfExpand),
+        );
+    }
+    if let Some(minimum) = format.minimum_significant_digits {
+        let position = decimal
+            .nonzero_magnitude_start()
+            .saturating_sub(i16::from(minimum) - 1);
+        decimal.pad_end(position);
+    }
 }
 
 fn project_resolved_number(
@@ -1477,6 +1568,8 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "u:id" => BuiltinOptionKey::UId,
         "minimumFractionDigits" => BuiltinOptionKey::MinimumFractionDigits,
         "maximumFractionDigits" => BuiltinOptionKey::MaximumFractionDigits,
+        "minimumSignificantDigits" => BuiltinOptionKey::MinimumSignificantDigits,
+        "maximumSignificantDigits" => BuiltinOptionKey::MaximumSignificantDigits,
         "signDisplay" => BuiltinOptionKey::SignDisplay,
         "currency" => BuiltinOptionKey::Currency,
         "add" => BuiltinOptionKey::Add,

@@ -68,6 +68,44 @@ fn number_maximum_fraction_digits() {
     );
 }
 
+/// TR35 §14 — significant-digit bounds round and pad decimal output.
+#[test]
+fn number_significant_digit_bounds() {
+    assert_format("{12345 :number maximumSignificantDigits=3}", &[], "12,300");
+    assert_format("{12 :number minimumSignificantDigits=4}", &[], "12.00");
+}
+
+/// TR35 §14 — significant-digit precision participates in plural selection.
+#[test]
+fn number_significant_digits_affect_selection() {
+    assert_format(
+        ".local $n = {1 :number minimumSignificantDigits=2} .match $n one {{one}} * {{other}}",
+        &[],
+        "other",
+    );
+}
+
+/// TR35 §14 — `:integer` supports maximum significant digits.
+#[test]
+fn integer_maximum_significant_digits() {
+    assert_format("{12345 :integer maximumSignificantDigits=3}", &[], "12,300");
+}
+
+/// Significant-digit precision composes with scientific notation.
+#[test]
+fn number_scientific_significant_digits() {
+    assert_format(
+        "{12345 :number notation=scientific maximumSignificantDigits=3}",
+        &[],
+        "1.23E4",
+    );
+    assert_format(
+        "{12 :number notation=scientific minimumSignificantDigits=4}",
+        &[],
+        "1.200E1",
+    );
+}
+
 /// TR35 §14 — :number with Null operand is bad-operand.
 #[test]
 fn number_null_is_bad_operand() {
@@ -558,6 +596,21 @@ fn number_string_numeric_literal_accepted() {
 fn digit_size_negative_is_bad_option() {
     assert_format_err(
         "{ $x :number minimumFractionDigits=-1 }",
+        &[("x", Value::Int(5))],
+        is_bad_option,
+    );
+}
+
+/// Significant digit sizes use the `Intl.NumberFormat` range 1 through 21.
+#[test]
+fn significant_digit_size_out_of_range_is_bad_option() {
+    assert_format_err(
+        "{ $x :number minimumSignificantDigits=0 }",
+        &[("x", Value::Int(5))],
+        is_bad_option,
+    );
+    assert_format_err(
+        "{ $x :number maximumSignificantDigits=22 }",
         &[("x", Value::Int(5))],
         is_bad_option,
     );
