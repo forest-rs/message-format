@@ -718,7 +718,7 @@ fn patch_rel32(code: &mut [u8], rel_pos: usize, target_pc: u32) -> Result<(), Co
     Ok(())
 }
 
-#[cfg(all(test, feature = "icu4x"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::compile_str;

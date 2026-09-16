@@ -14,15 +14,6 @@ description = "Compile and format message-format catalogs."
 [features]
 default = ["std"]
 std = []
-icu4x = [
-    "dep:fixed_decimal",
-    "dep:icu_locale",
-    "dep:icu_plurals",
-    "dep:icu_calendar",
-    "dep:icu_datetime",
-    "dep:icu_decimal",
-    "dep:icu_experimental",
-]
 compile = [
     "dep:hashbrown",
     "dep:icu_normalizer",
@@ -37,26 +28,26 @@ bitvec = { default-features = false, features = ["alloc"], version = "1.0.1" }
 icu_locale_core = { default-features = false, version = "2.3.0" }
 profiling = { optional = true, workspace = true }
 
-# icu4x (optional, runtime)
-fixed_decimal = { default-features = false, optional = true, version = "0.7.2" }
+# ICU4X runtime
+fixed_decimal = { default-features = false, version = "0.7.2" }
 icu_calendar = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.3.0" }
+], version = "2.3.0" }
 icu_datetime = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.3.0" }
+], version = "2.3.0" }
 icu_decimal = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.3.0" }
+], version = "2.3.0" }
 icu_experimental = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "0.6.0" }
+], version = "0.6.0" }
 icu_locale = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.3.1" }
+], version = "2.3.1" }
 icu_plurals = { default-features = false, features = [
     "compiled_data",
-], optional = true, version = "2.3.0" }
+], version = "2.3.0" }
 
 # compile (optional)
 hashbrown = { default-features = false, features = [

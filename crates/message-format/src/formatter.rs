@@ -18,14 +18,10 @@ use crate::{MessageArgs, runtime};
 /// matched message, so string-pool ids stay consistent.
 #[derive(Debug)]
 pub struct MessageFormatter<'a> {
-    #[cfg(feature = "icu4x")]
     inner: runtime::MultiFormatter<'a, alloc::boxed::Box<runtime::BuiltinHost>>,
-    #[cfg(not(feature = "icu4x"))]
-    inner: runtime::MultiFormatter<'a, runtime::NoopHost>,
 }
 
 impl<'a> MessageFormatter<'a> {
-    #[cfg(feature = "icu4x")]
     pub(crate) fn new(
         catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
         candidates: &[Locale],
@@ -42,16 +38,6 @@ impl<'a> MessageFormatter<'a> {
             }
         }
         Err(last_err.unwrap_or(runtime::FormatError::Trap(runtime::Trap::UnsupportedLocale)))
-    }
-
-    #[cfg(not(feature = "icu4x"))]
-    pub(crate) fn new(
-        catalogs: impl IntoIterator<Item = &'a runtime::Catalog>,
-        _candidates: &[Locale],
-    ) -> Result<Self, runtime::FormatError> {
-        Ok(Self {
-            inner: runtime::MultiFormatter::new(catalogs, runtime::NoopHost)?,
-        })
     }
 
     /// Set the maximum number of VM instructions per format operation.
