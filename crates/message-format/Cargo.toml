@@ -20,6 +20,8 @@ icu4x = [
     "dep:icu_plurals",
     "dep:icu_calendar",
     "dep:icu_datetime",
+    "dep:icu_decimal",
+    "dep:icu_experimental",
 ]
 compile = [
     "dep:hashbrown",
@@ -43,6 +45,12 @@ icu_calendar = { default-features = false, features = [
 icu_datetime = { default-features = false, features = [
     "compiled_data",
 ], optional = true, version = "2.3.0" }
+icu_decimal = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "2.3.0" }
+icu_experimental = { default-features = false, features = [
+    "compiled_data",
+], optional = true, version = "0.6.0" }
 icu_locale = { default-features = false, features = [
     "compiled_data",
 ], optional = true, version = "2.3.1" }

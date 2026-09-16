@@ -996,7 +996,7 @@ fn formatted_numeric_reannotation_preserves_source_and_exactness() {
         ),
         (
             ".local $n = {9007199254740993 :number} .local $c = {$n :currency currency=USD} {{{$c} {$c :currency currency=USD}}}",
-            "USD 9007199254740993 USD 9007199254740993",
+            "$9,007,199,254,740,993.00 $9,007,199,254,740,993.00",
         ),
     ] {
         let bytes = compile_str(source).expect("compiled");
@@ -1676,6 +1676,22 @@ fn compile_str_rejects_invalid_builtin_time_precision_literal() {
             && option == "precision"
             && expected == "\"hour\", \"minute\", or \"second\""
             && found == "millisecond"
+    ));
+}
+
+#[test]
+fn compile_str_rejects_invalid_builtin_currency_display_literal() {
+    let err =
+        compile_str("{42 :currency currency=EUR currencyDisplay=short}").expect_err("must fail");
+
+    assert!(matches!(
+        err,
+        CompileError::InvalidBuiltinOptionValue {
+            function,
+            option,
+            found,
+            ..
+        } if function == "currency" && option == "currencyDisplay" && found == "short"
     ));
 }
 

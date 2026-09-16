@@ -1064,6 +1064,10 @@ fn builtin_option_literal_domain(function: &str, option: &str) -> Option<&'stati
         ("number" | "integer", "select") => Some(&["exact", "plural", "ordinal"]),
         ("number" | "integer", "notation") => Some(&["scientific"]),
         ("number" | "integer", "useGrouping") => Some(&["auto", "always", "never", "min2"]),
+        ("currency", "currencyDisplay") => {
+            Some(&["narrowSymbol", "symbol", "name", "code", "never"])
+        }
+        ("currency", "currencySign") => Some(&["accounting", "standard"]),
         ("date", "style" | "dateStyle") => Some(&["short", "medium", "long", "full"]),
         ("date", "length") => Some(&["short", "medium", "long"]),
         ("time", "style" | "timeStyle") => Some(&["short", "medium", "long", "full"]),
