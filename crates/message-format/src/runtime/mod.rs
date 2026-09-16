@@ -199,14 +199,8 @@
 //! matches must handle these variants. The check belongs before dispatch,
 //! once per source selector, including repeated uses of the same local.
 
-#[cfg(feature = "icu4x")]
-#[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
 pub use builtin::BuiltinHost;
-#[cfg(feature = "icu4x")]
-#[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
 pub use builtin::BuiltinHostCatalogIndex;
-#[cfg(feature = "icu4x")]
-#[cfg_attr(docsrs, doc(cfg(feature = "icu4x")))]
 pub use builtin::locale_fallback_candidates;
 pub use catalog::Catalog;
 pub use error::{
@@ -216,7 +210,6 @@ pub use error::{
 pub use formatter::{Formatter, MultiFormatter, MultiMessageHandle};
 pub use schema::{FuncEntry, MessageEntry, Opcode};
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, ResolvedString, StrId, Value};
-#[cfg(feature = "icu4x")]
 pub use value::{ResolvedFormatted, ResolvedNumber};
 pub use vm::{
     FormatDirection, FormatField, FormatOption, FormatSink, FormattedValue, FormattedValueKind,
@@ -242,5 +235,4 @@ mod value;
 pub mod vm;
 
 /// ICU4X-backed built-in host functions.
-#[cfg(feature = "icu4x")]
 mod builtin;

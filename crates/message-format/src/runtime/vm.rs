@@ -10,12 +10,10 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-#[cfg(feature = "icu4x")]
 use core::fmt;
 use core::str;
 
 pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
-#[cfg(feature = "icu4x")]
 use crate::runtime::value::{NumberSelection, NumberValue, ResolvedNumber};
 use crate::runtime::{
     catalog::{Catalog, read_i32},
@@ -114,7 +112,6 @@ impl<'a> FunctionOptions<'a> {
             .any(|(candidate, value)| *candidate == key && value.is_fallback())
     }
 
-    #[cfg(feature = "icu4x")]
     pub(crate) fn has_raw_options(self) -> bool {
         !self.raw.is_empty()
     }
@@ -748,7 +745,6 @@ impl<'a> SelectorValue<'a> {
                         str_id: None,
                     })
             }
-            #[cfg(feature = "icu4x")]
             Value::Formatted(value) if value.selection.is_some() => Self::Borrowed {
                 view: ValueView::Number(
                     value
@@ -1182,7 +1178,6 @@ fn record_diagnostic(diagnostics: &mut Option<&mut dyn DiagnosticsSink>, error: 
 }
 
 fn check_selector_value(value: &Value, diagnostics: &mut Option<&mut dyn DiagnosticsSink>) {
-    #[cfg(feature = "icu4x")]
     if matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid) {
         // The declaration already reported the option error. The local
         // selector contributes only its own selector diagnostic.
@@ -1563,16 +1558,8 @@ fn handle_project_select<H: Host>(
     let fn_id = read_u16(code, base + 1)?;
     let value_id = stack.pop().ok_or(FormatError::StackUnderflow)?;
     let value = stored_value(values, value_id)?;
-    let prechecked_invalid_number = {
-        #[cfg(feature = "icu4x")]
-        {
-            matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid)
-        }
-        #[cfg(not(feature = "icu4x"))]
-        {
-            false
-        }
-    };
+    let prechecked_invalid_number =
+        matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid);
     if prechecked_invalid_number {
         stack.push(store_value(values, Value::Null));
         return Ok(());
@@ -1902,9 +1889,7 @@ enum ValueView<'a> {
     ExactText(&'a str),
     Fallback(&'a str),
     ResolvedSelect(&'a str),
-    #[cfg(feature = "icu4x")]
     Formatted(&'a str),
-    #[cfg(feature = "icu4x")]
     Number(&'a ResolvedNumber),
 }
 
@@ -1922,9 +1907,7 @@ impl<'a> ValueView<'a> {
             Value::FunctionFallback(id) => catalog.pool_string_opt(*id).map(Self::Fallback),
             Value::LitRef { off, len } => catalog.literal_opt(*off, *len).map(Self::Text),
             Value::ResolvedSelect(value) => Some(Self::ResolvedSelect(value.text())),
-            #[cfg(feature = "icu4x")]
             Value::Formatted(value) => Some(Self::Formatted(value.text())),
-            #[cfg(feature = "icu4x")]
             Value::Number(value) => Some(Self::Number(value)),
         }
     }
@@ -1941,9 +1924,7 @@ impl<'a> ValueView<'a> {
             Self::Text(v) | Self::ExactText(v) => emit_string_expression(sink, v),
             Self::Fallback(v) => emit_fallback(sink, v),
             Self::ResolvedSelect(v) => sink.expression(v),
-            #[cfg(feature = "icu4x")]
             Self::Formatted(v) => sink.expression(v),
-            #[cfg(feature = "icu4x")]
             Self::Number(v) => match &v.value {
                 NumberValue::Integer(value) => {
                     let rendered = format_i64(*value);
@@ -1965,9 +1946,7 @@ impl<'a> ValueView<'a> {
             Self::ExactText(v) => Cow::Borrowed(v),
             Self::Fallback(v) => Cow::Borrowed(v),
             Self::ResolvedSelect(v) => Cow::Borrowed(v),
-            #[cfg(feature = "icu4x")]
             Self::Formatted(v) => Cow::Borrowed(v),
-            #[cfg(feature = "icu4x")]
             Self::Number(v) => Cow::Owned(v.text()),
         }
     }
@@ -2023,9 +2002,7 @@ impl<'a> ValueView<'a> {
                     CaseMatch::No
                 }
             }
-            #[cfg(feature = "icu4x")]
             Self::Formatted(_) => CaseMatch::No,
-            #[cfg(feature = "icu4x")]
             Self::Number(v) => match v.selection {
                 NumberSelection::Invalid => CaseMatch::No,
                 NumberSelection::Plural
@@ -2045,9 +2022,7 @@ impl<'a> ValueView<'a> {
             Self::Text(value) => value == case,
             Self::ExactText(value) => value == case,
             Self::ResolvedSelect(value) => value == case,
-            #[cfg(feature = "icu4x")]
             Self::Formatted(value) => value == case,
-            #[cfg(feature = "icu4x")]
             Self::Number(value) => resolved_number_matches_case(value, case) == CaseMatch::Exact,
         };
         if matches {
@@ -2067,9 +2042,7 @@ impl<'a> ValueView<'a> {
             Self::ExactText(v) => v.is_empty(),
             Self::Fallback(v) => v.is_empty(),
             Self::ResolvedSelect(v) => v == "0",
-            #[cfg(feature = "icu4x")]
             Self::Formatted(v) => v.is_empty(),
-            #[cfg(feature = "icu4x")]
             Self::Number(v) => match &v.value {
                 NumberValue::Integer(value) => *value == 0,
                 NumberValue::Decimal(value) => value.is_zero(),
@@ -2102,7 +2075,6 @@ fn emit_fallback<S: FormatSink + ?Sized>(sink: &mut S, rendered: &str) {
     sink.fallback(source, rendered);
 }
 
-#[cfg(feature = "icu4x")]
 fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatch {
     let matches = match &number.value {
         NumberValue::Integer(value) => int_matches_case(*value, case),
@@ -2116,7 +2088,6 @@ fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatc
     }
 }
 
-#[cfg(feature = "icu4x")]
 fn display_matches_case(value: &impl fmt::Display, case: &str) -> bool {
     struct CompareWriter<'a> {
         expected: &'a [u8],
@@ -2151,7 +2122,6 @@ fn emit_value_ref<S: FormatSink + ?Sized>(sink: &mut S, catalog: &Catalog, value
     }
     if sink.wants_structured_output() {
         match value {
-            #[cfg(feature = "icu4x")]
             Value::Formatted(value) => {
                 sink.formatted_value(&FormattedValue {
                     kind: value.kind,
@@ -2163,7 +2133,6 @@ fn emit_value_ref<S: FormatSink + ?Sized>(sink: &mut S, catalog: &Catalog, value
                 });
                 return;
             }
-            #[cfg(feature = "icu4x")]
             Value::Number(number) => {
                 sink.formatted_value(&FormattedValue {
                     kind: FormattedValueKind::Number,
@@ -2190,11 +2159,8 @@ pub(crate) fn emit_resolved_string<'a, S: FormatSink + ?Sized>(
 ) {
     let (opening, direction) = match value.direction {
         StringDirection::Unspecified => (None, None),
-        #[cfg(feature = "icu4x")]
         StringDirection::Auto => (Some("\u{2068}"), None),
-        #[cfg(feature = "icu4x")]
         StringDirection::Ltr => (Some("\u{2066}"), Some(FormatDirection::LeftToRight)),
-        #[cfg(feature = "icu4x")]
         StringDirection::Rtl => (Some("\u{2067}"), Some(FormatDirection::RightToLeft)),
     };
     if let Some(opening) = opening {
@@ -2281,7 +2247,6 @@ fn format_value_display<'a>(value: &'a Value, catalog: &'a Catalog) -> Cow<'a, s
 }
 
 fn value_case_match(value: &Value, case: &str, catalog: &Catalog) -> CaseMatch {
-    #[cfg(feature = "icu4x")]
     if let Value::Formatted(value) = value
         && let Some(number) = &value.selection
     {
@@ -2490,7 +2455,6 @@ mod tests {
     };
     use crate::runtime::error::{CatalogError, ImplementationFailure, MessageFunctionError};
     use crate::runtime::schema::TestOps;
-    #[cfg(feature = "icu4x")]
     use crate::runtime::value::{NumberFormatOptions, NumberSelection, NumberValue};
 
     #[test]
@@ -3119,7 +3083,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "icu4x")]
     #[test]
     fn invalid_stored_number_selection_does_not_match_and_reports_once() {
         let code = TestOps::new()

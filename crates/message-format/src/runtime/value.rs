@@ -3,16 +3,13 @@
 
 //! Runtime value and argument model.
 
-#[cfg(feature = "icu4x")]
 use alloc::string::ToString;
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::{error::Error, fmt};
 
 use crate::runtime::Catalog;
 
-#[cfg(feature = "icu4x")]
 use fixed_decimal::Decimal;
-#[cfg(feature = "icu4x")]
 use icu_experimental::dimension::currency::CurrencyType;
 
 /// String-pool identifier.
@@ -56,11 +53,9 @@ pub enum Value {
         len: u32,
     },
     /// A number resolved by a built-in numeric function.
-    #[cfg(feature = "icu4x")]
     Number(ResolvedNumber),
     /// A resolved formatter value that retains its semantic source for a
     /// subsequent annotation while exposing its formatted presentation.
-    #[cfg(feature = "icu4x")]
     Formatted(Box<ResolvedFormatted>),
     /// A value resolved by the test-only `test:select` function.
     ///
@@ -71,7 +66,6 @@ pub enum Value {
 }
 
 /// Output of a non-selecting built-in formatter with its source value intact.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedFormatted {
     pub(crate) source: Value,
@@ -82,7 +76,6 @@ pub struct ResolvedFormatted {
 }
 
 /// Currency options retained across annotations of a resolved currency value.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedCurrencyOptions {
     pub(crate) code: CurrencyType,
@@ -90,7 +83,6 @@ pub(crate) struct ResolvedCurrencyOptions {
     pub(crate) sign: CurrencySign,
 }
 
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CurrencyDisplay {
     Symbol,
@@ -100,14 +92,12 @@ pub(crate) enum CurrencyDisplay {
     Never,
 }
 
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CurrencySign {
     Standard,
     Accounting,
 }
 
-#[cfg(feature = "icu4x")]
 impl ResolvedFormatted {
     pub(crate) fn new(source: Value, formatted: String) -> Self {
         Self {
@@ -183,7 +173,6 @@ enum ResolvedStringText {
         len: u8,
         bytes: [u8; INLINE_STRING_CAPACITY],
     },
-    #[cfg(feature = "icu4x")]
     Integer {
         value: i64,
         len: u8,
@@ -198,13 +187,10 @@ pub(crate) enum StringDirection {
     /// No direction was requested by the string function.
     Unspecified,
     /// Automatic direction selection.
-    #[cfg(feature = "icu4x")]
     Auto,
     /// Left-to-right isolation.
-    #[cfg(feature = "icu4x")]
     Ltr,
     /// Right-to-left isolation.
-    #[cfg(feature = "icu4x")]
     Rtl,
 }
 
@@ -241,7 +227,6 @@ impl ResolvedString {
         }
     }
 
-    #[cfg(feature = "icu4x")]
     pub(crate) fn from_integer(text: &str, value: i64, direction: StringDirection) -> Self {
         let mut bytes = [0; 20];
         bytes[..text.len()].copy_from_slice(text.as_bytes());
@@ -255,12 +240,6 @@ impl ResolvedString {
         }
     }
 
-    #[cfg(not(feature = "icu4x"))]
-    pub(crate) fn from_integer(text: &str, _value: i64, direction: StringDirection) -> Self {
-        Self::from_borrowed(text, direction)
-    }
-
-    #[cfg(feature = "icu4x")]
     pub(crate) fn integer_hint(&self) -> Option<i64> {
         match self.text {
             ResolvedStringText::Integer { value, .. } => Some(value),
@@ -276,7 +255,6 @@ impl ResolvedString {
                 core::str::from_utf8(&bytes[..usize::from(*len)])
                     .expect("inline resolved strings originate from UTF-8")
             }
-            #[cfg(feature = "icu4x")]
             ResolvedStringText::Integer { len, bytes, .. } => {
                 core::str::from_utf8(&bytes[..usize::from(*len)])
                     .expect("resolved integer strings contain ASCII")
@@ -301,7 +279,6 @@ pub struct ResolvedSelect {
 }
 
 impl ResolvedSelect {
-    #[cfg(feature = "icu4x")]
     pub(crate) fn new(text: String) -> Self {
         Self { text }
     }
@@ -318,7 +295,6 @@ impl ResolvedSelect {
 // The fields stay private so hosts cannot accidentally manufacture a value
 // whose options and numeric payload disagree. The runtime uses this value to
 // carry an exact integer or decimal through subsequent annotations.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedNumber {
     pub(crate) value: NumberValue,
@@ -329,7 +305,6 @@ pub struct ResolvedNumber {
 }
 
 /// Exact numeric payload retained by [`ResolvedNumber`].
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NumberValue {
     /// Exact signed integer payload.
@@ -344,7 +319,6 @@ pub(crate) enum NumberValue {
 /// Parsed options needed to render a resolved number. Keeping these values
 /// parsed makes default interpolation infallible after a function call has
 /// validated the merged option set.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NumberFormatOptions {
     pub(crate) minimum_fraction_digits: Option<u8>,
@@ -355,7 +329,6 @@ pub(crate) struct NumberFormatOptions {
     pub(crate) grouping: NumberGrouping,
 }
 
-#[cfg(feature = "icu4x")]
 impl NumberFormatOptions {
     pub(crate) const DEFAULT: Self = Self {
         minimum_fraction_digits: None,
@@ -367,7 +340,6 @@ impl NumberFormatOptions {
     };
 }
 
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NumberSignDisplay {
     Auto,
@@ -375,7 +347,6 @@ pub(crate) enum NumberSignDisplay {
     Never,
 }
 
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NumberGrouping {
     Auto,
@@ -385,7 +356,6 @@ pub(crate) enum NumberGrouping {
 }
 
 /// Selection provenance retained with a resolved number.
-#[cfg(feature = "icu4x")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NumberSelection {
     /// No selection annotation was involved.
@@ -401,7 +371,6 @@ pub(crate) enum NumberSelection {
     Invalid,
 }
 
-#[cfg(feature = "icu4x")]
 impl ResolvedNumber {
     pub(crate) fn new(
         value: NumberValue,
@@ -617,7 +586,6 @@ impl From<f64> for Value {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "icu4x")]
     use super::StringDirection;
     use super::{ArgNameError, MessageArgs, ResolvedString, ResolvedStringText, Value};
     use crate::runtime::catalog::{MessageEntry, build_catalog};
@@ -666,7 +634,6 @@ mod tests {
         assert_eq!(err.name(), "missing");
     }
 
-    #[cfg(feature = "icu4x")]
     #[test]
     fn integer_string_provenance_does_not_affect_equality() {
         for value in [i64::MIN, i64::MAX] {

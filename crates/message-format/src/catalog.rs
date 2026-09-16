@@ -8,18 +8,8 @@ use icu_locale_core::Locale;
 
 use crate::{formatter::MessageFormatter, runtime};
 
-#[cfg(feature = "icu4x")]
 pub(crate) fn locale_candidates(locale: &Locale) -> Vec<Locale> {
     runtime::locale_fallback_candidates(locale)
-}
-
-#[cfg(not(feature = "icu4x"))]
-pub(crate) fn locale_candidates(locale: &Locale) -> Vec<Locale> {
-    if locale.id.is_unknown() {
-        vec![locale.clone()]
-    } else {
-        vec![locale.clone(), Locale::UNKNOWN]
-    }
 }
 
 impl runtime::Catalog {

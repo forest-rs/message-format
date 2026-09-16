@@ -17,7 +17,7 @@
 //! # Recommended Flow
 //!
 //! ```rust
-//! # #[cfg(all(feature = "compile", feature = "icu4x"))]
+//! # #[cfg(feature = "compile")]
 //! # {
 //! use message_format::{Catalog, Locale, MessageArgs, compiler::CompileOptions};
 //!
@@ -40,7 +40,7 @@
 //! more-specific catalog can still be found in a less-specific one.
 //!
 //! ```rust
-//! # #[cfg(all(feature = "compile", feature = "icu4x"))]
+//! # #[cfg(feature = "compile")]
 //! # {
 //! use message_format::{Catalog, CatalogBundle, LocalizedCatalog, Locale, MessageArgs, compiler::CompileOptions};
 //!
@@ -96,19 +96,16 @@ pub use runtime::Catalog;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     use crate::catalog::locale_candidates;
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     use super::runtime::{FormatError, Trap};
-    #[cfg(any(
-        all(feature = "compile", feature = "icu4x"),
-        all(feature = "compile", feature = "std")
-    ))]
+    #[cfg(feature = "compile")]
     use super::*;
     #[cfg(all(feature = "compile", feature = "std"))]
     use alloc::format;
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     use alloc::string::String;
     #[cfg(all(feature = "compile", feature = "std"))]
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -124,12 +121,12 @@ mod tests {
         path
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     fn locale(tag: &str) -> Locale {
         tag.parse::<Locale>().expect("locale")
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     fn localized(tag: &str, source: &str) -> LocalizedCatalog {
         LocalizedCatalog::new(
             locale(tag),
@@ -137,7 +134,7 @@ mod tests {
         )
     }
 
-    #[cfg(all(feature = "compile", feature = "std", feature = "icu4x"))]
+    #[cfg(all(feature = "compile", feature = "std"))]
     #[test]
     fn compile_entry_points_preserve_simple_whitespace() {
         let source = "  hello  ";
@@ -189,7 +186,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_resources_merges_named_message_bodies() {
         let (catalog, source_map) = Catalog::compile_resources(
@@ -208,7 +205,7 @@ mod tests {
         assert!(catalog.resolve("bye").is_ok());
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_with_manifest_validates_custom_functions() {
         let mut manifest = compiler::FunctionManifest::new();
@@ -229,7 +226,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_lookup_falls_back_to_parent_locale_catalog() {
         let bundle = CatalogBundle::new(
@@ -251,7 +248,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_returns_exact_match_when_available() {
         let bundle = CatalogBundle::new(
@@ -268,7 +265,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_formatter_resolves_named_args_against_active_catalog() {
         let bundle = CatalogBundle::new(
@@ -291,14 +288,14 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn empty_bundle_reports_missing_locale_catalog() {
         let err = CatalogBundle::new([], &locale("en")).expect_err("must fail");
         assert_eq!(err, FormatError::Trap(Trap::MissingLocaleCatalog));
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_lookup_uses_cldr_parent_locale() {
         // pt-MZ has CLDR parent pt-PT, not pt (naive truncation would skip pt-PT)
@@ -321,7 +318,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_lookup_reports_missing_locale_when_no_catalog_matches() {
         let err = CatalogBundle::new([localized("fr", "Bonjour")], &locale("en-US"))
@@ -329,7 +326,7 @@ mod tests {
         assert_eq!(err, FormatError::Trap(Trap::MissingLocaleCatalog));
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     fn compile_messages(messages: &[(&str, &str)]) -> Catalog {
         let (catalog, _) = Catalog::compile_inputs(
             messages.iter().map(|(id, source)| compiler::CompileInput {
@@ -344,7 +341,7 @@ mod tests {
         catalog
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_message_level_fallback_across_catalogs() {
         // pt-MZ CLDR chain: pt-MZ → pt-PT → pt → und
@@ -377,7 +374,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bundle_fallback_resolves_args_against_matched_catalog() {
         let bundle = CatalogBundle::new(
@@ -406,7 +403,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     fn compile_and_format(source: &str, args: &MessageArgs) -> String {
         let catalog = Catalog::compile_str(source).expect("compile");
         let mut formatter = catalog
@@ -415,7 +412,7 @@ mod tests {
         formatter.format_by_id("main", args).expect("format")
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_integer_large_float_uses_shortest_representation() {
         let args = MessageArgs::new();
@@ -429,7 +426,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_number_large_float_uses_shortest_representation() {
         let args = MessageArgs::new();
@@ -443,7 +440,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_number_negative_zero_sign_display() {
         let args = MessageArgs::new();
@@ -461,7 +458,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn compile_offset_large_negative_sign_display_never() {
         let args = MessageArgs::new();
@@ -471,7 +468,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn formatter_host_locale_independent_of_catalog() {
         // Bare numeric expressions use the formatter host's locale even
@@ -490,7 +487,7 @@ mod tests {
         assert_eq!(result, "1\u{202f}000\u{202f}000,5");
     }
 
-    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[cfg(feature = "compile")]
     #[test]
     fn bare_integer_interpolation_uses_locale_grouping() {
         let catalog = Catalog::compile_str("{ $n }").expect("compile");

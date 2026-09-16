@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 icu_locale_core = { default-features = false, version = "2.3.0" }
-message-format = { features = ["compile", "icu4x", "std"], workspace = true }
+message-format = { features = ["compile", "std"], workspace = true }
 
 [dev-dependencies]
 criterion = "0.8.2"

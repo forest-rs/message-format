@@ -4,7 +4,6 @@
 //! Shared pure string-processing utilities used by both compiler and runtime.
 
 use alloc::string::String;
-#[cfg(any(feature = "icu4x", test))]
 use alloc::{format, string::ToString};
 
 pub(crate) fn is_valid_number_literal(value: &str) -> bool {
@@ -82,7 +81,6 @@ pub(crate) fn strip_bidi_controls(value: &str) -> String {
     value.chars().filter(|ch| !is_bidi_control(*ch)).collect()
 }
 
-#[cfg(any(feature = "icu4x", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SignDisplay {
     Auto,
@@ -90,7 +88,6 @@ pub(crate) enum SignDisplay {
     Never,
 }
 
-#[cfg(any(feature = "icu4x", test))]
 pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> String {
     match sign_display {
         SignDisplay::Auto => value,

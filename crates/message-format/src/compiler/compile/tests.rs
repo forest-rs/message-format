@@ -1,7 +1,6 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#[cfg(feature = "icu4x")]
 use crate::runtime::BuiltinHost;
 use crate::runtime::schema;
 use crate::runtime::{
@@ -355,7 +354,6 @@ fn unused_string_input_is_still_resolved_once() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn string_selector_retries_do_not_repeat_declaration_diagnostics() {
     let source = ".input {$x :number} .input {$y :string} .match $x $y \
@@ -381,7 +379,6 @@ fn string_selector_retries_do_not_repeat_declaration_diagnostics() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn string_input_diagnostic_precedes_later_declaration_diagnostic() {
     let source = ".input {$x :string} .local $y = {$missing :number} \
@@ -415,7 +412,6 @@ fn string_input_diagnostic_precedes_later_declaration_diagnostic() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn bare_string_resolution_is_not_locale_number_formatting() {
     let bytes =
@@ -434,7 +430,6 @@ fn bare_string_resolution_is_not_locale_number_formatting() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn single_use_string_to_number_chain_avoids_intermediate_string_storage() {
     let source = ".input {$x :string} .local $n = {$x :number} {{value={$n}}}";
@@ -463,7 +458,6 @@ fn single_use_string_to_number_chain_avoids_intermediate_string_storage() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn fused_string_to_number_resolves_the_producers_operand() {
     for source in [
@@ -514,7 +508,6 @@ fn fused_string_to_number_evaluates_its_input_once() {
     assert_eq!(calls.get(), 2);
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn ordinary_body_references_prevent_single_use_string_fusion() {
     let source = ".input {$s :string} .local $n = {$s :number} {{{$s} {$s} {$n}}}";
@@ -781,7 +774,6 @@ fn stored_custom_selector_keeps_recoverable_host_diagnostics() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn string_input_selector_preserves_eager_declaration_slots() {
     let source =
@@ -811,7 +803,6 @@ fn string_input_selector_preserves_eager_declaration_slots() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn runtime_value_alias_does_not_consume_a_slot() {
     let source = ".input {$n :number} .local $alias = {$n} {{n={$alias}}}";
@@ -826,7 +817,6 @@ fn runtime_value_alias_does_not_consume_a_slot() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn runtime_value_alias_in_dynamic_option_uses_source_slot() {
     let source = ".input {$digits :number} .local $alias = {$digits} \
@@ -871,7 +861,6 @@ fn unused_implicit_argument_alias_remains_eager() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn stored_numeric_keyword_projection_reuses_declaration_function_entry() {
     let source = ".input {$n :number minimumFractionDigits=2} .match $n one {{one}} * {{other}}";
@@ -886,7 +875,6 @@ fn stored_numeric_keyword_projection_reuses_declaration_function_entry() {
     assert!(!emitted.contains(&schema::Opcode::CallSelect));
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn structured_numeric_selector_calls_apply_the_current_annotation() {
     for (stored, selector, key) in [
@@ -944,7 +932,6 @@ fn structured_numeric_selector_calls_apply_the_current_annotation() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn structured_string_selector_matches_formatted_presentation() {
     let mut builder = CatalogBuilder::new();
@@ -982,7 +969,6 @@ fn structured_string_selector_matches_formatted_presentation() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn formatted_numeric_reannotation_preserves_source_and_exactness() {
     for (source, expected) in [
@@ -1017,7 +1003,6 @@ fn formatted_numeric_reannotation_preserves_source_and_exactness() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn structured_numeric_selector_preserves_dynamic_select_diagnostics() {
     let mut builder = CatalogBuilder::new();
@@ -1068,7 +1053,6 @@ fn structured_numeric_selector_preserves_dynamic_select_diagnostics() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn reannotated_failed_selector_preserves_fallback_provenance() {
     let source = ".input {$x :test:select decimalPlaces=9} \
@@ -2676,7 +2660,6 @@ fn render_with_source_highlights_unknown_function_annotation() {
     assert!(rendered.contains("custom:unknown"));
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn function_fallback_reannotation_reports_cascading_bad_operand() {
     let source = ".local $var = {|val| :test:undefined} {{{$var :test:function}}}";
@@ -2718,7 +2701,6 @@ fn universal_id_is_retained_for_custom_host_results() {
     assert_eq!(sink.ids, ["first"]);
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn delegated_builtin_values_preserve_structured_metadata_and_text() {
     struct CallOnlyBuiltinHost(BuiltinHost);
@@ -2891,7 +2873,6 @@ fn universal_id_does_not_change_dynamic_option_values_seen_by_custom_hosts() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn optionless_string_reannotation_reports_cascading_bad_operand() {
     let source = ".local $var = {|val| :test:undefined} {{{$var :string}}}";
@@ -2918,7 +2899,6 @@ fn optionless_string_reannotation_reports_cascading_bad_operand() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn function_options_allow_grammar_whitespace_around_equals() {
     for source in ["{:f k= v}", "{:f k = v}"] {
@@ -2944,7 +2924,6 @@ fn function_options_allow_grammar_whitespace_around_equals() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn unresolved_operand_still_reports_an_unknown_function() {
     for source in ["{$x :f}", "{$x :u:f}"] {
@@ -3583,7 +3562,6 @@ fn raw_match_rejects_unannotated_local_alias_selector() {
     ));
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_with_numeric_local_selector_falls_back_to_plural_category() {
     for arms in [
@@ -3622,7 +3600,6 @@ fn raw_match_with_numeric_local_selector_falls_back_to_plural_category() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_with_percent_input_selects_the_scaled_plural_category() {
     let source = ".input {$n :percent} .match $n one {{one}} * {{other}}";
@@ -3645,7 +3622,6 @@ fn raw_match_with_percent_input_selects_the_scaled_plural_category() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn stored_percent_retains_scaled_exact_value_and_dynamic_precision() {
     for (source, args, expected) in [
@@ -3678,7 +3654,6 @@ fn stored_percent_retains_scaled_exact_value_and_dynamic_precision() {
     }
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn stored_percent_string_reannotation_uses_formatted_presentation() {
     let bytes = compile_str(".local $pct = {0.01 :percent} {{{$pct :string}}}").expect("compiled");
@@ -3694,7 +3669,6 @@ fn stored_percent_string_reannotation_uses_formatted_presentation() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn percent_reannotation_inherits_resolved_precision_for_output() {
     let source =
@@ -3713,7 +3687,6 @@ fn percent_reannotation_inherits_resolved_precision_for_output() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn percent_reannotation_inherits_resolved_precision_for_selection() {
     let source = ".local $p={0.01 :percent minimumFractionDigits=$digits} .local $q={$p :percent} .match $q one {{one}} other {{other}} * {{fallback}}";
@@ -3732,7 +3705,6 @@ fn percent_reannotation_inherits_resolved_precision_for_selection() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_rechecks_each_source_local_selector_once() {
     let source =
@@ -3760,7 +3732,6 @@ fn raw_match_rechecks_each_source_local_selector_once() {
     );
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_with_offset_numeric_local_selector_falls_back_to_plural_category() {
     let source = ".local $n = {2 :number} .local $m = {$n :offset subtract=1} .input {$s :string} .match $m $s 1 a {{exact-a}} one b {{plural-b}} * * {{fallback}}";
@@ -3829,7 +3800,6 @@ fn long_alias_chain_is_substituted() {
     assert_eq!(out, "Hello Chain!");
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn local_integer_function_is_evaluated() {
     let bytes = compile_str(".local $x = {4.2 :integer} {{X={$x}}}").expect("compiled");
@@ -3856,7 +3826,6 @@ fn local_test_select_decimal_places_is_evaluated_by_the_host() {
     assert_eq!(out, "A");
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn resolved_test_selector_preserves_exact_decimal_text() {
     let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1 {{integer}} 1.0 {{decimal}} * {{other}}";
@@ -3958,7 +3927,6 @@ fn raw_match_with_escaped_quoted_key_selects_expected_arm() {
     assert_eq!(out_default, "other");
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_match_with_integer_select_exact_formats_literal_arm() {
     let source = ".local $sel = {1 :integer select=exact} .match $sel 1 {{literal select {$sel}}} * {{OTHER}}";
@@ -3973,7 +3941,6 @@ fn raw_match_with_integer_select_exact_formats_literal_arm() {
     assert_eq!(out, "literal select 1");
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn local_offset_result_can_be_used_in_match_selector() {
     let source = ".local $x = {10 :integer} .local $y = {$x :offset subtract=6} .match $y 10 {{=10}} 4 {{=4}} * {{other}}";
@@ -3988,7 +3955,6 @@ fn local_offset_result_can_be_used_in_match_selector() {
     assert_eq!(out, "=4");
 }
 
-#[cfg(feature = "icu4x")]
 #[test]
 fn raw_offset_result_defaults_to_plural_selection() {
     let source = ".local $n = {2 :offset subtract=1} .match $n one {{one}} * {{other}}";
