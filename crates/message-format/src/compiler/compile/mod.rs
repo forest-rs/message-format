@@ -1059,7 +1059,9 @@ fn collect_builtin_function_errors(
 fn builtin_option_literal_domain(function: &str, option: &str) -> Option<&'static [&'static str]> {
     match (function, option) {
         ("string", "u:dir") => Some(&["ltr", "rtl", "auto"]),
-        ("number" | "integer", "signDisplay") => Some(&["auto", "always", "never"]),
+        ("number" | "integer", "signDisplay") => {
+            Some(&["auto", "always", "exceptZero", "negative", "never"])
+        }
         ("number" | "integer", "style") => Some(&["percent"]),
         ("number" | "integer", "select") => Some(&["exact", "plural", "ordinal"]),
         ("number" | "integer", "notation") => Some(&["scientific"]),
@@ -1085,6 +1087,9 @@ fn join_expected_values(values: &'static [&'static str]) -> &'static str {
     match values {
         ["ltr", "rtl", "auto"] => "\"ltr\", \"rtl\", or \"auto\"",
         ["auto", "always", "never"] => "\"auto\", \"always\", or \"never\"",
+        ["auto", "always", "exceptZero", "negative", "never"] => {
+            "\"auto\", \"always\", \"exceptZero\", \"negative\", or \"never\""
+        }
         ["percent"] => "\"percent\"",
         ["exact", "plural", "ordinal"] => "\"exact\", \"plural\", or \"ordinal\"",
         ["scientific"] => "\"scientific\"",

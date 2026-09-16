@@ -1208,6 +1208,8 @@ fn resolve_number_format_options(
         None => inherited.sign_display,
         Some("auto") => NumberSignDisplay::Auto,
         Some("always") => NumberSignDisplay::Always,
+        Some("exceptZero") => NumberSignDisplay::ExceptZero,
+        Some("negative") => NumberSignDisplay::Negative,
         Some("never") => NumberSignDisplay::Never,
         Some(_) => return Err(bad_option()),
     };
@@ -1269,6 +1271,8 @@ fn render_resolved_number(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
+                NumberSignDisplay::ExceptZero => SignDisplay::ExceptZero,
+                NumberSignDisplay::Negative => SignDisplay::Negative,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             value.to_string(),
@@ -1279,6 +1283,8 @@ fn render_resolved_number(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
+                NumberSignDisplay::ExceptZero => SignDisplay::ExceptZero,
+                NumberSignDisplay::Negative => SignDisplay::Negative,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             format_scientific_text(&number.text()),
@@ -1293,6 +1299,8 @@ fn render_resolved_number(
         match format.sign_display {
             NumberSignDisplay::Auto => SignDisplay::Auto,
             NumberSignDisplay::Always => SignDisplay::Always,
+            NumberSignDisplay::ExceptZero => SignDisplay::ExceptZero,
+            NumberSignDisplay::Negative => SignDisplay::Negative,
             NumberSignDisplay::Never => SignDisplay::Never,
         },
         text,
@@ -1758,6 +1766,8 @@ fn parse_sign_display(options: &EffectiveOptions<'_>) -> Result<SignDisplay, For
     Ok(
         match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
             Some("always") => SignDisplay::Always,
+            Some("exceptZero") => SignDisplay::ExceptZero,
+            Some("negative") => SignDisplay::Negative,
             Some("never") => SignDisplay::Never,
             Some("auto") | None => SignDisplay::Auto,
             Some(_) => return Err(bad_option()),

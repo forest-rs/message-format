@@ -344,6 +344,8 @@ impl NumberFormatOptions {
 pub(crate) enum NumberSignDisplay {
     Auto,
     Always,
+    ExceptZero,
+    Negative,
     Never,
 }
 
