@@ -1393,7 +1393,7 @@ fn handle_call_instruction<H: Host>(
     // leaving a pending error in this expression. Such an operand still
     // short-circuits function resolution per MF2 formatting §16.1.
     let has_pending_operand_error = expr_state.should_skip_call();
-    let has_propagated_fallback = call_args.first().is_some_and(Value::is_fallback);
+    let has_propagated_fallback = matches!(call_args.first(), Some(Value::Fallback(_)));
     if has_pending_operand_error || has_propagated_fallback {
         // Option resolution is not reached when operand resolution fails.
         // Discard deferred option diagnostics so they cannot leak into a

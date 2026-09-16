@@ -1061,8 +1061,8 @@ fn reannotated_failed_selector_preserves_fallback_provenance() {
         diagnostics,
         vec![
             crate::runtime::FormatError::Function(MessageFunctionError::BadOption),
-            crate::runtime::FormatError::BadSelector { source: None },
             crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
+            crate::runtime::FormatError::BadSelector { source: None },
         ]
     );
 }
@@ -2587,6 +2587,33 @@ fn render_with_source_highlights_unknown_function_annotation() {
     assert!(rendered.contains("error: unknown function"));
     assert!(rendered.contains("--> <input>:1:"));
     assert!(rendered.contains("custom:unknown"));
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn function_fallback_reannotation_reports_cascading_bad_operand() {
+    let source = ".local $var = {|val| :test:undefined} {{{$var :test:function}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &[], &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "{$var}");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::UnknownFunction { fn_id: 0 },
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
+        ]
+    );
 }
 
 #[test]
