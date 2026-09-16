@@ -48,6 +48,7 @@ icu_locale = { default-features = false, features = [
 icu_plurals = { default-features = false, features = [
     "compiled_data",
 ], version = "2.3.0" }
+writeable = { default-features = false, version = "0.6.4" }
 
 # compile (optional)
 hashbrown = { default-features = false, features = [

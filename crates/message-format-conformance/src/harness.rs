@@ -1004,7 +1004,7 @@ mod tests {
             src: "{|2026-01-01| :date u:id=first}".to_string(),
             exp: None,
             exp_errors: Some(Vec::new()),
-            exp_parts: Some(serde_json::json!([{"type":"string","id":"first"}])),
+            exp_parts: Some(serde_json::json!([{"type":"datetime","id":"first"}])),
             params: None,
             bidi_isolation: None,
             locale: None,

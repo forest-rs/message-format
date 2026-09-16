@@ -510,6 +510,8 @@ pub enum FormattedValueKind {
     String,
     /// A localized number value.
     Number,
+    /// A localized date or time value.
+    DateTime,
 }
 
 /// Direction metadata attached to a formatted string.
@@ -541,7 +543,7 @@ pub struct FormattedValue<'a> {
     pub locale: Option<Cow<'a, str>>,
     /// User-provided `u:id`, when present.
     pub id: Option<&'a str>,
-    /// Explicit resolved direction, when `ltr` or `rtl` was requested.
+    /// Resolved direction, when known from an explicit option or locale.
     pub direction: Option<FormatDirection>,
     /// Semantic subfields of the formatted value.
     pub fields: &'a [FormatField<'a>],

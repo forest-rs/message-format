@@ -9,8 +9,8 @@ use alloc::{
     borrow::Cow, boxed::Box, collections::BTreeMap, format, string::String, string::ToString,
     vec::Vec,
 };
-use core::array;
 use core::str::FromStr;
+use core::{array, fmt};
 
 use fixed_decimal::{Decimal, Sign, SignedRoundingMode, UnsignedRoundingMode};
 use icu_calendar::Date;
@@ -35,8 +35,10 @@ use icu_experimental::dimension::percent::formatter::{
 use icu_experimental::dimension::percent::options::{
     Display as PercentDisplay, PercentFormatterOptions,
 };
+use icu_locale::{Direction, LocaleDirectionality};
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};
+use writeable::{Part, PartsWrite, Writeable};
 
 use crate::common::text::{
     SignDisplay, format_signed_string, parse_number_literal, strip_bidi_controls,
@@ -50,15 +52,99 @@ use crate::runtime::{
     value::{
         CurrencyDisplay, CurrencySign, NumberFormatOptions, NumberGrouping, NumberNotation,
         NumberSelection, NumberSignDisplay, NumberStyle, NumberValue, ResolvedCurrencyOptions,
-        ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
+        ResolvedDateTimeOptions, ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString,
+        StringDirection, Value,
     },
     vm::{
-        FormatField, FormatSink, FormattedValue, FormattedValueKind, FunctionOptions, Host,
-        emit_resolved_string, format_i64,
+        FormatDirection, FormatField, FormatSink, FormattedValue, FormattedValueKind,
+        FunctionOptions, Host, emit_resolved_string, format_i64,
     },
 };
 
 const MAX_EXACT_I64_IN_F64: i64 = 9_007_199_254_740_992;
+
+struct PartCollector {
+    category: &'static str,
+    active: Vec<Part>,
+    fields: Vec<FormatField<'static>>,
+}
+
+impl PartCollector {
+    fn new(category: &'static str) -> Self {
+        Self {
+            category,
+            active: Vec::new(),
+            fields: Vec::new(),
+        }
+    }
+
+    fn finish(self) -> Vec<FormatField<'static>> {
+        self.fields
+    }
+}
+
+impl fmt::Write for PartCollector {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let semantic = self
+            .active
+            .iter()
+            .rev()
+            .find(|part| part.category == self.category)
+            .map(|part| part.value);
+        let decimal = self
+            .active
+            .iter()
+            .rev()
+            .find(|part| part.category == "decimal")
+            .map(|part| part.value);
+        let kind = match (self.category, semantic, decimal) {
+            ("datetime", Some("second"), Some("fraction")) => "fractionalSecond",
+            ("datetime", Some("second"), Some("decimal")) => "literal",
+            (_, Some(kind), _) => kind,
+            _ => "literal",
+        };
+        if let Some(last) = self.fields.last_mut()
+            && last.kind == kind
+        {
+            last.value.to_mut().push_str(value);
+        } else {
+            self.fields.push(FormatField {
+                kind,
+                value: Cow::Owned(value.to_string()),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl PartsWrite for PartCollector {
+    type SubPartsWrite = Self;
+
+    fn with_part(
+        &mut self,
+        part: Part,
+        mut write: impl FnMut(&mut Self::SubPartsWrite) -> fmt::Result,
+    ) -> fmt::Result {
+        self.active.push(part);
+        let result = write(self);
+        self.active.pop();
+        result
+    }
+}
+
+fn collect_icu_parts(
+    value: &impl Writeable,
+    category: &'static str,
+) -> Result<Vec<FormatField<'static>>, FormatError> {
+    let mut collector = PartCollector::new(category);
+    value
+        .write_to_parts(&mut collector)
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+    Ok(collector.finish())
+}
 
 fn bad_operand() -> FormatError {
     FormatError::Function(MessageFunctionError::BadOperand)
@@ -374,6 +460,7 @@ impl BuiltinHostCatalogIndex {
 #[derive(Debug)]
 pub struct BuiltinHost {
     locale: Locale,
+    direction: Option<FormatDirection>,
     cardinal_rules: PluralRules,
     ordinal_rules: PluralRules,
     icu_formatters: IcuFormatterCache,
@@ -391,9 +478,15 @@ impl BuiltinHost {
             .map_err(|_| FormatError::Trap(Trap::UnsupportedLocale))?;
         let ordinal_rules = PluralRules::try_new_ordinal(locale.into())
             .map_err(|_| FormatError::Trap(Trap::UnsupportedLocale))?;
+        let direction = match LocaleDirectionality::new_common().get(&locale.id) {
+            Some(Direction::LeftToRight) => Some(FormatDirection::LeftToRight),
+            Some(Direction::RightToLeft) => Some(FormatDirection::RightToLeft),
+            _ => None,
+        };
 
         Ok(Self {
             locale: locale.clone(),
+            direction,
             cardinal_rules,
             ordinal_rules,
             icu_formatters: IcuFormatterCache::default(),
@@ -480,10 +573,10 @@ impl BuiltinHost {
                 let style = resolve_date_style(&options, false);
                 let formatted =
                     format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
-                Ok(resolved_formatted(
+                Ok(resolved_datetime(
                     raw_arg,
                     formatted,
-                    FormattedValueKind::String,
+                    ResolvedDateTimeOptions::Date(style),
                 ))
             }
             BuiltinFn::Time => {
@@ -492,43 +585,55 @@ impl BuiltinHost {
                 let precision = resolve_time_precision(&options, false);
                 let formatted =
                     format_icu_time_cached(locale, &mut icu_formatters.time, time, precision)?;
-                Ok(resolved_formatted(
+                Ok(resolved_datetime(
                     raw_arg,
                     formatted,
-                    FormattedValueKind::String,
+                    ResolvedDateTimeOptions::Time(precision.icu()),
                 ))
             }
             BuiltinFn::DateTime => {
                 validate_datetime_style_field_exclusivity(&options)?;
                 let text = validate_datetime_operand(raw_arg, catalog)?;
                 let (date, time) = parse_iso_datetime(&text)?;
-                let formatted = if has_datetime_field_options(&options) {
+                let (formatted, presentation) = if has_datetime_field_options(&options) {
                     let offset = parse_iso_utc_offset(&text)?;
-                    format_icu_datetime_fields_cached(
+                    let (field_set, hour_cycle) = resolve_datetime_field_set(&options)?;
+                    let formatted = format_icu_datetime_fields_cached(
                         locale,
                         &mut icu_formatters.datetime,
                         date,
                         time,
                         offset,
-                        &options,
-                    )?
+                        field_set,
+                        hour_cycle,
+                    )?;
+                    (
+                        formatted,
+                        ResolvedDateTimeOptions::Fields {
+                            field_set,
+                            hour_cycle,
+                        },
+                    )
                 } else {
                     let date_style = resolve_date_style(&options, true);
                     let time_precision = resolve_time_precision(&options, true);
-                    format_icu_datetime_cached(
+                    let formatted = format_icu_datetime_cached(
                         locale,
                         &mut icu_formatters.datetime,
                         date,
                         time,
                         date_style,
                         time_precision,
-                    )?
+                    )?;
+                    (
+                        formatted,
+                        ResolvedDateTimeOptions::DateTime {
+                            date: date_style,
+                            time: time_precision.icu(),
+                        },
+                    )
                 };
-                Ok(resolved_formatted(
-                    raw_arg,
-                    formatted,
-                    FormattedValueKind::String,
-                ))
+                Ok(resolved_datetime(raw_arg, formatted, presentation))
             }
         }
     }
@@ -824,13 +929,47 @@ impl Host for BuiltinHost {
     ) -> bool {
         if sink.wants_structured_output() {
             if let Value::Formatted(value) = value {
+                let fields = if let Some(options) = value.datetime {
+                    format_resolved_datetime_parts(
+                        &self.locale,
+                        &mut self.icu_formatters,
+                        catalog,
+                        value,
+                        options,
+                    )
+                } else if let Some(options) = value.currency.as_ref() {
+                    format_resolved_currency_parts(
+                        &self.locale,
+                        &mut self.icu_formatters.currency,
+                        catalog,
+                        value,
+                        options,
+                    )
+                } else if value.selection.is_some()
+                    && let Value::Number(source) = &value.source
+                {
+                    let mut presentation = source.clone();
+                    presentation.format.style = NumberStyle::Percent;
+                    render_resolved_number_inner(
+                        &self.locale,
+                        &mut self.icu_formatters,
+                        &presentation,
+                        true,
+                    )
+                    .map(|rendered| rendered.fields)
+                } else {
+                    Ok(Vec::new())
+                };
+                let Ok(fields) = fields else {
+                    return false;
+                };
                 sink.formatted_value(&FormattedValue {
                     kind: value.kind,
                     value: Cow::Borrowed(value.text()),
                     locale: Some(Cow::Owned(self.locale.to_string())),
                     id: None,
-                    direction: None,
-                    fields: &[],
+                    direction: self.direction,
+                    fields: &fields,
                 });
                 return true;
             }
@@ -839,29 +978,21 @@ impl Host for BuiltinHost {
                 return true;
             }
             if let Value::Number(number) = value {
-                let Ok(formatted) =
-                    render_resolved_number(&self.locale, &mut self.icu_formatters, number)
-                else {
+                let Ok(rendered) = render_resolved_number_inner(
+                    &self.locale,
+                    &mut self.icu_formatters,
+                    number,
+                    true,
+                ) else {
                     return false;
-                };
-                let field = FormatField {
-                    kind: "integer",
-                    value: Cow::Borrowed(formatted.as_str()),
-                };
-                let fields = if matches!(number.value, NumberValue::Integer(_))
-                    && formatted.bytes().all(|byte| byte.is_ascii_digit())
-                {
-                    core::slice::from_ref(&field)
-                } else {
-                    &[]
                 };
                 sink.formatted_value(&FormattedValue {
                     kind: FormattedValueKind::Number,
-                    value: Cow::Borrowed(formatted.as_str()),
+                    value: Cow::Borrowed(rendered.text.as_str()),
                     locale: Some(Cow::Owned(self.locale.to_string())),
                     id: None,
-                    direction: None,
-                    fields,
+                    direction: self.direction,
+                    fields: &rendered.fields,
                 });
                 return true;
             }
@@ -987,16 +1118,14 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
     }
 }
 
-fn resolved_formatted(value: &Value, formatted: String, kind: FormattedValueKind) -> Value {
+fn resolved_datetime(value: &Value, formatted: String, options: ResolvedDateTimeOptions) -> Value {
     let source = match value {
         Value::Formatted(value) => value.source.clone(),
         value => value.clone(),
     };
-    let value = match kind {
-        FormattedValueKind::String => ResolvedFormatted::new(source, formatted),
-        FormattedValueKind::Number => ResolvedFormatted::number(source, formatted),
-    };
-    Value::Formatted(Box::new(value))
+    Value::Formatted(Box::new(ResolvedFormatted::datetime(
+        source, formatted, options,
+    )))
 }
 
 fn resolve_number(
@@ -1349,6 +1478,20 @@ fn render_resolved_number(
     cache: &mut IcuFormatterCache,
     number: &ResolvedNumber,
 ) -> Result<String, FormatError> {
+    render_resolved_number_inner(locale, cache, number, false).map(|rendered| rendered.text)
+}
+
+struct RenderedNumber {
+    text: String,
+    fields: Vec<FormatField<'static>>,
+}
+
+fn render_resolved_number_inner(
+    locale: &Locale,
+    cache: &mut IcuFormatterCache,
+    number: &ResolvedNumber,
+    structured: bool,
+) -> Result<RenderedNumber, FormatError> {
     let format = number.format;
     if let NumberValue::NonFinite(value) = number.value {
         let mut rendered = format_signed_string(
@@ -1364,7 +1507,15 @@ fn render_resolved_number(
         if format.style == NumberStyle::Percent {
             rendered.push('%');
         }
-        return Ok(rendered);
+        let fields = if structured {
+            split_number_parts(&rendered, ('.', ','))
+        } else {
+            Vec::new()
+        };
+        return Ok(RenderedNumber {
+            text: rendered,
+            fields,
+        });
     }
     let number_text = number.text();
     let number_text = if format.style == NumberStyle::Percent {
@@ -1403,7 +1554,15 @@ fn render_resolved_number(
         if format.style == NumberStyle::Percent {
             rendered.push('%');
         }
-        return Ok(rendered);
+        let fields = if structured {
+            split_number_parts(&rendered, ('.', ','))
+        } else {
+            Vec::new()
+        };
+        return Ok(RenderedNumber {
+            text: rendered,
+            fields,
+        });
     }
     let text = if format.minimum_significant_digits.is_some()
         || format.maximum_significant_digits.is_some()
@@ -1471,13 +1630,25 @@ fn render_resolved_number(
                 formatter,
             });
         }
-        return Ok(cache
+        let formatted = cache
             .percent
             .as_ref()
             .expect("percent formatter initialized")
             .formatter
             .format(&decimal)
-            .to_string());
+            .to_string();
+        let fields = if structured {
+            split_number_parts(
+                &formatted,
+                localized_number_separators(locale, format.numbering_system)?,
+            )
+        } else {
+            Vec::new()
+        };
+        return Ok(RenderedNumber {
+            text: formatted,
+            fields,
+        });
     }
     if !cache.decimal.as_ref().is_some_and(|cached| {
         cached.grouping == format.grouping && cached.numbering_system == format.numbering_system
@@ -1495,13 +1666,108 @@ fn render_resolved_number(
             formatter,
         });
     }
-    Ok(cache
+    let formatted = cache
         .decimal
         .as_ref()
         .expect("decimal formatter initialized")
         .formatter
-        .format(&decimal)
-        .to_string())
+        .format(&decimal);
+    let fields = if structured {
+        collect_icu_parts(&formatted, "decimal")?
+    } else {
+        Vec::new()
+    };
+    Ok(RenderedNumber {
+        text: formatted.to_string(),
+        fields,
+    })
+}
+
+fn localized_number_separators(
+    locale: &Locale,
+    numbering_system: Option<NumberingSystem>,
+) -> Result<(char, char), FormatError> {
+    let mut preferences = DecimalFormatterPreferences::from(locale);
+    preferences.numbering_system = numbering_system;
+    let formatter = DecimalFormatter::try_new(
+        preferences,
+        DecimalFormatterOptions::from(GroupingStrategy::Always),
+    )
+    .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+    let probe = Decimal::from_str("12345.6")
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+    let fields = collect_icu_parts(&formatter.format(&probe), "decimal")?;
+    let separator = |kind| {
+        fields
+            .iter()
+            .find(|field| field.kind == kind)
+            .and_then(|field| field.value.chars().next())
+            .ok_or_else(|| implementation_failure(ImplementationFailure::Host))
+    };
+    Ok((separator("decimal")?, separator("group")?))
+}
+
+fn split_number_parts(value: &str, separators: (char, char)) -> Vec<FormatField<'static>> {
+    let (decimal_separator, group_separator) = separators;
+    let lowercase = value.to_ascii_lowercase();
+    let has_nan = lowercase.contains("nan");
+    let has_infinity = lowercase.contains("inf") || value.contains('∞');
+    let mut fields: Vec<FormatField<'static>> = Vec::new();
+    let mut fraction = false;
+    let mut exponent = false;
+    for ch in value.chars() {
+        let kind = if ch.is_numeric() {
+            if exponent {
+                "exponentInteger"
+            } else if fraction {
+                "fraction"
+            } else {
+                "integer"
+            }
+        } else {
+            match ch {
+                '+' | '＋' => {
+                    if exponent {
+                        "exponentPlusSign"
+                    } else {
+                        "plusSign"
+                    }
+                }
+                '-' | '−' => {
+                    if exponent {
+                        "exponentMinusSign"
+                    } else {
+                        "minusSign"
+                    }
+                }
+                'e' | 'E' | 'Ｅ' => {
+                    exponent = true;
+                    fraction = false;
+                    "exponentSeparator"
+                }
+                _ if ch == decimal_separator => {
+                    fraction = true;
+                    "decimal"
+                }
+                _ if ch == group_separator => "group",
+                '%' | '\u{66a}' => "percentSign",
+                _ if has_nan && ch.is_alphabetic() => "nan",
+                _ if has_infinity && (ch.is_alphabetic() || ch == '∞') => "infinity",
+                _ => "literal",
+            }
+        };
+        if let Some(last) = fields.last_mut()
+            && last.kind == kind
+        {
+            last.value.to_mut().push(ch);
+        } else {
+            fields.push(FormatField {
+                kind,
+                value: Cow::Owned(ch.to_string()),
+            });
+        }
+    }
+    fields
 }
 
 fn format_scientific_text(value: &str, preserve_trailing_zeros: bool, engineering: bool) -> String {
@@ -2129,52 +2395,148 @@ fn format_currency(
         NumberValue::Decimal(value) => *value,
         NumberValue::NonFinite(_) => return Err(bad_operand()),
     };
-    let usage = match sign {
-        CurrencySign::Standard => CurrencyUsage::Standard,
-        CurrencySign::Accounting => CurrencyUsage::Accounting,
+    let resolved = ResolvedCurrencyOptions {
+        code: currency,
+        display,
+        sign,
     };
+    let formatter = cached_currency_formatter(locale, cache, &resolved)?;
+    let formatted = formatter.format_fixed_decimal(&number).to_string();
+    Ok((formatted, resolved))
+}
+
+fn cached_currency_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut Option<CachedCurrencyFormatter>,
+    options: &ResolvedCurrencyOptions,
+) -> Result<&'a CurrencyFormatter<DecimalFormatter>, FormatError> {
     if !cache.as_ref().is_some_and(|cached| {
-        cached.currency == currency && cached.display == display && cached.sign == sign
+        cached.currency == options.code
+            && cached.display == options.display
+            && cached.sign == options.sign
     }) {
+        let usage = match options.sign {
+            CurrencySign::Standard => CurrencyUsage::Standard,
+            CurrencySign::Accounting => CurrencyUsage::Accounting,
+        };
         let prefs = CurrencyFormatterPreferences::from(locale);
         let formatter_options = CurrencyFormatterOptions::from(usage);
-        let formatter = match display {
+        let formatter = match options.display {
             CurrencyDisplay::Symbol => {
-                CurrencyFormatter::try_new_symbol(prefs, currency, formatter_options)
+                CurrencyFormatter::try_new_symbol(prefs, options.code, formatter_options)
             }
             CurrencyDisplay::NarrowSymbol => {
-                CurrencyFormatter::try_new_symbol_narrow(prefs, currency, formatter_options)
+                CurrencyFormatter::try_new_symbol_narrow(prefs, options.code, formatter_options)
             }
             CurrencyDisplay::Code => {
-                CurrencyFormatter::try_new_code(prefs, currency, formatter_options)
+                CurrencyFormatter::try_new_code(prefs, options.code, formatter_options)
             }
-            CurrencyDisplay::Name => CurrencyFormatter::try_new_name(prefs, currency),
+            CurrencyDisplay::Name => CurrencyFormatter::try_new_name(prefs, options.code),
             CurrencyDisplay::Never => {
-                CurrencyFormatter::try_new_no_currency(prefs, currency, formatter_options)
+                CurrencyFormatter::try_new_no_currency(prefs, options.code, formatter_options)
             }
         }
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
         *cache = Some(CachedCurrencyFormatter {
-            currency,
-            display,
-            sign,
+            currency: options.code,
+            display: options.display,
+            sign: options.sign,
             formatter,
         });
     }
-    let formatted = cache
+    Ok(&cache
         .as_ref()
         .expect("currency formatter initialized")
-        .formatter
-        .format_fixed_decimal(&number)
-        .to_string();
-    Ok((
-        formatted,
-        ResolvedCurrencyOptions {
-            code: currency,
-            display,
-            sign,
-        },
-    ))
+        .formatter)
+}
+
+fn format_resolved_currency_parts(
+    locale: &Locale,
+    cache: &mut Option<CachedCurrencyFormatter>,
+    catalog: &Catalog,
+    value: &ResolvedFormatted,
+    options: &ResolvedCurrencyOptions,
+) -> Result<Vec<FormatField<'static>>, FormatError> {
+    let number = match parse_number_value(&value.source, catalog)? {
+        NumberValue::Integer(value) => Decimal::from(value),
+        NumberValue::Decimal(value) => *value,
+        NumberValue::NonFinite(_) => return Err(bad_operand()),
+    };
+    let formatter = cached_currency_formatter(locale, cache, options)?;
+    let formatted = formatter.format_fixed_decimal(&number);
+    let fields = collect_icu_parts(&formatted, "decimal")?;
+    Ok(label_currency_parts(fields, options.display))
+}
+
+fn label_currency_parts(
+    fields: Vec<FormatField<'static>>,
+    display: CurrencyDisplay,
+) -> Vec<FormatField<'static>> {
+    if display == CurrencyDisplay::Never {
+        return fields;
+    }
+    let mut labeled = Vec::with_capacity(fields.len() + 2);
+    for field in fields {
+        if field.kind != "literal" {
+            labeled.push(field);
+            continue;
+        }
+        let value = field.value.into_owned();
+        if display == CurrencyDisplay::Name {
+            let start = value.len() - value.trim_start().len();
+            let end = value.trim_end().len();
+            if start >= end {
+                push_owned_field(&mut labeled, "literal", &value);
+                continue;
+            }
+            push_owned_field(&mut labeled, "literal", &value[..start]);
+            push_owned_field(&mut labeled, "currency", &value[start..end]);
+            push_owned_field(&mut labeled, "literal", &value[end..]);
+            continue;
+        }
+        let mut current_kind = None;
+        let mut current = String::new();
+        for ch in value.chars() {
+            let kind = match ch {
+                '+' | '＋' => "plusSign",
+                '-' | '−' => "minusSign",
+                '(' | ')' | '\u{200e}' | '\u{200f}' | '\u{2066}' | '\u{2067}' | '\u{2068}'
+                | '\u{2069}'
+                    if !ch.is_whitespace() =>
+                {
+                    "literal"
+                }
+                _ if ch.is_whitespace() => "literal",
+                _ => "currency",
+            };
+            if current_kind.is_some_and(|active| active != kind) {
+                push_owned_field(&mut labeled, current_kind.expect("field kind"), &current);
+                current.clear();
+            }
+            current_kind = Some(kind);
+            current.push(ch);
+        }
+        if let Some(kind) = current_kind {
+            push_owned_field(&mut labeled, kind, &current);
+        }
+    }
+    labeled
+}
+
+fn push_owned_field(fields: &mut Vec<FormatField<'static>>, kind: &'static str, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    if let Some(last) = fields.last_mut()
+        && last.kind == kind
+    {
+        last.value.to_mut().push_str(value);
+    } else {
+        fields.push(FormatField {
+            kind,
+            value: Cow::Owned(value.to_string()),
+        });
+    }
 }
 
 fn numeric_source(mut value: &Value) -> &Value {
@@ -2793,6 +3155,25 @@ enum TimePrecisionBucket {
     Second,
 }
 
+impl TimePrecisionBucket {
+    fn icu(self) -> TimePrecision {
+        match self {
+            Self::Hour => TimePrecision::Hour,
+            Self::Minute => TimePrecision::Minute,
+            Self::Second => TimePrecision::Second,
+        }
+    }
+
+    fn from_icu(precision: TimePrecision) -> Result<Self, FormatError> {
+        match precision {
+            TimePrecision::Hour => Ok(Self::Hour),
+            TimePrecision::Minute => Ok(Self::Minute),
+            TimePrecision::Second => Ok(Self::Second),
+            _ => Err(implementation_failure(ImplementationFailure::Host)),
+        }
+    }
+}
+
 /// Resolve the current precision option, accepting the former style aliases.
 fn resolve_time_precision(options: &EffectiveOptions<'_>, datetime: bool) -> TimePrecisionBucket {
     let current_key = if datetime {
@@ -2865,6 +3246,16 @@ fn format_icu_date_cached(
     date: Date<icu_calendar::Iso>,
     style: Length,
 ) -> Result<String, FormatError> {
+    Ok(cached_date_formatter(locale, cache, style)?
+        .format(&date)
+        .to_string())
+}
+
+fn cached_date_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut DateFormatterCache,
+    style: Length,
+) -> Result<&'a DateTimeFormatter<fieldsets::YMD>, FormatError> {
     let slot = cache.slot_mut(style);
     if slot.is_none() {
         *slot = Some(
@@ -2873,8 +3264,7 @@ fn format_icu_date_cached(
             )?,
         );
     }
-    let formatter = slot.as_ref().expect("date formatter initialized");
-    Ok(formatter.format(&date).to_string())
+    Ok(slot.as_ref().expect("date formatter initialized"))
 }
 
 fn format_icu_time_cached(
@@ -2883,6 +3273,16 @@ fn format_icu_time_cached(
     time: Time,
     precision: TimePrecisionBucket,
 ) -> Result<String, FormatError> {
+    Ok(cached_time_formatter(locale, cache, precision)?
+        .format(&time)
+        .to_string())
+}
+
+fn cached_time_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut TimeFormatterCache,
+    precision: TimePrecisionBucket,
+) -> Result<&'a NoCalendarFormatter<fieldsets::T>, FormatError> {
     let slot = cache.slot_mut(precision);
     if slot.is_none() {
         *slot = Some(
@@ -2892,8 +3292,7 @@ fn format_icu_time_cached(
                 })?,
         );
     }
-    let formatter = slot.as_ref().expect("time formatter initialized");
-    Ok(formatter.format(&time).to_string())
+    Ok(slot.as_ref().expect("time formatter initialized"))
 }
 
 fn format_icu_datetime_cached(
@@ -2904,6 +3303,17 @@ fn format_icu_datetime_cached(
     date_style: Length,
     time_precision: TimePrecisionBucket,
 ) -> Result<String, FormatError> {
+    let formatter = cached_datetime_formatter(locale, cache, date_style, time_precision)?;
+    let dt = DateTime { date, time };
+    Ok(formatter.format(&dt).to_string())
+}
+
+fn cached_datetime_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut DateTimeFormatterCache,
+    date_style: Length,
+    time_precision: TimePrecisionBucket,
+) -> Result<&'a DateTimeFormatter<fieldsets::YMDT>, FormatError> {
     let slot = cache.slot_mut(date_style, time_precision);
     if slot.is_none() {
         *slot = Some(
@@ -2916,9 +3326,7 @@ fn format_icu_datetime_cached(
             })?,
         );
     }
-    let formatter = slot.as_ref().expect("datetime formatter initialized");
-    let dt = DateTime { date, time };
-    Ok(formatter.format(&dt).to_string())
+    Ok(slot.as_ref().expect("datetime formatter initialized"))
 }
 
 fn format_icu_datetime_fields_cached(
@@ -2927,9 +3335,24 @@ fn format_icu_datetime_fields_cached(
     date: Date<icu_calendar::Iso>,
     time: Time,
     offset: UtcOffset,
-    options: &EffectiveOptions<'_>,
+    field_set: CompositeFieldSet,
+    hour_cycle: Option<HourCycle>,
 ) -> Result<String, FormatError> {
-    let (field_set, hour_cycle) = resolve_datetime_field_set(options)?;
+    let formatter = cached_datetime_fields_formatter(locale, cache, field_set, hour_cycle)?;
+    let datetime = DateTime { date, time };
+    let zone = TimeZone::UNKNOWN
+        .with_offset(Some(offset))
+        .at_date_time(datetime);
+    let datetime = ZonedDateTime { date, time, zone };
+    Ok(formatter.format(&datetime).to_string())
+}
+
+fn cached_datetime_fields_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut DateTimeFormatterCache,
+    field_set: CompositeFieldSet,
+    hour_cycle: Option<HourCycle>,
+) -> Result<&'a DateTimeFormatter<CompositeFieldSet>, FormatError> {
     if !cache
         .fields
         .as_ref()
@@ -2946,18 +3369,67 @@ fn format_icu_datetime_fields_cached(
             formatter,
         });
     }
-    let datetime = DateTime { date, time };
-    let zone = TimeZone::UNKNOWN
-        .with_offset(Some(offset))
-        .at_date_time(datetime);
-    let datetime = ZonedDateTime { date, time, zone };
-    Ok(cache
+    Ok(&cache
         .fields
         .as_ref()
         .expect("datetime field formatter initialized")
-        .formatter
-        .format(&datetime)
-        .to_string())
+        .formatter)
+}
+
+fn format_resolved_datetime_parts(
+    locale: &Locale,
+    formatters: &mut IcuFormatterCache,
+    catalog: &Catalog,
+    value: &ResolvedFormatted,
+    options: ResolvedDateTimeOptions,
+) -> Result<Vec<FormatField<'static>>, FormatError> {
+    let text = value_text(catalog, &value.source).ok_or_else(bad_operand)?;
+    let (date, time) = parse_iso_datetime(text)?;
+    match options {
+        ResolvedDateTimeOptions::Date(style) => collect_icu_parts(
+            &cached_date_formatter(locale, &mut formatters.date, style)?.format(&date),
+            "datetime",
+        ),
+        ResolvedDateTimeOptions::Time(precision) => {
+            let precision = TimePrecisionBucket::from_icu(precision)?;
+            collect_icu_parts(
+                &cached_time_formatter(locale, &mut formatters.time, precision)?.format(&time),
+                "datetime",
+            )
+        }
+        ResolvedDateTimeOptions::DateTime {
+            date: style,
+            time: precision,
+        } => {
+            let precision = TimePrecisionBucket::from_icu(precision)?;
+            let datetime = DateTime { date, time };
+            collect_icu_parts(
+                &cached_datetime_formatter(locale, &mut formatters.datetime, style, precision)?
+                    .format(&datetime),
+                "datetime",
+            )
+        }
+        ResolvedDateTimeOptions::Fields {
+            field_set,
+            hour_cycle,
+        } => {
+            let datetime = DateTime { date, time };
+            let zone = TimeZone::UNKNOWN
+                .with_offset(Some(parse_iso_utc_offset(text)?))
+                .at_date_time(datetime);
+            let datetime = ZonedDateTime { date, time, zone };
+            collect_icu_parts(
+                &cached_datetime_fields_formatter(
+                    locale,
+                    &mut formatters.datetime,
+                    field_set,
+                    hour_cycle,
+                )?
+                .format(&datetime),
+                "datetime",
+            )
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3058,6 +3530,42 @@ mod tests {
     use alloc::{boxed::Box, collections::BTreeSet};
     use core::ops::{Deref, DerefMut};
 
+    #[derive(Default)]
+    struct StructuredSink {
+        kind: Option<FormattedValueKind>,
+        value: String,
+        fields: Vec<(String, String)>,
+    }
+
+    impl FormatSink for StructuredSink {
+        fn wants_structured_output(&self) -> bool {
+            true
+        }
+
+        fn literal(&mut self, value: &str) {
+            self.value.push_str(value);
+        }
+
+        fn expression(&mut self, value: &str) {
+            self.value.push_str(value);
+        }
+
+        fn markup_open(&mut self, _name: &str, _options: &[crate::runtime::FormatOption<'_>]) {}
+
+        fn markup_close(&mut self, _name: &str, _options: &[crate::runtime::FormatOption<'_>]) {}
+
+        fn formatted_value(&mut self, value: &FormattedValue<'_>) {
+            self.kind = Some(value.kind);
+            self.value.push_str(&value.value);
+            self.fields.extend(
+                value
+                    .fields
+                    .iter()
+                    .map(|field| (field.kind.to_string(), field.value.to_string())),
+            );
+        }
+    }
+
     struct TestBuiltinHost {
         catalog: &'static Catalog,
         index: BuiltinHostCatalogIndex,
@@ -3108,6 +3616,18 @@ mod tests {
                 value,
                 &mut |_| {},
             )
+        }
+
+        fn structured(&mut self, value: &Value) -> StructuredSink {
+            let mut sink = StructuredSink::default();
+            assert!(Host::format_default_to(
+                &mut self.host,
+                self.catalog,
+                &self.index,
+                value,
+                &mut sink,
+            ));
+            sink
         }
     }
 
@@ -4196,6 +4716,110 @@ mod tests {
         assert_ne!(short, long);
         assert!(short_host.icu_formatters.datetime.short.minute.is_some());
         assert!(long_host.icu_formatters.datetime.short.second.is_some());
+    }
+
+    #[test]
+    fn structured_builtin_values_expose_reconstructable_semantic_fields() {
+        let mut host = builtin_host(&[
+            "number minimumFractionDigits=2",
+            "percent",
+            "currency currency=USD",
+            "datetime year=numeric month=long day=numeric",
+            "datetime hour=2-digit minute=2-digit second=2-digit fractionalSecondDigits=2 hourCycle=h23",
+        ]);
+        let values = [
+            host.call(
+                0,
+                &[Value::Str("12345.67".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("number"),
+            host.call(
+                1,
+                &[Value::Str("0.42".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("percent"),
+            host.call(
+                2,
+                &[Value::Str("12345.67".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("currency"),
+            host.call(
+                3,
+                &[Value::Str("2024-05-01T14:30:45".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("datetime"),
+            host.call(
+                4,
+                &[Value::Str("2024-05-01T14:30:45.123".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("datetime fraction"),
+        ];
+
+        let expected = [
+            (
+                FormattedValueKind::Number,
+                &["integer", "group", "decimal", "fraction"][..],
+            ),
+            (FormattedValueKind::Number, &["integer", "percentSign"][..]),
+            (
+                FormattedValueKind::Number,
+                &["currency", "integer", "group", "decimal", "fraction"][..],
+            ),
+            (FormattedValueKind::DateTime, &["month", "day", "year"][..]),
+            (
+                FormattedValueKind::DateTime,
+                &["hour", "minute", "second", "fractionalSecond"][..],
+            ),
+        ];
+
+        for (value, (kind, required_fields)) in values.iter().zip(expected) {
+            let sink = host.structured(value);
+            assert_eq!(sink.kind, Some(kind));
+            let reconstructed: String = sink
+                .fields
+                .iter()
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(reconstructed, sink.value);
+            for required in required_fields {
+                assert!(
+                    sink.fields.iter().any(|(actual, _)| actual == required),
+                    "missing {required:?} in {:?}",
+                    sink.fields,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structured_percent_uses_locale_decimal_separator() {
+        let locale = Locale::from_str("de-DE").expect("locale");
+        let mut format = NumberFormatOptions::DEFAULT;
+        format.style = NumberStyle::Percent;
+        format.minimum_fraction_digits = Some(3);
+        format.maximum_fraction_digits = Some(3);
+        let number = ResolvedNumber::new(
+            parse_number_text("0.42").expect("number"),
+            format,
+            NumberSelection::None,
+            false,
+        );
+        let rendered =
+            render_resolved_number_inner(&locale, &mut IcuFormatterCache::default(), &number, true)
+                .expect("formatted");
+        assert_eq!(rendered.text, "42,000 %");
+        assert!(
+            rendered
+                .fields
+                .iter()
+                .any(|field| field.kind == "decimal" && field.value == ",")
+        );
+        assert!(!rendered.fields.iter().any(|field| field.kind == "group"));
     }
 
     #[test]
