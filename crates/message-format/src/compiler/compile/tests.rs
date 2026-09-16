@@ -2643,6 +2643,26 @@ fn function_options_allow_grammar_whitespace_around_equals() {
 }
 
 #[test]
+fn malformed_expression_tails_remain_syntax_errors() {
+    for source in [
+        "missing space {42:func}",
+        "missing space {|foo|:func}",
+        "missing space {:func@bar}",
+        "missing space {:func @bar@baz}",
+        "missing space {:func @bar=42@baz}",
+        "bad {:placeholder option=}",
+        "bad {:placeholder:}",
+        "bad {:placeholder::foo}",
+        "bad {:placeholder :option=x}",
+        "bad {:placeholder @attribute=}",
+        "bad {:placeholder @attribute=@foo}",
+        "bad {:placeholder @attribute=$foo}",
+    ] {
+        assert!(compile_str(source).is_err(), "source={source}");
+    }
+}
+
+#[test]
 fn catalog_builder_uses_manifest_for_structured_messages() {
     let mut builder = CatalogBuilder::new();
     builder.set_function_manifest(FunctionManifest::new());

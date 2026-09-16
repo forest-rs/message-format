@@ -777,7 +777,7 @@ impl<'a> Parser<'a> {
             let had_ws_after_literal = self.skip_whitespace();
 
             // Check for annotation (`:function`) — requires space after literal
-            if self.peek() == Some(':') {
+            if had_ws_after_literal && self.peek() == Some(':') {
                 if let Some(function) = self.parse_annotation() {
                     self.skip_optional_whitespace();
                     // Consume trailing attributes (must be preceded by whitespace)
@@ -906,6 +906,18 @@ impl<'a> Parser<'a> {
             && let Some(function) = self.parse_annotation()
         {
             self.skip_optional_whitespace();
+            if self.peek() != Some('}') && !self.at_end() {
+                self.skip_to_expression_end();
+                let inner_end = self.pos;
+                self.eat('}');
+                return ExpressionNode {
+                    raw_span: outer_start..self.pos,
+                    span: inner_start..inner_end,
+                    kind: ExpressionKindNode::Literal,
+                    payload: None,
+                    diag_hint: Some(ExpressionDiagnosticHint::NonSelectPayloadUnavailable),
+                };
+            }
             let inner_end = self.pos;
             self.eat('}');
             return ExpressionNode {
