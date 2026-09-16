@@ -10,6 +10,9 @@ use core::{error::Error, fmt};
 use crate::runtime::Catalog;
 
 use fixed_decimal::Decimal;
+use icu_datetime::fieldsets::enums::CompositeFieldSet;
+use icu_datetime::options::{Length, TimePrecision};
+use icu_datetime::preferences::HourCycle;
 use icu_decimal::preferences::NumberingSystem;
 use icu_experimental::dimension::currency::CurrencyType;
 
@@ -74,6 +77,22 @@ pub struct ResolvedFormatted {
     pub(crate) kind: super::vm::FormattedValueKind,
     pub(crate) selection: Option<ResolvedNumber>,
     pub(crate) currency: Option<ResolvedCurrencyOptions>,
+    pub(crate) datetime: Option<ResolvedDateTimeOptions>,
+}
+
+/// Date/time presentation retained for structured output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedDateTimeOptions {
+    Date(Length),
+    Time(TimePrecision),
+    DateTime {
+        date: Length,
+        time: TimePrecision,
+    },
+    Fields {
+        field_set: CompositeFieldSet,
+        hour_cycle: Option<HourCycle>,
+    },
 }
 
 /// Currency options retained across annotations of a resolved currency value.
@@ -100,6 +119,7 @@ pub(crate) enum CurrencySign {
 }
 
 impl ResolvedFormatted {
+    #[cfg(all(test, feature = "compile"))]
     pub(crate) fn new(source: Value, formatted: String) -> Self {
         Self {
             source,
@@ -107,16 +127,7 @@ impl ResolvedFormatted {
             kind: super::vm::FormattedValueKind::String,
             selection: None,
             currency: None,
-        }
-    }
-
-    pub(crate) fn number(source: Value, formatted: String) -> Self {
-        Self {
-            source,
-            formatted,
-            kind: super::vm::FormattedValueKind::Number,
-            selection: None,
-            currency: None,
+            datetime: None,
         }
     }
 
@@ -127,6 +138,7 @@ impl ResolvedFormatted {
             kind: super::vm::FormattedValueKind::Number,
             selection: Some(selection),
             currency: None,
+            datetime: None,
         }
     }
 
@@ -141,6 +153,22 @@ impl ResolvedFormatted {
             kind: super::vm::FormattedValueKind::Number,
             selection: None,
             currency: Some(currency),
+            datetime: None,
+        }
+    }
+
+    pub(crate) fn datetime(
+        source: Value,
+        formatted: String,
+        options: ResolvedDateTimeOptions,
+    ) -> Self {
+        Self {
+            source,
+            formatted,
+            kind: super::vm::FormattedValueKind::DateTime,
+            selection: None,
+            currency: None,
+            datetime: Some(options),
         }
     }
 

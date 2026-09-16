@@ -250,14 +250,17 @@ impl FormatSink for PartsSink {
                 match value.kind {
                     FormattedValueKind::String => "string",
                     FormattedValueKind::Number => "number",
+                    FormattedValueKind::DateTime => "datetime",
                 }
                 .to_string(),
             ),
         );
-        part.insert(
-            "value".to_string(),
-            serde_json::Value::String(value.value.to_string()),
-        );
+        if value.kind == FormattedValueKind::String {
+            part.insert(
+                "value".to_string(),
+                serde_json::Value::String(value.value.to_string()),
+            );
+        }
         if let Some(locale) = &value.locale {
             part.insert(
                 "locale".to_string(),
