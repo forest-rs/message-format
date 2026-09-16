@@ -343,6 +343,9 @@ impl BuiltinHost {
         let Some(raw_arg) = args.first() else {
             return Err(bad_operand());
         };
+        if matches!(raw_arg, Value::FunctionFallback(_)) {
+            return Err(bad_operand());
+        }
         let options =
             EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
         options.validate_keys()?;
