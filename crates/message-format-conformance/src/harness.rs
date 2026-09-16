@@ -5,14 +5,14 @@
 
 use std::{fs, path::Path};
 
-use crate::runtime_helpers;
+use crate::{
+    differential::{PartsSink, map_compile_error, map_format_errors},
+    runtime_helpers,
+};
 use message_format::{
     Locale,
-    compiler::{CompileError, CompileOptions, compile, compile_str},
-    runtime::{
-        Catalog, FormatDirection, FormatError, FormatOption, FormatSink, FormattedValue,
-        FormattedValueKind, Formatter, HostFn, MarkupKind, MessageFunctionError, NoopHost, Value,
-    },
+    compiler::{CompileOptions, compile, compile_str},
+    runtime::{Catalog, Formatter, HostFn, NoopHost, Value},
 };
 use serde::Deserialize;
 
@@ -510,7 +510,7 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
                         );
                     }
                 };
-                let mut sink = WgPartsSink::default();
+                let mut sink = PartsSink::default();
                 let mut errors = Vec::new();
                 match formatter.format_to(message, &args, &mut sink, Some(&mut errors)) {
                     Ok(()) => {
@@ -612,146 +612,6 @@ fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bo
     }
 }
 
-#[derive(Default)]
-struct WgPartsSink {
-    output: String,
-    parts: Vec<serde_json::Value>,
-}
-
-impl FormatSink for WgPartsSink {
-    fn wants_structured_output(&self) -> bool {
-        true
-    }
-
-    fn literal(&mut self, value: &str) {
-        self.output.push_str(value);
-        self.parts
-            .push(serde_json::json!({ "type": "text", "value": value }));
-    }
-
-    fn expression(&mut self, value: &str) {
-        self.output.push_str(value);
-        self.parts
-            .push(serde_json::json!({ "type": "string", "value": value }));
-    }
-
-    fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]) {
-        self.markup(MarkupKind::Open, name, None, options);
-    }
-
-    fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]) {
-        self.markup(MarkupKind::Close, name, None, options);
-    }
-
-    fn formatted_value(&mut self, value: &FormattedValue<'_>) {
-        self.output.push_str(&value.value);
-        let mut part = serde_json::Map::new();
-        part.insert(
-            "type".to_string(),
-            serde_json::Value::String(
-                match value.kind {
-                    FormattedValueKind::String => "string",
-                    FormattedValueKind::Number => "number",
-                }
-                .to_string(),
-            ),
-        );
-        part.insert(
-            "value".to_string(),
-            serde_json::Value::String(value.value.to_string()),
-        );
-        if let Some(locale) = &value.locale {
-            part.insert(
-                "locale".to_string(),
-                serde_json::Value::String(locale.to_string()),
-            );
-        }
-        if let Some(id) = value.id {
-            part.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-        }
-        if let Some(direction) = value.direction {
-            let direction = match direction {
-                FormatDirection::LeftToRight => "ltr",
-                FormatDirection::RightToLeft => "rtl",
-            };
-            part.insert(
-                "dir".to_string(),
-                serde_json::Value::String(direction.to_string()),
-            );
-        }
-        if !value.fields.is_empty() {
-            part.insert(
-                "parts".to_string(),
-                serde_json::Value::Array(
-                    value
-                        .fields
-                        .iter()
-                        .map(
-                            |field| serde_json::json!({ "type": field.kind, "value": field.value }),
-                        )
-                        .collect(),
-                ),
-            );
-        }
-        self.parts.push(serde_json::Value::Object(part));
-    }
-
-    fn bidi_isolation(&mut self, value: &str) {
-        self.output.push_str(value);
-        self.parts
-            .push(serde_json::json!({ "type": "bidiIsolation", "value": value }));
-    }
-
-    fn fallback(&mut self, source: &str, rendered: &str) {
-        self.output.push_str(rendered);
-        self.parts
-            .push(serde_json::json!({ "type": "fallback", "source": source }));
-    }
-
-    fn markup(
-        &mut self,
-        kind: MarkupKind,
-        name: &str,
-        id: Option<&str>,
-        options: &[FormatOption<'_>],
-    ) {
-        let mut part = serde_json::Map::new();
-        part.insert(
-            "type".to_string(),
-            serde_json::Value::String("markup".to_string()),
-        );
-        let kind = match kind {
-            MarkupKind::Open => "open",
-            MarkupKind::Close => "close",
-            MarkupKind::Standalone => "standalone",
-        };
-        part.insert(
-            "kind".to_string(),
-            serde_json::Value::String(kind.to_string()),
-        );
-        part.insert(
-            "name".to_string(),
-            serde_json::Value::String(name.to_string()),
-        );
-        if let Some(id) = id {
-            part.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-        }
-        if !options.is_empty() {
-            let options = options
-                .iter()
-                .filter(|option| option.key != "u:id")
-                .map(|option| {
-                    (
-                        option.key.to_string(),
-                        serde_json::Value::String(option.value.to_string()),
-                    )
-                })
-                .collect();
-            part.insert("options".to_string(), serde_json::Value::Object(options));
-        }
-        self.parts.push(serde_json::Value::Object(part));
-    }
-}
 fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, Value)>, String> {
     params
         .iter()
@@ -800,74 +660,10 @@ fn expected_errors_match(expected: Option<&[WgError]>, actual: &[&'static str]) 
     expected_counts == actual_counts
 }
 
-fn map_compile_error(error: &CompileError) -> &'static str {
-    match error {
-        CompileError::InvalidLine { .. }
-        | CompileError::EmptyMessageId { .. }
-        | CompileError::InvalidExpr { .. }
-        | CompileError::InvalidVar { .. } => "syntax-error",
-        CompileError::MissingDefaultArm { .. } => "missing-fallback-variant",
-        CompileError::DuplicateDeclaration { .. } | CompileError::DuplicateMessageId { .. } => {
-            "duplicate-declaration"
-        }
-        CompileError::DuplicateVariant { .. } => "duplicate-variant",
-        CompileError::DuplicateOptionName { .. } => "duplicate-option-name",
-        CompileError::UnknownFunction { .. } | CompileError::UnsupportedFunctionUsage { .. } => {
-            "unknown-function"
-        }
-        CompileError::UnknownFunctionOption { .. }
-        | CompileError::InvalidFunctionOptionValue { .. }
-        | CompileError::InvalidBuiltinOptionValue { .. }
-        | CompileError::MissingFunctionOption { .. } => "bad-option",
-        CompileError::InvalidFunctionOperand { .. } => "bad-operand",
-        CompileError::InvalidVariantKey { .. } => "bad-variant-key",
-        CompileError::MissingSelectorAnnotation { .. } => "missing-selector-annotation",
-        CompileError::VariantKeyMismatch { .. } => "variant-key-mismatch",
-        CompileError::IoError { .. }
-        | CompileError::FunctionIdOverflow
-        | CompileError::TooManyStrings
-        | CompileError::SizeOverflow { .. }
-        | CompileError::ResourceInputError { .. }
-        | CompileError::InternalError { .. } => "data-model-error",
-    }
-}
-
-fn map_format_errors(error: &FormatError) -> Vec<&'static str> {
-    let mut mapped = Vec::new();
-    map_format_error_chain(error, &mut mapped);
-    mapped
-}
-
-fn map_format_error_chain(error: &FormatError, mapped: &mut Vec<&'static str>) {
-    match error {
-        FormatError::UnknownFunction { .. } => mapped.push("unknown-function"),
-        FormatError::MissingArg(_) => mapped.push("unresolved-variable"),
-        FormatError::UnknownMessageId(_) => mapped.push("data-model-error"),
-        FormatError::StackUnderflow
-        | FormatError::BadPc { .. }
-        | FormatError::Decode(_)
-        | FormatError::Trap(_) => mapped.push("data-model-error"),
-        FormatError::Function(MessageFunctionError::BadOption) => mapped.push("bad-option"),
-        FormatError::Function(MessageFunctionError::BadOperand) => mapped.push("bad-operand"),
-        FormatError::Function(MessageFunctionError::UnsupportedOperation(_)) => {
-            mapped.push("unsupported-operation");
-        }
-        FormatError::Function(MessageFunctionError::Implementation(_)) => {
-            mapped.push("message-function-error");
-        }
-        FormatError::BadSelector { source } => {
-            mapped.push("bad-selector");
-            if let Some(source) = source {
-                map_format_error_chain(source, mapped);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use message_format::runtime::UnsupportedOperation;
+    use message_format::runtime::{FormatError, MessageFunctionError, UnsupportedOperation};
 
     fn wg_tests_root() -> Option<std::path::PathBuf> {
         let root = default_wg_root().join("test/tests");
