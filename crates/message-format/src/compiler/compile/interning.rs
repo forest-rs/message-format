@@ -85,7 +85,9 @@ impl CatalogItems {
                     }
                     self.visit_parts(default)?;
                 }
-                Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
+                Part::MarkupOpen { name, options }
+                | Part::MarkupClose { name, options }
+                | Part::MarkupStandalone { name, options } => {
                     self.strings.insert(name.clone());
                     self.visit_options(options);
                 }

@@ -218,7 +218,10 @@ pub use schema::{FuncEntry, MessageEntry, Opcode};
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, ResolvedString, StrId, Value};
 #[cfg(feature = "icu4x")]
 pub use value::{ResolvedFormatted, ResolvedNumber};
-pub use vm::{FormatOption, FormatSink, FunctionOptions, Host, HostFn, MessageHandle, NoopHost};
+pub use vm::{
+    FormatDirection, FormatField, FormatOption, FormatSink, FormattedValue, FormattedValueKind,
+    FunctionOptions, Host, HostFn, MarkupKind, MessageHandle, NoopHost,
+};
 
 /// Catalog decoding and verification.
 pub mod catalog;

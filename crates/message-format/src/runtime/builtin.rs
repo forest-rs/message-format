@@ -34,7 +34,10 @@ use crate::runtime::{
         NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
         ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
-    vm::{FormatSink, FunctionOptions, Host, format_i64},
+    vm::{
+        FormatField, FormatSink, FormattedValue, FormattedValueKind, FunctionOptions, Host,
+        emit_resolved_string, format_i64,
+    },
 };
 
 const MAX_EXACT_I64_IN_F64: i64 = 9_007_199_254_740_992;
@@ -93,6 +96,7 @@ enum BuiltinFn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuiltinOptionKey {
     UDir,
+    UId,
     MinimumFractionDigits,
     MaximumFractionDigits,
     SignDisplay,
@@ -119,12 +123,13 @@ enum BuiltinOptionKey {
     TimeZoneName,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 25;
+const BUILTIN_OPTION_KEY_COUNT: usize = 26;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
         match self {
             Self::UDir => 0,
+            Self::UId => 25,
             Self::MinimumFractionDigits => 1,
             Self::MaximumFractionDigits => 2,
             Self::SignDisplay => 3,
@@ -386,15 +391,22 @@ impl BuiltinHost {
                 Ok(Value::Number(resolved))
             }
             BuiltinFn::Percent => {
-                let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
-                let sign_display = parse_sign_display(&options)?;
-                let formatted =
-                    format_percent(raw_arg, catalog, minimum_fraction_digits, sign_display)?;
-                Ok(resolved_formatted(raw_arg, formatted))
+                let (source, selection) = resolve_percent(raw_arg, catalog, &options)?;
+                let mut formatted = render_resolved_number(catalog, &selection);
+                formatted.push('%');
+                Ok(Value::Formatted(Box::new(ResolvedFormatted::selectable(
+                    Value::Number(source),
+                    formatted,
+                    selection,
+                ))))
             }
             BuiltinFn::Currency => {
                 let formatted = format_currency(raw_arg, catalog, &options)?;
-                Ok(resolved_formatted(raw_arg, formatted))
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    FormattedValueKind::Number,
+                ))
             }
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
@@ -413,7 +425,11 @@ impl BuiltinHost {
                 let style = resolve_date_style(&options);
                 let formatted =
                     format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
-                Ok(resolved_formatted(raw_arg, formatted))
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    FormattedValueKind::String,
+                ))
             }
             BuiltinFn::Time => {
                 let time_str = validate_time_operand(raw_arg, catalog)?;
@@ -421,7 +437,11 @@ impl BuiltinHost {
                 let style = resolve_time_style(&options);
                 let formatted =
                     format_icu_time_cached(locale, &mut icu_formatters.time, time, style)?;
-                Ok(resolved_formatted(raw_arg, formatted))
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    FormattedValueKind::String,
+                ))
             }
             BuiltinFn::DateTime => {
                 validate_datetime_style_field_exclusivity(&options)?;
@@ -437,7 +457,11 @@ impl BuiltinHost {
                     date_style,
                     time_style,
                 )?;
-                Ok(resolved_formatted(raw_arg, formatted))
+                Ok(resolved_formatted(
+                    raw_arg,
+                    formatted,
+                    FormattedValueKind::String,
+                ))
             }
         }
     }
@@ -488,6 +512,16 @@ impl Host for BuiltinHost {
                 .get(usize::from(fn_id))
                 .is_some_and(Option::is_some),
         )
+    }
+
+    fn unresolved_operand_error(
+        &self,
+        _catalog: &Catalog,
+        index: &BuiltinHostCatalogIndex,
+        fn_id: u16,
+    ) -> Option<MessageFunctionError> {
+        let entry = index.by_id.get(usize::from(fn_id))?.as_ref()?;
+        (entry.func != BuiltinFn::String).then_some(MessageFunctionError::BadOperand)
     }
 
     fn call(
@@ -583,8 +617,8 @@ impl Host for BuiltinHost {
                 EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
             options.validate_keys().map_err(into_host_call_error)?;
             validate_builtin_option_values(entry.func, &options).map_err(into_host_call_error)?;
-            let number = resolve_percent_selection(raw_arg, catalog, &options)
-                .map_err(into_host_call_error)?;
+            let (_, number) =
+                resolve_percent(raw_arg, catalog, &options).map_err(into_host_call_error)?;
             return project_resolved_number(self, index, &number).map_err(into_host_call_error);
         }
         if matches!(
@@ -639,6 +673,12 @@ impl Host for BuiltinHost {
         let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
+        if entry.func == BuiltinFn::Percent
+            && let Value::Formatted(value) = value
+            && let Some(number) = &value.selection
+        {
+            return project_resolved_number(self, index, number).map_err(into_host_call_error);
+        }
         if matches!(
             entry.func,
             BuiltinFn::Number | BuiltinFn::Integer | BuiltinFn::Offset
@@ -683,7 +723,7 @@ impl Host for BuiltinHost {
     ) -> Option<String> {
         match value {
             Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
-            Value::Number(number) => render_resolved_number(catalog, number),
+            Value::Number(number) => Some(render_resolved_number(catalog, number)),
             Value::Formatted(value) => Some(value.text().to_string()),
             Value::String(value) => {
                 let direction = match value.direction {
@@ -705,6 +745,49 @@ impl Host for BuiltinHost {
         value: &Value,
         sink: &mut dyn FormatSink,
     ) -> bool {
+        if sink.wants_structured_output() {
+            if let Value::Formatted(value) = value {
+                sink.formatted_value(&FormattedValue {
+                    kind: value.kind,
+                    value: Cow::Borrowed(value.text()),
+                    locale: Some(Cow::Owned(self.locale.to_string())),
+                    id: value
+                        .id
+                        .as_deref()
+                        .or_else(|| value.selection.as_ref()?.id.as_deref()),
+                    direction: None,
+                    fields: &[],
+                });
+                return true;
+            }
+            if let Value::String(value) = value {
+                emit_resolved_string(sink, value, Some(Cow::Owned(self.locale.to_string())));
+                return true;
+            }
+            if let Value::Number(number) = value {
+                let formatted = render_resolved_number(catalog, number);
+                let field = FormatField {
+                    kind: "integer",
+                    value: Cow::Borrowed(formatted.as_str()),
+                };
+                let fields = if matches!(number.value, NumberValue::Integer(_))
+                    && formatted.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    core::slice::from_ref(&field)
+                } else {
+                    &[]
+                };
+                sink.formatted_value(&FormattedValue {
+                    kind: FormattedValueKind::Number,
+                    value: Cow::Borrowed(formatted.as_str()),
+                    locale: Some(Cow::Owned(self.locale.to_string())),
+                    id: number.id.as_deref(),
+                    direction: None,
+                    fields,
+                });
+                return true;
+            }
+        }
         if let Value::Formatted(value) = value {
             sink.expression(value.text());
             return true;
@@ -740,6 +823,7 @@ fn plain_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Cow<'a, str> {
         Value::Int(v) => Cow::Owned(v.to_string()),
         Value::Float(v) => Cow::Owned(v.to_string()),
         Value::Str(v) => Cow::Borrowed(v.as_str()),
+        Value::Identified { value, .. } => plain_text(catalog, value),
         Value::String(v) => Cow::Borrowed(v.text()),
         Value::StrRef(id) => catalog
             .pool_string_opt(*id)
@@ -784,21 +868,40 @@ fn format_string(
     options: &EffectiveOptions<'_>,
 ) -> ResolvedString {
     let dir = options.get(BuiltinOptionKey::UDir);
+    if let Value::String(value) = value
+        && dir.as_deref() == Some("\0inherit")
+    {
+        // Compiler-generated default isolation preserves explicit direction
+        // and identity already established by a stored resolved string.
+        let mut resolved = value.clone();
+        if resolved.direction == StringDirection::Unspecified {
+            resolved.direction = StringDirection::Auto;
+        }
+        return resolved;
+    }
     let direction = match dir.as_deref() {
         None => StringDirection::Unspecified,
         Some("ltr") => StringDirection::Ltr,
         Some("rtl") => StringDirection::Rtl,
-        _ => StringDirection::Auto,
+        Some("auto" | "\0inherit") => StringDirection::Auto,
+        Some(_) => StringDirection::Unspecified,
     };
+    let id = options
+        .get(BuiltinOptionKey::UId)
+        .map(|value| value.into_owned().into_boxed_str());
     if let Value::Int(value) = value {
         let text = format_i64(*value);
-        return ResolvedString::from_integer(text.as_str(), *value, direction);
+        let mut resolved = ResolvedString::from_integer(text.as_str(), *value, direction);
+        resolved.id = id;
+        return resolved;
     }
     let text = plain_text(catalog, value);
-    match text {
+    let mut resolved = match text {
         Cow::Borrowed(text) => ResolvedString::from_borrowed(text, direction),
         Cow::Owned(text) => ResolvedString::from_owned(text, direction),
-    }
+    };
+    resolved.id = id;
+    resolved
 }
 
 fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
@@ -814,12 +917,16 @@ fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
     }
 }
 
-fn resolved_formatted(value: &Value, formatted: String) -> Value {
+fn resolved_formatted(value: &Value, formatted: String, kind: FormattedValueKind) -> Value {
     let source = match value {
         Value::Formatted(value) => value.source.clone(),
         value => value.clone(),
     };
-    Value::Formatted(Box::new(ResolvedFormatted::new(source, formatted)))
+    let value = match kind {
+        FormattedValueKind::String => ResolvedFormatted::new(source, formatted),
+        FormattedValueKind::Number => ResolvedFormatted::number(source, formatted),
+    };
+    Value::Formatted(Box::new(value))
 }
 
 fn resolve_number(
@@ -830,20 +937,23 @@ fn resolve_number(
     on_error: &mut dyn FnMut(MessageFunctionError),
 ) -> Result<ResolvedNumber, FormatError> {
     let value = numeric_source(value);
-    let (mut number, inherited_format, inherited_selection, inherited_select) = match value {
-        Value::Number(number) => (
-            number.value.clone(),
-            number.format,
-            number.selection,
-            number.has_explicit_select,
-        ),
-        _ => (
-            parse_number_value(value, catalog)?,
-            NumberFormatOptions::DEFAULT,
-            NumberSelection::None,
-            false,
-        ),
-    };
+    let (mut number, inherited_format, inherited_selection, inherited_select, inherited_id) =
+        match value {
+            Value::Number(number) => (
+                number.value.clone(),
+                number.format,
+                number.selection,
+                number.has_explicit_select,
+                number.id.clone(),
+            ),
+            _ => (
+                parse_number_value(value, catalog)?,
+                NumberFormatOptions::DEFAULT,
+                NumberSelection::None,
+                false,
+                None,
+            ),
+        };
     if integer_only {
         // Integer annotations intentionally discard precision inherited from a
         // preceding number annotation. The integer function itself emits no
@@ -891,49 +1001,69 @@ fn resolve_number(
             selection => selection,
         }
     };
-    Ok(ResolvedNumber::new(
-        number,
-        format,
-        selection,
-        has_explicit_select,
-    ))
+    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
+    resolved.id = options
+        .get(BuiltinOptionKey::UId)
+        .map(|value| value.into_owned().into_boxed_str())
+        .or(inherited_id);
+    Ok(resolved)
 }
 
-fn resolve_percent_selection(
+fn resolve_percent(
     value: &Value,
     catalog: &Catalog,
     options: &EffectiveOptions<'_>,
-) -> Result<ResolvedNumber, FormatError> {
+) -> Result<(ResolvedNumber, ResolvedNumber), FormatError> {
+    let retained_id = match value {
+        Value::Formatted(formatted) => formatted.id.clone(),
+        _ => None,
+    };
     let value = numeric_source(value);
-    let (number, inherited_format) = match value {
-        Value::Number(number) => (number.value.clone(), number.format),
+    let (number, inherited_format, inherited_id) = match value {
+        Value::Number(number) => (
+            number.value.clone(),
+            number.format,
+            retained_id.or_else(|| number.id.clone()),
+        ),
         _ => (
             parse_number_value(value, catalog)?,
             NumberFormatOptions::DEFAULT,
+            retained_id,
         ),
     };
     let text = match &number {
         NumberValue::Integer(value) => value.to_string(),
         NumberValue::Decimal(value) => value.to_string(),
-        NumberValue::NonFinite(_) => return Err(bad_operand()),
+        NumberValue::NonFinite(value) => value.to_string(),
     };
-    let scaled = parse_number_text(&multiply_decimal_by_100(&text)?)?;
+    let scaled = match &number {
+        NumberValue::NonFinite(value) => NumberValue::NonFinite(*value),
+        NumberValue::Integer(_) | NumberValue::Decimal(_) => {
+            parse_number_text(&multiply_decimal_by_100(&text)?)?
+        }
+    };
 
     // Percent selection applies number options after scaling. Unlike
     // `:number`, its fraction digit defaults are both zero.
     let inherited_format = NumberFormatOptions {
         minimum_fraction_digits: inherited_format.minimum_fraction_digits.or(Some(0)),
-        maximum_fraction_digits: inherited_format.maximum_fraction_digits.or(Some(0)),
+        maximum_fraction_digits: inherited_format.maximum_fraction_digits,
         minimum_integer_digits: None,
         ..inherited_format
     };
-    let format = resolve_number_format_options(inherited_format, options, false)?;
-    Ok(ResolvedNumber::new(
-        scaled,
-        format,
-        NumberSelection::Plural,
-        false,
-    ))
+    let mut format = resolve_number_format_options(inherited_format, options, false)?;
+    if format.maximum_fraction_digits.is_none() {
+        format.maximum_fraction_digits = format.minimum_fraction_digits;
+    }
+    let id = options
+        .get(BuiltinOptionKey::UId)
+        .map(|value| value.into_owned().into_boxed_str())
+        .or(inherited_id);
+    let mut source = ResolvedNumber::new(number, format, NumberSelection::Plural, false);
+    source.id.clone_from(&id);
+    let mut selection = ResolvedNumber::new(scaled, format, NumberSelection::Plural, false);
+    selection.id = id;
+    Ok((source, selection))
 }
 
 fn parse_number_value(value: &Value, catalog: &Catalog) -> Result<NumberValue, FormatError> {
@@ -1106,27 +1236,27 @@ fn parse_digit_option_or_inherited(
     Ok(inherited)
 }
 
-fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option<String> {
+fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> String {
     let format = number.format;
     if let NumberValue::NonFinite(value) = number.value {
-        return Some(format_signed_string(
+        return format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             value.to_string(),
-        ));
+        );
     }
     if format.notation_scientific {
-        return Some(format_signed_string(
+        return format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             format_scientific_text(&number.text()),
-        ));
+        );
     }
     let text = format_int_or_decimal_with_min_fraction_digits(
         number.text(),
@@ -1142,7 +1272,7 @@ fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option
         text,
     );
     let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
-    Some(apply_grouping_strategy(
+    apply_grouping_strategy(
         text,
         match format.grouping {
             NumberGrouping::Auto => BuiltinGrouping::Auto,
@@ -1150,7 +1280,7 @@ fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> Option
             NumberGrouping::Never => BuiltinGrouping::Never,
             NumberGrouping::Min2 => BuiltinGrouping::Min2,
         },
-    ))
+    )
 }
 
 fn format_scientific_text(value: &str) -> String {
@@ -1291,6 +1421,7 @@ fn category_name(category: PluralCategory) -> &'static str {
 fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
     Some(match value {
         "u:dir" => BuiltinOptionKey::UDir,
+        "u:id" => BuiltinOptionKey::UId,
         "minimumFractionDigits" => BuiltinOptionKey::MinimumFractionDigits,
         "maximumFractionDigits" => BuiltinOptionKey::MaximumFractionDigits,
         "signDisplay" => BuiltinOptionKey::SignDisplay,
@@ -1323,7 +1454,11 @@ fn validate_builtin_option_values(
     func: BuiltinFn,
     options: &EffectiveOptions<'_>,
 ) -> Result<(), FormatError> {
-    validate_enum_option(options, BuiltinOptionKey::UDir, &["ltr", "rtl", "auto"])?;
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::UDir,
+        &["ltr", "rtl", "auto", "\0inherit"],
+    )?;
     match func {
         BuiltinFn::Number | BuiltinFn::Integer => {}
         BuiltinFn::Date => {

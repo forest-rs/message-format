@@ -103,6 +103,8 @@ pub enum Opcode {
     MarkupOpen = 0x50,
     /// Markup close tag with name and options.
     MarkupClose = 0x51,
+    /// Self-closing markup tag with name and options.
+    MarkupStandalone = 0x52,
 }
 
 impl Opcode {
@@ -133,7 +135,7 @@ impl Opcode {
             Self::CallSelect => 5,
             Self::ProjectSelect => 3,
             Self::MarkupOpen => 6,
-            Self::MarkupClose => 6,
+            Self::MarkupClose | Self::MarkupStandalone => 6,
         }
     }
 }
@@ -171,6 +173,7 @@ impl TryFrom<u8> for Opcode {
             0x43 => Ok(Self::ProjectSelect),
             0x50 => Ok(Self::MarkupOpen),
             0x51 => Ok(Self::MarkupClose),
+            0x52 => Ok(Self::MarkupStandalone),
             other => Err(other),
         }
     }

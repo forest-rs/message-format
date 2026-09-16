@@ -1005,6 +1005,7 @@ fn collect_builtin_part_errors(parts: &[Part], message: &Message, errors: &mut V
             }
             Part::MarkupOpen { .. }
             | Part::MarkupClose { .. }
+            | Part::MarkupStandalone { .. }
             | Part::Text(_)
             | Part::Literal(_)
             | Part::Var(_)
@@ -1038,6 +1039,9 @@ fn collect_builtin_function_errors(
         let FunctionOptionValue::Literal(found) = &option.value else {
             continue;
         };
+        if func.name == "string" && option.key == "u:dir" && found == "\0inherit" {
+            continue;
+        }
         if value.iter().any(|candidate| candidate == found) {
             continue;
         }
@@ -1168,7 +1172,9 @@ fn collect_manifest_part_errors(
             | Part::Var(_)
             | Part::Local(_)
             | Part::CheckSelector(_) => {}
-            Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
+            Part::MarkupOpen { name, options }
+            | Part::MarkupClose { name, options }
+            | Part::MarkupStandalone { name, options } => {
                 collect_markup_manifest_errors_into(name, options, manifest, message, errors);
             }
         }

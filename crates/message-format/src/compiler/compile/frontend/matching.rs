@@ -396,7 +396,7 @@ pub(super) fn builtin_selector_accepts_variant_key(selector: &SelectorExpr, key:
 fn builtin_numeric_selector_mode_for_func(
     func: &FunctionSpec,
 ) -> Option<BuiltinNumericSelectorMode> {
-    if func.name == "offset" {
+    if matches!(func.name.as_str(), "offset" | "percent") {
         return Some(BuiltinNumericSelectorMode::Plural);
     }
     if !matches!(func.name.as_str(), "number" | "integer") {
@@ -451,7 +451,7 @@ struct NumericSelectorLoweringPlan {
 fn numeric_selector_lowering_plan(selector: &SelectorExpr) -> Option<NumericSelectorLoweringPlan> {
     match selector {
         SelectorExpr::Call { operand, func }
-            if matches!(func.name.as_str(), "number" | "integer") =>
+            if matches!(func.name.as_str(), "number" | "integer" | "percent") =>
         {
             match builtin_numeric_selector_mode_for_func(func)? {
                 BuiltinNumericSelectorMode::Exact => None,

@@ -64,18 +64,6 @@ pub(super) fn lower_pattern_node_to_parts(
                     plan,
                     None,
                 )?;
-                // Self-closing markup: emit open + close in sequence.
-                if is_self_close_markup(expr)
-                    && let Part::MarkupOpen { ref name, .. } = part
-                {
-                    let close_name = name.clone();
-                    parts.push(part);
-                    parts.push(Part::MarkupClose {
-                        name: close_name,
-                        options: Vec::new(),
-                    });
-                    continue;
-                }
                 parts.push(part);
             }
         }
@@ -206,7 +194,7 @@ fn lower_expression_payload_node_to_part(
             if context.default_bidi_isolation {
                 let mut call = CallExpr {
                     operand: Operand::Var(var),
-                    func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
+                    func: FunctionSpec::new("string").option_literal("u:dir", "\0inherit"),
                     fallback: None,
                 };
                 resolve_call(&mut call, plan, excluded);
@@ -270,7 +258,7 @@ fn lower_expression_payload_node_to_part(
                     name: canonicalize_identifier(markup.identifier),
                     options,
                 }),
-                crate::compiler::syntax::ast::MarkupKind::SelfClose => Ok(Part::MarkupOpen {
+                crate::compiler::syntax::ast::MarkupKind::SelfClose => Ok(Part::MarkupStandalone {
                     name: canonicalize_identifier(markup.identifier),
                     options,
                 }),
@@ -304,7 +292,7 @@ fn lower_expression_payload_node_to_part(
             if context.default_bidi_isolation {
                 return Ok(Part::Call(CallExpr {
                     operand: lower_literal_expression_operand(&literal.value_span, value, source),
-                    func: FunctionSpec::new("string").option_literal("u:dir", "auto"),
+                    func: FunctionSpec::new("string").option_literal("u:dir", "\0inherit"),
                     fallback: None,
                 }));
             }
@@ -423,7 +411,8 @@ fn apply_default_bidi_direction(func: &mut FunctionSpec, context: ExpressionLowe
         && func.name == "string"
         && !func.options.iter().any(|option| option.key == "u:dir")
     {
-        func.options.push(FunctionOption::literal("u:dir", "auto"));
+        func.options
+            .push(FunctionOption::literal("u:dir", "\0inherit"));
     }
 }
 
@@ -466,14 +455,6 @@ fn classify_operand_literal_kind(
     } else {
         OperandLiteralKind::String
     }
-}
-
-fn is_self_close_markup(expr: &crate::compiler::syntax::ast::ExpressionNode<'_>) -> bool {
-    matches!(
-        &expr.payload,
-        Some(crate::compiler::syntax::ast::ExpressionPayloadNode::Markup(m))
-            if m.kind == crate::compiler::syntax::ast::MarkupKind::SelfClose
-    )
 }
 
 fn lower_markup_options(

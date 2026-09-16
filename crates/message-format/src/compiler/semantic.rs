@@ -207,6 +207,13 @@ pub enum Part {
         /// Markup options (key-value pairs).
         options: Vec<FunctionOption>,
     },
+    /// Self-closing markup tag, e.g. `{#break/}`.
+    MarkupStandalone {
+        /// Tag name.
+        name: String,
+        /// Markup options (key-value pairs).
+        options: Vec<FunctionOption>,
+    },
 }
 
 impl Part {
@@ -253,6 +260,18 @@ impl Part {
     #[must_use]
     pub fn markup_close(name: impl Into<String>, options: impl Into<Vec<FunctionOption>>) -> Self {
         Self::MarkupClose {
+            name: name.into(),
+            options: options.into(),
+        }
+    }
+
+    /// Construct one standalone markup part.
+    #[must_use]
+    pub fn markup_standalone(
+        name: impl Into<String>,
+        options: impl Into<Vec<FunctionOption>>,
+    ) -> Self {
+        Self::MarkupStandalone {
             name: name.into(),
             options: options.into(),
         }

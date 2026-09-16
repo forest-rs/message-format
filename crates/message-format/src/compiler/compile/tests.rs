@@ -100,6 +100,37 @@ impl crate::runtime::FormatSink for MarkupOptionSink {
     fn markup_close(&mut self, _name: &str, _options: &[crate::runtime::FormatOption<'_>]) {}
 }
 
+#[derive(Default)]
+struct UniversalIdSink {
+    output: String,
+    ids: Vec<String>,
+}
+
+impl crate::runtime::FormatSink for UniversalIdSink {
+    fn wants_structured_output(&self) -> bool {
+        true
+    }
+
+    fn literal(&mut self, value: &str) {
+        self.output.push_str(value);
+    }
+
+    fn expression(&mut self, value: &str) {
+        self.output.push_str(value);
+    }
+
+    fn markup_open(&mut self, _name: &str, _options: &[crate::runtime::FormatOption<'_>]) {}
+
+    fn markup_close(&mut self, _name: &str, _options: &[crate::runtime::FormatOption<'_>]) {}
+
+    fn formatted_value(&mut self, value: &crate::runtime::FormattedValue<'_>) {
+        self.output.push_str(&value.value);
+        if let Some(id) = value.id {
+            self.ids.push(id.to_string());
+        }
+    }
+}
+
 #[test]
 fn bare_interpolation_lowers_to_out_arg() {
     let bytes = compile_str("Hello { $name }!").expect("compiled");
@@ -379,6 +410,7 @@ fn string_input_diagnostic_precedes_later_declaration_diagnostic() {
         vec![
             crate::runtime::FormatError::MissingArg("x".to_string()),
             crate::runtime::FormatError::MissingArg("missing".to_string()),
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
         ]
     );
 }
@@ -2616,6 +2648,198 @@ fn function_fallback_reannotation_reports_cascading_bad_operand() {
     );
 }
 
+#[test]
+fn universal_id_is_retained_for_custom_host_results() {
+    let bytes = compile_str("{foo :custom u:id=first}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = HostFn(|_fn_id, _args, _opts| Ok(Value::Str("result".to_string())));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut sink = UniversalIdSink::default();
+    formatter
+        .format_to(message, &[], &mut sink, None)
+        .expect("formatted");
+    assert_eq!(sink.output, "result");
+    assert_eq!(sink.ids, ["first"]);
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn delegated_builtin_values_preserve_structured_metadata_and_text() {
+    struct CallOnlyBuiltinHost(BuiltinHost);
+
+    impl Host for CallOnlyBuiltinHost {
+        type CatalogIndex = crate::runtime::BuiltinHostCatalogIndex;
+
+        fn index(
+            &mut self,
+            catalog: &Catalog,
+        ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+            self.0.index(catalog)
+        }
+
+        fn call(
+            &mut self,
+            catalog: &Catalog,
+            index: &Self::CatalogIndex,
+            fn_id: u16,
+            args: &[Value],
+            opts: FunctionOptions<'_>,
+            on_error: &mut dyn FnMut(MessageFunctionError),
+        ) -> Result<Value, HostCallError> {
+            self.0.call(catalog, index, fn_id, args, opts, on_error)
+        }
+    }
+
+    let bytes = compile_str("{42 :number u:id=first}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = CallOnlyBuiltinHost(BuiltinHost::new(&locale).expect("host"));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut sink = UniversalIdSink::default();
+
+    formatter
+        .format_to(message, &[], &mut sink, None)
+        .expect("formatted");
+
+    assert_eq!(sink.output, "42");
+    assert_eq!(sink.ids, ["first"]);
+
+    let bytes = compile_str("{world :string u:dir=rtl u:id=first}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = CallOnlyBuiltinHost(BuiltinHost::new(&locale).expect("host"));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut plain = String::new();
+    formatter
+        .format_to(message, &[], &mut plain, None)
+        .expect("formatted");
+    let mut structured = UniversalIdSink::default();
+    formatter
+        .format_to(message, &[], &mut structured, None)
+        .expect("formatted");
+
+    assert_eq!(plain, "\u{2067}world\u{2069}");
+    assert_eq!(structured.output, plain);
+    assert_eq!(structured.ids, ["first"]);
+}
+
+#[test]
+fn universal_id_does_not_change_custom_host_selection() {
+    let source = ".local $x={foo :custom u:id=first} .match $x a {{MATCH}} * {{OTHER}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = HostFn(|_fn_id, args: &[Value], _opts| match args.first() {
+        Some(Value::StrRef(_)) => Ok(Value::Str("a".to_string())),
+        Some(Value::Str(value)) => Ok(Value::Str(value.clone())),
+        _ => Err(HostCallError::Function(MessageFunctionError::BadOperand)),
+    });
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+
+    for structured in [false, true] {
+        let mut diagnostics = Vec::new();
+        if structured {
+            let mut sink = UniversalIdSink::default();
+            formatter
+                .format_to(message, &[], &mut sink, Some(&mut diagnostics))
+                .expect("formatted");
+            assert_eq!(sink.output, "MATCH");
+        } else {
+            let mut output = String::new();
+            formatter
+                .format_to(message, &[], &mut output, Some(&mut diagnostics))
+                .expect("formatted");
+            assert_eq!(output, "MATCH");
+        }
+        assert!(diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn optionless_string_reannotation_retains_inherited_universal_id() {
+    let source = ".local $x={foo :custom u:id=first} {{{$x :string}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = HostFn(|_fn_id, _args, _opts| Ok(Value::Str("result".to_string())));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut sink = UniversalIdSink::default();
+
+    formatter
+        .format_to(message, &[], &mut sink, None)
+        .expect("formatted");
+
+    assert_eq!(sink.output, "result");
+    assert_eq!(sink.ids, ["first"]);
+}
+
+#[test]
+fn universal_id_does_not_change_dynamic_option_values_seen_by_custom_hosts() {
+    let source = ".local $o={a :custom u:id=opt} {{{a :custom option=$o}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = HostFn(|_fn_id, _args: &[Value], opts: FunctionOptions<'_>| {
+        let options = opts.iter().collect::<Vec<_>>();
+        if options.is_empty() {
+            return Ok(Value::Str("a".to_string()));
+        }
+        if matches!(options.first(), Some((_, Value::Str(_)))) {
+            Ok(Value::Str("OK".to_string()))
+        } else {
+            Err(HostCallError::Function(MessageFunctionError::BadOption))
+        }
+    });
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+
+    for structured in [false, true] {
+        let mut diagnostics = Vec::new();
+        if structured {
+            let mut sink = UniversalIdSink::default();
+            formatter
+                .format_to(message, &[], &mut sink, Some(&mut diagnostics))
+                .expect("formatted");
+            assert_eq!(sink.output, "OK");
+        } else {
+            let mut output = String::new();
+            formatter
+                .format_to(message, &[], &mut output, Some(&mut diagnostics))
+                .expect("formatted");
+            assert_eq!(output, "OK");
+        }
+        assert!(diagnostics.is_empty());
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn optionless_string_reannotation_reports_cascading_bad_operand() {
+    let source = ".local $var = {|val| :test:undefined} {{{$var :string}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &[], &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "{$var}");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::UnknownFunction { fn_id: 0 },
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
+        ]
+    );
+}
+
 #[cfg(feature = "icu4x")]
 #[test]
 fn function_options_allow_grammar_whitespace_around_equals() {
@@ -3345,6 +3569,93 @@ fn raw_match_with_percent_input_selects_the_scaled_plural_category() {
 
 #[cfg(feature = "icu4x")]
 #[test]
+fn stored_percent_retains_scaled_exact_value_and_dynamic_precision() {
+    for (source, args, expected) in [
+        (
+            ".local $pct = {1 :percent} .match $pct 1 {{one}} 100 {{hundred}} * {{other}}",
+            Vec::new(),
+            "hundred",
+        ),
+        (
+            ".input {$n :percent minimumFractionDigits=$digits maximumFractionDigits=$digits} .match $n one {{one}} * {{other}}",
+            vec![("n", Value::Float(0.01)), ("digits", Value::Int(2))],
+            "other",
+        ),
+    ] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+        let args = args
+            .into_iter()
+            .map(|(name, value)| arg(&catalog, name, value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &args)
+                .expect("formatted"),
+            expected
+        );
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn stored_percent_string_reannotation_uses_formatted_presentation() {
+    let bytes = compile_str(".local $pct = {0.01 :percent} {{{$pct :string}}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &[])
+            .expect("formatted"),
+        "1%"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn percent_reannotation_inherits_resolved_precision_for_output() {
+    let source =
+        ".local $p={0.01 :percent minimumFractionDigits=4} {{{$p}|{$p :percent}|{$p :number}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &[])
+            .expect("formatted"),
+        "1.0000%|1.0000%|0.0100"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn percent_reannotation_inherits_resolved_precision_for_selection() {
+    let source = ".local $p={0.01 :percent minimumFractionDigits=$digits} .local $q={$p :percent} .match $q one {{one}} other {{other}} * {{fallback}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = [arg(&catalog, "digits", Value::Int(2))];
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "other"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
 fn raw_match_rechecks_each_source_local_selector_once() {
     let source =
         ".input {$n :number} .match $n $n 1 1 {{exact}} one one {{category}} * * {{fallback}}";
@@ -3364,6 +3675,7 @@ fn raw_match_rechecks_each_source_local_selector_once() {
         diagnostics,
         vec![
             crate::runtime::FormatError::MissingArg("n".to_string()),
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
             crate::runtime::FormatError::BadSelector { source: None },
             crate::runtime::FormatError::BadSelector { source: None },
         ]

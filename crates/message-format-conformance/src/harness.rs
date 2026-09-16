@@ -9,7 +9,10 @@ use crate::runtime_helpers;
 use message_format::{
     Locale,
     compiler::{CompileError, CompileOptions, compile, compile_str},
-    runtime::{Catalog, FormatError, Formatter, HostFn, MessageFunctionError, NoopHost, Value},
+    runtime::{
+        Catalog, FormatDirection, FormatError, FormatOption, FormatSink, FormattedValue,
+        FormattedValueKind, Formatter, HostFn, MarkupKind, MessageFunctionError, NoopHost, Value,
+    },
 };
 use serde::Deserialize;
 
@@ -453,9 +456,6 @@ pub fn default_wg_root() -> std::path::PathBuf {
 }
 
 fn run_wg_test_result(test: &WgTest) -> (bool, String) {
-    if test.exp_parts.is_some() {
-        return (false, "unsupported-expectation:expParts".to_string());
-    }
     let compile_options = CompileOptions {
         default_bidi_isolation: test.bidi_isolation.as_deref().unwrap_or("none") == "default",
         ..CompileOptions::default()
@@ -496,6 +496,48 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
             } else {
                 test.src.split('=').next().map_or("main", str::trim)
             };
+            if test.exp_parts.is_some() {
+                let message = match formatter.resolve(message_id) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        let actual = map_format_errors(&error);
+                        return finish_wg_test(
+                            test,
+                            None,
+                            None,
+                            &actual,
+                            format!("err:{actual:?}"),
+                        );
+                    }
+                };
+                let mut sink = WgPartsSink::default();
+                let mut errors = Vec::new();
+                match formatter.format_to(message, &args, &mut sink, Some(&mut errors)) {
+                    Ok(()) => {
+                        let actual = errors
+                            .iter()
+                            .flat_map(map_format_errors)
+                            .collect::<Vec<_>>();
+                        return finish_wg_test(
+                            test,
+                            Some(&sink.output),
+                            Some(&serde_json::Value::Array(sink.parts)),
+                            &actual,
+                            "ok".to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        let actual = map_format_errors(&error);
+                        return finish_wg_test(
+                            test,
+                            None,
+                            None,
+                            &actual,
+                            format!("err:{actual:?}"),
+                        );
+                    }
+                }
+            }
             match runtime_helpers::format_with_diagnostics_by_id(&mut formatter, message_id, &args)
             {
                 Ok(output) => {
@@ -504,17 +546,17 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
                         .iter()
                         .flat_map(map_format_errors)
                         .collect::<Vec<_>>();
-                    finish_wg_test(test, Some(&output.value), &actual, "ok".to_string())
+                    finish_wg_test(test, Some(&output.value), None, &actual, "ok".to_string())
                 }
                 Err(err) => {
                     let actual = map_format_errors(&err);
-                    finish_wg_test(test, None, &actual, format!("err:{actual:?}"))
+                    finish_wg_test(test, None, None, &actual, format!("err:{actual:?}"))
                 }
             }
         }
         Err(err) => {
             let actual = [map_compile_error(&err)];
-            finish_wg_test(test, None, &actual, format!("err:{actual:?}"))
+            finish_wg_test(test, None, None, &actual, format!("err:{actual:?}"))
         }
     }
 }
@@ -522,6 +564,7 @@ fn run_wg_test_result(test: &WgTest) -> (bool, String) {
 fn finish_wg_test(
     test: &WgTest,
     output: Option<&str>,
+    parts: Option<&serde_json::Value>,
     actual_errors: &[&'static str],
     detail: String,
 ) -> (bool, String) {
@@ -530,6 +573,10 @@ fn finish_wg_test(
         .as_deref()
         .is_none_or(|expected| Some(expected) == output);
     let errors_ok = expected_errors_match(test.exp_errors.as_deref(), actual_errors);
+    let parts_ok = test
+        .exp_parts
+        .as_ref()
+        .is_none_or(|expected| parts.is_some_and(|actual| json_contains(actual, expected)));
     let expected = test
         .exp_errors
         .as_deref()
@@ -538,11 +585,172 @@ fn finish_wg_test(
         .map(|error| error.error_type.as_str())
         .collect::<Vec<_>>();
     (
-        output_ok && errors_ok,
+        output_ok && errors_ok && parts_ok,
         format!(
-            "{detail} output={output:?} actual_errors={actual_errors:?} expected_errors={expected:?}"
+            "{detail} output={output:?} parts={parts:?} actual_errors={actual_errors:?} expected_errors={expected:?}"
         ),
     )
+}
+
+fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match (actual, expected) {
+        (serde_json::Value::Object(actual), serde_json::Value::Object(expected)) => {
+            expected.iter().all(|(key, value)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual| json_contains(actual, value))
+            })
+        }
+        (serde_json::Value::Array(actual), serde_json::Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| json_contains(actual, expected))
+        }
+        _ => actual == expected,
+    }
+}
+
+#[derive(Default)]
+struct WgPartsSink {
+    output: String,
+    parts: Vec<serde_json::Value>,
+}
+
+impl FormatSink for WgPartsSink {
+    fn wants_structured_output(&self) -> bool {
+        true
+    }
+
+    fn literal(&mut self, value: &str) {
+        self.output.push_str(value);
+        self.parts
+            .push(serde_json::json!({ "type": "text", "value": value }));
+    }
+
+    fn expression(&mut self, value: &str) {
+        self.output.push_str(value);
+        self.parts
+            .push(serde_json::json!({ "type": "string", "value": value }));
+    }
+
+    fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]) {
+        self.markup(MarkupKind::Open, name, None, options);
+    }
+
+    fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]) {
+        self.markup(MarkupKind::Close, name, None, options);
+    }
+
+    fn formatted_value(&mut self, value: &FormattedValue<'_>) {
+        self.output.push_str(&value.value);
+        let mut part = serde_json::Map::new();
+        part.insert(
+            "type".to_string(),
+            serde_json::Value::String(
+                match value.kind {
+                    FormattedValueKind::String => "string",
+                    FormattedValueKind::Number => "number",
+                }
+                .to_string(),
+            ),
+        );
+        part.insert(
+            "value".to_string(),
+            serde_json::Value::String(value.value.to_string()),
+        );
+        if let Some(locale) = &value.locale {
+            part.insert(
+                "locale".to_string(),
+                serde_json::Value::String(locale.to_string()),
+            );
+        }
+        if let Some(id) = value.id {
+            part.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        if let Some(direction) = value.direction {
+            let direction = match direction {
+                FormatDirection::LeftToRight => "ltr",
+                FormatDirection::RightToLeft => "rtl",
+            };
+            part.insert(
+                "dir".to_string(),
+                serde_json::Value::String(direction.to_string()),
+            );
+        }
+        if !value.fields.is_empty() {
+            part.insert(
+                "parts".to_string(),
+                serde_json::Value::Array(
+                    value
+                        .fields
+                        .iter()
+                        .map(
+                            |field| serde_json::json!({ "type": field.kind, "value": field.value }),
+                        )
+                        .collect(),
+                ),
+            );
+        }
+        self.parts.push(serde_json::Value::Object(part));
+    }
+
+    fn bidi_isolation(&mut self, value: &str) {
+        self.output.push_str(value);
+        self.parts
+            .push(serde_json::json!({ "type": "bidiIsolation", "value": value }));
+    }
+
+    fn fallback(&mut self, source: &str, rendered: &str) {
+        self.output.push_str(rendered);
+        self.parts
+            .push(serde_json::json!({ "type": "fallback", "source": source }));
+    }
+
+    fn markup(
+        &mut self,
+        kind: MarkupKind,
+        name: &str,
+        id: Option<&str>,
+        options: &[FormatOption<'_>],
+    ) {
+        let mut part = serde_json::Map::new();
+        part.insert(
+            "type".to_string(),
+            serde_json::Value::String("markup".to_string()),
+        );
+        let kind = match kind {
+            MarkupKind::Open => "open",
+            MarkupKind::Close => "close",
+            MarkupKind::Standalone => "standalone",
+        };
+        part.insert(
+            "kind".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
+        part.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+        if let Some(id) = id {
+            part.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        if !options.is_empty() {
+            let options = options
+                .iter()
+                .filter(|option| option.key != "u:id")
+                .map(|option| {
+                    (
+                        option.key.to_string(),
+                        serde_json::Value::String(option.value.to_string()),
+                    )
+                })
+                .collect();
+            part.insert("options".to_string(), serde_json::Value::Object(options));
+        }
+        self.parts.push(serde_json::Value::Object(part));
+    }
 }
 fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, Value)>, String> {
     params
@@ -915,17 +1123,16 @@ mod tests {
     }
 
     #[test]
-    fn suite_defaults_reject_inherited_unsupported_expectations() {
+    fn suite_defaults_apply_inherited_parts_expectations() {
         let defaults = WgTestDefaults {
             exp_parts: Some(serde_json::json!([])),
             ..WgTestDefaults::default()
         };
         let mut test = test_case("hello", Some("hello"), Some(&[]));
         apply_suite_defaults(&mut test, &defaults);
-        assert_eq!(
-            run_wg_test_result(&test),
-            (false, "unsupported-expectation:expParts".to_string())
-        );
+        let (passed, detail) = run_wg_test_result(&test);
+        assert!(!passed);
+        assert!(!detail.contains("unsupported-expectation"));
     }
 
     #[test]
@@ -967,14 +1174,87 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_parts_expectation_cannot_silently_pass() {
+    fn parts_expectation_is_compared_to_structured_output() {
         let test: WgTest =
             serde_json::from_str(r#"{"src":"{#tag}","exp":"","expParts":[{"type":"markup"}]}"#)
                 .expect("json");
+        assert!(run_wg_test_result(&test).0);
+    }
+
+    #[test]
+    fn number_parts_retain_the_universal_id() {
+        for source in [
+            "{42 :number u:id=first}",
+            "{0.42 :percent u:id=first}",
+            "{42 :currency currency=USD u:id=first}",
+        ] {
+            let test = WgTest {
+                src: source.to_string(),
+                exp: None,
+                exp_errors: Some(Vec::new()),
+                exp_parts: Some(serde_json::json!([{"type":"number","id":"first"}])),
+                params: None,
+                bidi_isolation: None,
+                locale: None,
+            };
+            let result = run_wg_test_result(&test);
+            assert!(result.0, "source={source}: {}", result.1);
+        }
+    }
+
+    #[test]
+    fn datetime_parts_retain_the_universal_id() {
+        let test = WgTest {
+            src: "{|2026-01-01| :date u:id=first}".to_string(),
+            exp: None,
+            exp_errors: Some(Vec::new()),
+            exp_parts: Some(serde_json::json!([{"type":"string","id":"first"}])),
+            params: None,
+            bidi_isolation: None,
+            locale: None,
+        };
         let result = run_wg_test_result(&test);
-        assert_eq!(
-            result,
-            (false, "unsupported-expectation:expParts".to_string())
-        );
+        assert!(result.0, "{}", result.1);
+    }
+
+    #[test]
+    fn percent_reannotation_retains_the_universal_id() {
+        let test = WgTest {
+            src: ".local $x = {0.01 :number u:id=first} {{{$x :percent}}}".to_string(),
+            exp: None,
+            exp_errors: Some(Vec::new()),
+            exp_parts: Some(serde_json::json!([{"type":"number","id":"first"}])),
+            params: None,
+            bidi_isolation: None,
+            locale: None,
+        };
+        let result = run_wg_test_result(&test);
+        assert!(result.0, "{}", result.1);
+    }
+
+    #[test]
+    fn default_bidi_inherits_stored_direction_but_explicit_auto_overrides_it() {
+        for (source, expected) in [
+            (
+                ".local $s = {world :string} {{hello {$s}}}",
+                "hello \u{2068}world\u{2069}",
+            ),
+            (
+                ".local $s = {world :string u:dir=rtl} {{hello {$s :string u:dir=auto}}}",
+                "hello \u{2068}world\u{2069}",
+            ),
+        ] {
+            let test = WgTest {
+                src: source.to_string(),
+                exp: Some(expected.to_string()),
+                exp_errors: Some(Vec::new()),
+                exp_parts: None,
+                params: None,
+                bidi_isolation: Some("default".to_string()),
+                locale: None,
+            };
+            let result = run_wg_test_result(&test);
+            assert!(result.0, "source={source}: {}", result.1);
+        }
     }
 }

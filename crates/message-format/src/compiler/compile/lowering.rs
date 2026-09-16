@@ -218,24 +218,20 @@ fn lower_parts_inner<'a>(
                 emit_call(call, string_map, func_map, code)?;
                 code.push(schema::Opcode::OutVal as u8);
             }
-            Part::MarkupOpen { name, options } => {
+            Part::MarkupOpen { name, options }
+            | Part::MarkupClose { name, options }
+            | Part::MarkupStandalone { name, options } => {
                 emit_markup_options(options, string_map, code)?;
                 let name_str_id = *string_map
                     .get(name)
                     .ok_or(CompileError::internal("missing interned markup name"))?;
-                code.push(schema::Opcode::MarkupOpen as u8);
-                code.extend_from_slice(&name_str_id.to_le_bytes());
-                code.push(
-                    u8::try_from(options.len())
-                        .map_err(|_| CompileError::size_overflow("option count"))?,
-                );
-            }
-            Part::MarkupClose { name, options } => {
-                emit_markup_options(options, string_map, code)?;
-                let name_str_id = *string_map
-                    .get(name)
-                    .ok_or(CompileError::internal("missing interned markup name"))?;
-                code.push(schema::Opcode::MarkupClose as u8);
+                let opcode = match part {
+                    Part::MarkupOpen { .. } => schema::Opcode::MarkupOpen,
+                    Part::MarkupClose { .. } => schema::Opcode::MarkupClose,
+                    Part::MarkupStandalone { .. } => schema::Opcode::MarkupStandalone,
+                    _ => unreachable!("combined markup arm only matches markup"),
+                };
+                code.push(opcode as u8);
                 code.extend_from_slice(&name_str_id.to_le_bytes());
                 code.push(
                     u8::try_from(options.len())
@@ -297,7 +293,8 @@ fn emit_value_part(
         | Part::Text(_)
         | Part::Select(_)
         | Part::MarkupOpen { .. }
-        | Part::MarkupClose { .. } => {
+        | Part::MarkupClose { .. }
+        | Part::MarkupStandalone { .. } => {
             return Err(CompileError::internal("non-scalar declaration expression"));
         }
     }

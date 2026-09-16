@@ -420,8 +420,14 @@ fn number_style_percent() {
 #[test]
 fn stored_decimal_percent_shifts_the_decimal_point() {
     for (source, expected) in [
-        (".local $x = {0.123 :number} {{{$x :percent}}}", "12.3%"),
-        (".local $x = {-0.123 :number} {{{$x :percent}}}", "-12.3%"),
+        (
+            ".local $x = {0.123 :number} {{{$x :percent maximumFractionDigits=3}}}",
+            "12.3%",
+        ),
+        (
+            ".local $x = {-0.123 :number} {{{$x :percent maximumFractionDigits=3}}}",
+            "-12.3%",
+        ),
         (
             ".local $x = {1.234 :number} {{{$x :number style=percent}}}",
             "123.4%",

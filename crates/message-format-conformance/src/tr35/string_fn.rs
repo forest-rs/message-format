@@ -3,7 +3,7 @@
 
 use super::helpers::*;
 use message_format::compiler::CompileOptions;
-use message_format::runtime::{FormatError, Value};
+use message_format::runtime::{FormatError, MessageFunctionError, Value};
 
 // ---------------------------------------------------------------------------
 // TR35 §13 — :string function
@@ -152,7 +152,7 @@ fn string_numeric_chain_remains_eager_before_selection() {
     assert!(is_bad_operand(&output.errors[0]));
 }
 
-/// A missing string input remains a recoverable missing-argument error.
+/// Reannotating a missing string input reports the numeric operand failure.
 #[test]
 fn missing_string_input_reannotation_errors() {
     let output = format_output(
@@ -160,7 +160,13 @@ fn missing_string_input_reannotation_errors() {
         &[],
     );
     assert_eq!(output.value, "value={$y}");
-    assert_errors_multiset(&output.errors, &[FormatError::MissingArg("x".to_string())]);
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            FormatError::MissingArg("x".to_string()),
+            function_error(MessageFunctionError::BadOperand),
+        ],
+    );
 }
 
 /// Inlining does not duplicate a non-elidable local string declaration.
@@ -173,7 +179,10 @@ fn local_string_numeric_chain_reports_missing_input_once() {
     assert_eq!(output.value, "value={$n}");
     assert_errors_multiset(
         &output.errors,
-        &[FormatError::MissingArg("raw".to_string())],
+        &[
+            FormatError::MissingArg("raw".to_string()),
+            function_error(MessageFunctionError::BadOperand),
+        ],
     );
 }
 
