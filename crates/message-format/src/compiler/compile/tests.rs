@@ -1575,7 +1575,7 @@ fn compile_str_rejects_invalid_builtin_number_style_literal() {
         } => {
             assert_eq!(function, "number");
             assert_eq!(option, "style");
-            assert_eq!(expected, "\"percent\"");
+            assert_eq!(expected, "\"decimal\" or \"percent\"");
             assert_eq!(found, "curren");
         }
         other => panic!("unexpected error: {other:?}"),
@@ -1818,7 +1818,7 @@ fn resource_backed_builtin_option_error_does_not_duplicate_inner_context() {
     ));
     assert!(rendered.contains("error: invalid builtin option value"));
     assert!(rendered.contains("{ $amount :number style=currenc }"));
-    assert!(rendered.contains("expected \"percent\", found currenc"));
+    assert!(rendered.contains("expected \"decimal\" or \"percent\", found currenc"));
     assert!(!rendered.contains("at source#"));
 }
 
