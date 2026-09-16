@@ -13,6 +13,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = "Conformance harness crate for message-format test vectors."]
 
+/// Stable observations used to compare independent MF2 implementations.
+pub mod differential;
 /// Conformance fixture harness.
 pub mod harness;
 
