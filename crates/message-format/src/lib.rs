@@ -474,24 +474,35 @@ mod tests {
     #[cfg(all(feature = "compile", feature = "icu4x"))]
     #[test]
     fn formatter_host_locale_independent_of_catalog() {
-        // Compile a catalog with a bare expression (no :number annotation).
-        // Float values go through BuiltinHost::format_default which is
-        // locale-sensitive.
+        // Bare numeric expressions use the formatter host's locale even
+        // though the catalog itself has no locale.
         let catalog = Catalog::compile_str("{ $n }").expect("compile");
 
-        // Create a formatter with host locale "fr" (French formatting uses
-        // comma as decimal separator) — the catalog itself has no locale.
         let candidates = locale_candidates(&locale("fr"));
         let mut formatter =
             MessageFormatter::new(core::iter::once(&catalog), &candidates).expect("formatter");
 
         let mut args = MessageArgs::new();
-        args.insert("n", 123.5);
+        args.insert("n", 1_000_000.5);
 
         let result = formatter.format_by_id("main", &args).expect("format");
 
-        // French replaces '.' with ',' → "123,5".
-        // English would produce "123.5" (period decimal).
-        assert_eq!(result, "123,5");
+        assert_eq!(result, "1\u{202f}000\u{202f}000,5");
+    }
+
+    #[cfg(all(feature = "compile", feature = "icu4x"))]
+    #[test]
+    fn bare_integer_interpolation_uses_locale_grouping() {
+        let catalog = Catalog::compile_str("{ $n }").expect("compile");
+        let mut formatter = catalog
+            .formatter_for_locale(&locale("en-US"))
+            .expect("formatter");
+        let mut args = MessageArgs::new();
+        args.insert("n", 1_000_i64);
+
+        assert_eq!(
+            formatter.format_by_id("main", &args).expect("format"),
+            "1,000"
+        );
     }
 }
