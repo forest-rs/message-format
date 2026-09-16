@@ -988,11 +988,11 @@ fn formatted_numeric_reannotation_preserves_source_and_exactness() {
     for (source, expected) in [
         (
             ".local $n = {42 :number} .local $p = {$n :percent} {{{$p} {$p :number}}}",
-            "4200% 42",
+            "4,200% 42",
         ),
         (
             ".local $n = {9007199254740993 :number} .local $p = {$n :percent} {{{$p} {$p :percent}}}",
-            "900719925474099300% 900719925474099300%",
+            "900,719,925,474,099,300% 900,719,925,474,099,300%",
         ),
         (
             ".local $n = {9007199254740993 :number} .local $c = {$n :currency currency=USD} {{{$c} {$c :currency currency=USD}}}",

@@ -18,7 +18,8 @@ use icu_datetime::fieldsets;
 use icu_datetime::input::{DateTime, Time};
 use icu_datetime::options::{Length, TimePrecision};
 use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
-use icu_decimal::DecimalFormatter;
+use icu_decimal::options::{DecimalFormatterOptions, GroupingStrategy};
+use icu_decimal::{DecimalFormatter, DecimalFormatterPreferences};
 use icu_experimental::dimension::currency::CurrencyType;
 use icu_experimental::dimension::currency::formatter::{
     CurrencyFormatter, CurrencyFormatterPreferences,
@@ -192,20 +193,19 @@ enum BuiltinSelectMode {
     Ordinal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuiltinGrouping {
-    Auto,
-    Always,
-    Never,
-    Min2,
-}
-
 #[derive(Debug, Default)]
 struct IcuFormatterCache {
+    decimal: Option<CachedDecimalFormatter>,
     currency: Option<CachedCurrencyFormatter>,
     date: DateFormatterCache,
     time: TimeFormatterCache,
     datetime: DateTimeFormatterCache,
+}
+
+#[derive(Debug)]
+struct CachedDecimalFormatter {
+    grouping: NumberGrouping,
+    formatter: DecimalFormatter,
 }
 
 #[derive(Debug)]
@@ -420,7 +420,8 @@ impl BuiltinHost {
             }
             BuiltinFn::Percent => {
                 let (source, selection) = resolve_percent(raw_arg, catalog, &options)?;
-                let mut formatted = render_resolved_number(catalog, &selection);
+                let mut formatted =
+                    render_resolved_number(locale, &mut icu_formatters.decimal, &selection)?;
                 formatted.push('%');
                 Ok(Value::Formatted(Box::new(ResolvedFormatted::selectable(
                     Value::Number(source),
@@ -753,13 +754,15 @@ impl Host for BuiltinHost {
 
     fn format_default(
         &mut self,
-        catalog: &Catalog,
+        _catalog: &Catalog,
         _index: &BuiltinHostCatalogIndex,
         value: &Value,
     ) -> Option<String> {
         match value {
             Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
-            Value::Number(number) => Some(render_resolved_number(catalog, number)),
+            Value::Number(number) => {
+                render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, number).ok()
+            }
             Value::Formatted(value) => Some(value.text().to_string()),
             Value::String(value) => {
                 let direction = match value.direction {
@@ -798,7 +801,11 @@ impl Host for BuiltinHost {
                 return true;
             }
             if let Value::Number(number) = value {
-                let formatted = render_resolved_number(catalog, number);
+                let Ok(formatted) =
+                    render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, number)
+                else {
+                    return false;
+                };
                 let field = FormatField {
                     kind: "integer",
                     value: Cow::Borrowed(formatted.as_str()),
@@ -1243,27 +1250,31 @@ fn parse_digit_option_or_inherited(
     Ok(inherited)
 }
 
-fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> String {
+fn render_resolved_number(
+    locale: &Locale,
+    cache: &mut Option<CachedDecimalFormatter>,
+    number: &ResolvedNumber,
+) -> Result<String, FormatError> {
     let format = number.format;
     if let NumberValue::NonFinite(value) = number.value {
-        return format_signed_string(
+        return Ok(format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             value.to_string(),
-        );
+        ));
     }
     if format.notation_scientific {
-        return format_signed_string(
+        return Ok(format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             format_scientific_text(&number.text()),
-        );
+        ));
     }
     let text = format_int_or_decimal_with_min_fraction_digits(
         number.text(),
@@ -1279,15 +1290,34 @@ fn render_resolved_number(_catalog: &Catalog, number: &ResolvedNumber) -> String
         text,
     );
     let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
-    apply_grouping_strategy(
-        text,
-        match format.grouping {
-            NumberGrouping::Auto => BuiltinGrouping::Auto,
-            NumberGrouping::Always => BuiltinGrouping::Always,
-            NumberGrouping::Never => BuiltinGrouping::Never,
-            NumberGrouping::Min2 => BuiltinGrouping::Min2,
-        },
-    )
+    let decimal = Decimal::from_str(&text)
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+    if !cache
+        .as_ref()
+        .is_some_and(|cached| cached.grouping == format.grouping)
+    {
+        let grouping_strategy = match format.grouping {
+            NumberGrouping::Auto => GroupingStrategy::Auto,
+            NumberGrouping::Always => GroupingStrategy::Always,
+            NumberGrouping::Never => GroupingStrategy::Never,
+            NumberGrouping::Min2 => GroupingStrategy::Min2,
+        };
+        let formatter = DecimalFormatter::try_new(
+            DecimalFormatterPreferences::from(locale),
+            DecimalFormatterOptions::from(grouping_strategy),
+        )
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        *cache = Some(CachedDecimalFormatter {
+            grouping: format.grouping,
+            formatter,
+        });
+    }
+    Ok(cache
+        .as_ref()
+        .expect("decimal formatter initialized")
+        .formatter
+        .format(&decimal)
+        .to_string())
 }
 
 fn format_scientific_text(value: &str) -> String {
@@ -1780,56 +1810,6 @@ fn apply_minimum_integer_digits(value: String, min: Option<usize>) -> String {
         out.push_str(suffix);
     }
     out
-}
-
-fn apply_grouping(value: String) -> String {
-    let (sign, rest) = if let Some(stripped) = value.strip_prefix('-') {
-        ("-", stripped)
-    } else if let Some(stripped) = value.strip_prefix('+') {
-        ("+", stripped)
-    } else {
-        ("", value.as_str())
-    };
-    let (integer, suffix) = rest.split_once('.').map_or((rest, ""), |(i, f)| (i, f));
-    if integer.len() <= 3 {
-        return value;
-    }
-    let mut grouped = String::new();
-    for (i, ch) in integer.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    let grouped: String = grouped.chars().rev().collect();
-    let mut out = String::with_capacity(sign.len() + grouped.len() + 1 + suffix.len());
-    out.push_str(sign);
-    out.push_str(&grouped);
-    if !suffix.is_empty() {
-        out.push('.');
-        out.push_str(suffix);
-    }
-    out
-}
-
-fn apply_grouping_strategy(value: String, grouping: BuiltinGrouping) -> String {
-    match grouping {
-        BuiltinGrouping::Auto | BuiltinGrouping::Never => value,
-        BuiltinGrouping::Always => apply_grouping(value),
-        BuiltinGrouping::Min2 => apply_grouping_min2(value),
-    }
-}
-
-fn apply_grouping_min2(value: String) -> String {
-    let rest = value
-        .strip_prefix('-')
-        .or_else(|| value.strip_prefix('+'))
-        .unwrap_or(value.as_str());
-    let integer = rest.split_once('.').map_or(rest, |(integer, _)| integer);
-    if integer.len() <= 4 {
-        return value;
-    }
-    apply_grouping(value)
 }
 
 fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError> {
@@ -3216,7 +3196,22 @@ mod tests {
         let out = host
             .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
             .expect("formatted");
-        assert_number_rendered(&mut host, out, &format!("{}.00", i64::MAX));
+        assert_number_rendered(&mut host, out, "9,223,372,036,854,775,807.00");
+    }
+
+    #[test]
+    fn resolved_numbers_use_locale_decimal_symbols() {
+        let locale = Locale::from_str("fr-FR").expect("locale");
+        let number = ResolvedNumber::new(
+            NumberValue::Integer(1_234),
+            NumberFormatOptions::DEFAULT,
+            NumberSelection::None,
+            false,
+        );
+        assert_eq!(
+            render_resolved_number(&locale, &mut None, &number).expect("formatted"),
+            "1\u{202f}234"
+        );
     }
 
     #[test]
@@ -3692,7 +3687,7 @@ mod tests {
         let err = host
             .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
             .expect("i128 range");
-        assert_number_rendered(&mut host, err, "9223372036854775808");
+        assert_number_rendered(&mut host, err, "9,223,372,036,854,775,808");
 
         let mut huge = builtin_host(&["offset add=1"]);
         let err = huge
