@@ -754,12 +754,20 @@ impl Host for BuiltinHost {
 
     fn format_default(
         &mut self,
-        _catalog: &Catalog,
+        catalog: &Catalog,
         _index: &BuiltinHostCatalogIndex,
         value: &Value,
     ) -> Option<String> {
         match value {
-            Value::Float(v) => Some(format_number_default_locale(*v, &self.locale)),
+            Value::Int(_) | Value::Float(_) => {
+                let number = ResolvedNumber::new(
+                    parse_number_value(value, catalog).ok()?,
+                    NumberFormatOptions::DEFAULT,
+                    NumberSelection::None,
+                    false,
+                );
+                render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, &number).ok()
+            }
             Value::Number(number) => {
                 render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, number).ok()
             }
@@ -2585,15 +2593,6 @@ fn time_field_set(precision: TimePrecisionBucket) -> fieldsets::T {
 
 fn datetime_field_set(date_style: Length, time_precision: TimePrecisionBucket) -> fieldsets::YMDT {
     date_field_set(date_style).with_time(icu_time_precision(time_precision))
-}
-
-fn format_number_default_locale(value: f64, locale: &Locale) -> String {
-    let mut rendered = value.to_string();
-    let locale_tag = locale.to_string();
-    if locale_tag.starts_with("fr") {
-        rendered = rendered.replace('.', ",");
-    }
-    rendered
 }
 
 fn exact_i64_to_f64(value: i64) -> Result<f64, FormatError> {
