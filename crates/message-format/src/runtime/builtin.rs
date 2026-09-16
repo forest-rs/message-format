@@ -558,13 +558,21 @@ impl Host for BuiltinHost {
             }
             return Ok(Value::Null);
         }
+        if entry.func == BuiltinFn::Percent {
+            let Some(raw_arg) = args.first() else {
+                return Err(into_host_call_error(bad_operand()));
+            };
+            let options =
+                EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
+            options.validate_keys().map_err(into_host_call_error)?;
+            validate_builtin_option_values(entry.func, &options).map_err(into_host_call_error)?;
+            let number = resolve_percent_selection(raw_arg, catalog, &options)
+                .map_err(into_host_call_error)?;
+            return project_resolved_number(self, index, &number).map_err(into_host_call_error);
+        }
         if matches!(
             entry.func,
-            BuiltinFn::Percent
-                | BuiltinFn::Currency
-                | BuiltinFn::Date
-                | BuiltinFn::Time
-                | BuiltinFn::DateTime
+            BuiltinFn::Currency | BuiltinFn::Date | BuiltinFn::Time | BuiltinFn::DateTime
         ) {
             return Ok(Value::Null);
         }
@@ -871,6 +879,43 @@ fn resolve_number(
         format,
         selection,
         has_explicit_select,
+    ))
+}
+
+fn resolve_percent_selection(
+    value: &Value,
+    catalog: &Catalog,
+    options: &EffectiveOptions<'_>,
+) -> Result<ResolvedNumber, FormatError> {
+    let value = numeric_source(value);
+    let (number, inherited_format) = match value {
+        Value::Number(number) => (number.value.clone(), number.format),
+        _ => (
+            parse_number_value(value, catalog)?,
+            NumberFormatOptions::DEFAULT,
+        ),
+    };
+    let text = match &number {
+        NumberValue::Integer(value) => value.to_string(),
+        NumberValue::Decimal(value) => value.to_string(),
+        NumberValue::NonFinite(_) => return Err(bad_operand()),
+    };
+    let scaled = parse_number_text(&multiply_decimal_by_100(&text)?)?;
+
+    // Percent selection applies number options after scaling. Unlike
+    // `:number`, its fraction digit defaults are both zero.
+    let inherited_format = NumberFormatOptions {
+        minimum_fraction_digits: inherited_format.minimum_fraction_digits.or(Some(0)),
+        maximum_fraction_digits: inherited_format.maximum_fraction_digits.or(Some(0)),
+        minimum_integer_digits: None,
+        ..inherited_format
+    };
+    let format = resolve_number_format_options(inherited_format, options, false)?;
+    Ok(ResolvedNumber::new(
+        scaled,
+        format,
+        NumberSelection::Plural,
+        false,
     ))
 }
 
