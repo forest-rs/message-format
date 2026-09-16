@@ -19,6 +19,7 @@ use icu_datetime::input::{DateTime, Time};
 use icu_datetime::options::{Length, TimePrecision};
 use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
 use icu_decimal::options::{DecimalFormatterOptions, GroupingStrategy};
+use icu_decimal::preferences::NumberingSystem;
 use icu_decimal::{DecimalFormatter, DecimalFormatterPreferences};
 use icu_experimental::dimension::currency::CurrencyType;
 use icu_experimental::dimension::currency::formatter::{
@@ -137,9 +138,10 @@ enum BuiltinOptionKey {
     CurrencySign,
     MinimumSignificantDigits,
     MaximumSignificantDigits,
+    NumberingSystem,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 34;
+const BUILTIN_OPTION_KEY_COUNT: usize = 35;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
@@ -178,6 +180,7 @@ impl BuiltinOptionKey {
             Self::CurrencySign => 31,
             Self::MinimumSignificantDigits => 32,
             Self::MaximumSignificantDigits => 33,
+            Self::NumberingSystem => 34,
         }
     }
 }
@@ -209,6 +212,7 @@ struct IcuFormatterCache {
 #[derive(Debug)]
 struct CachedDecimalFormatter {
     grouping: NumberGrouping,
+    numbering_system: Option<NumberingSystem>,
     formatter: DecimalFormatter,
 }
 
@@ -1244,6 +1248,15 @@ fn resolve_number_format_options(
         Some("min2") => NumberGrouping::Min2,
         Some(_) => return Err(bad_option()),
     };
+    let numbering_system = options
+        .get(BuiltinOptionKey::NumberingSystem)
+        .map(|value| {
+            icu_locale_core::extensions::unicode::Value::from_str(&value)
+                .map_err(|_| bad_option())
+                .and_then(|value| NumberingSystem::try_from(value).map_err(|_| bad_option()))
+        })
+        .transpose()?
+        .or(inherited.numbering_system);
     Ok(NumberFormatOptions {
         minimum_fraction_digits: if integer_only {
             None
@@ -1262,6 +1275,7 @@ fn resolve_number_format_options(
         },
         maximum_significant_digits,
         minimum_integer_digits,
+        numbering_system,
         sign_display,
         notation_scientific,
         grouping,
@@ -1366,23 +1380,25 @@ fn render_resolved_number(
     let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
     let decimal = Decimal::from_str(&text)
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-    if !cache
-        .as_ref()
-        .is_some_and(|cached| cached.grouping == format.grouping)
-    {
+    if !cache.as_ref().is_some_and(|cached| {
+        cached.grouping == format.grouping && cached.numbering_system == format.numbering_system
+    }) {
         let grouping_strategy = match format.grouping {
             NumberGrouping::Auto => GroupingStrategy::Auto,
             NumberGrouping::Always => GroupingStrategy::Always,
             NumberGrouping::Never => GroupingStrategy::Never,
             NumberGrouping::Min2 => GroupingStrategy::Min2,
         };
+        let mut preferences = DecimalFormatterPreferences::from(locale);
+        preferences.numbering_system = format.numbering_system;
         let formatter = DecimalFormatter::try_new(
-            DecimalFormatterPreferences::from(locale),
+            preferences,
             DecimalFormatterOptions::from(grouping_strategy),
         )
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
         *cache = Some(CachedDecimalFormatter {
             grouping: format.grouping,
+            numbering_system: format.numbering_system,
             formatter,
         });
     }
@@ -1570,6 +1586,7 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "maximumFractionDigits" => BuiltinOptionKey::MaximumFractionDigits,
         "minimumSignificantDigits" => BuiltinOptionKey::MinimumSignificantDigits,
         "maximumSignificantDigits" => BuiltinOptionKey::MaximumSignificantDigits,
+        "numberingSystem" => BuiltinOptionKey::NumberingSystem,
         "signDisplay" => BuiltinOptionKey::SignDisplay,
         "currency" => BuiltinOptionKey::Currency,
         "add" => BuiltinOptionKey::Add,
