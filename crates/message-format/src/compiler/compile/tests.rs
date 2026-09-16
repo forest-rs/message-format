@@ -1641,6 +1641,45 @@ fn compile_str_rejects_invalid_builtin_number_use_grouping_literal() {
 }
 
 #[test]
+fn compile_str_rejects_invalid_builtin_date_length_literal() {
+    let err = compile_str("{|2024-01-01| :date length=full}").expect_err("must fail");
+
+    assert!(matches!(
+        err,
+        CompileError::InvalidBuiltinOptionValue {
+            function,
+            option,
+            expected,
+            found,
+            ..
+        } if function == "date"
+            && option == "length"
+            && expected == "\"short\", \"medium\", or \"long\""
+            && found == "full"
+    ));
+}
+
+#[test]
+fn compile_str_rejects_invalid_builtin_time_precision_literal() {
+    let err =
+        compile_str("{|2024-01-01T12:00:00| :time precision=millisecond}").expect_err("must fail");
+
+    assert!(matches!(
+        err,
+        CompileError::InvalidBuiltinOptionValue {
+            function,
+            option,
+            expected,
+            found,
+            ..
+        } if function == "time"
+            && option == "precision"
+            && expected == "\"hour\", \"minute\", or \"second\""
+            && found == "millisecond"
+    ));
+}
+
+#[test]
 fn compile_str_rejects_invalid_builtin_option_in_nested_local_call() {
     let err =
         compile_str(".local $n = {1 :number signDisplay=bogus} .local $m = {$n :number} {{{$m}}}")

@@ -1065,10 +1065,14 @@ fn builtin_option_literal_domain(function: &str, option: &str) -> Option<&'stati
         ("number" | "integer", "notation") => Some(&["scientific"]),
         ("number" | "integer", "useGrouping") => Some(&["auto", "always", "never", "min2"]),
         ("date", "style" | "dateStyle") => Some(&["short", "medium", "long", "full"]),
+        ("date", "length") => Some(&["short", "medium", "long"]),
         ("time", "style" | "timeStyle") => Some(&["short", "medium", "long", "full"]),
+        ("time", "precision") => Some(&["hour", "minute", "second"]),
         ("datetime", "style" | "dateStyle" | "timeStyle") => {
             Some(&["short", "medium", "long", "full"])
         }
+        ("datetime", "dateLength") => Some(&["short", "medium", "long"]),
+        ("datetime", "timePrecision") => Some(&["hour", "minute", "second"]),
         _ => None,
     }
 }
@@ -1082,6 +1086,8 @@ fn join_expected_values(values: &'static [&'static str]) -> &'static str {
         ["scientific"] => "\"scientific\"",
         ["auto", "always", "never", "min2"] => "\"auto\", \"always\", \"never\", or \"min2\"",
         ["short", "medium", "long", "full"] => "\"short\", \"medium\", \"long\", or \"full\"",
+        ["short", "medium", "long"] => "\"short\", \"medium\", or \"long\"",
+        ["hour", "minute", "second"] => "\"hour\", \"minute\", or \"second\"",
         _ => "the documented builtin values",
     }
 }
