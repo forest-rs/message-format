@@ -1,30 +1,23 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 use super::*;
 use crate::compiler::semantic::SelectorExpr;
 use crate::compiler::syntax::span::byte_to_line_col;
 
-use super::bindings::{DeclFunction, DeclarationBindings, LocalValue};
-use super::local_eval::resolve_alias;
+use super::bindings::DeclarationPlan;
 use super::matching::{
     LoweredMatchArm, MatchArm, build_nested_match_ir, builtin_selector_accepts_variant_key,
     builtin_selector_variant_key_expectation, lower_match_declaration_prelude,
 };
 use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
-use super::rewrite::{lower_parts_with_declaration_bindings, rewrite_selector_expr_from_locals};
-
-struct AnalyzedSelectors {
-    parts: Vec<SelectorExpr>,
-    compile_time_values: Option<Vec<String>>,
-}
 
 pub(super) fn lower_raw_match_ir(
     source: &str,
     ctx: SourceContext,
-    bindings: &DeclarationBindings,
+    plan: &DeclarationPlan,
     match_prelude: crate::compiler::syntax::semantic::MatchDeclarationPrelude<'_>,
     options: CompileOptions,
     function_origin: Option<FunctionOriginContext>,
@@ -39,31 +32,17 @@ pub(super) fn lower_raw_match_ir(
     let arms = lower_match_arm_patterns(
         source,
         parsed_match.arms,
-        bindings,
+        plan,
         ctx,
         options,
         function_origin,
     )?;
-    let mut body_slots = BTreeSet::new();
-    for arm in &arms {
-        rewrite::collect_part_slots(&arm.parts, &mut body_slots);
-    }
-    let selectors = analyze_selectors(source, ctx, &parsed_match.selectors, bindings, &body_slots)?;
-    validate_match_arms(
-        source,
-        ctx,
-        &selectors.parts,
-        &arms,
-        &parsed_match.duplicate_keys,
-    )?;
-
-    if let Some(selector_values) = selectors.compile_time_values.as_ref() {
-        return resolve_compile_time_arm(source, ctx, selector_values, &arms);
-    }
+    let selectors = analyze_selectors(source, ctx, &parsed_match.selectors, plan)?;
+    validate_match_arms(source, ctx, &selectors, &arms, &parsed_match.duplicate_keys)?;
 
     let (line, _) = ctx.location(source, 0);
     let candidates = (0..arms.len()).collect::<Vec<_>>();
-    let mut dispatch_selectors = selectors.parts;
+    let mut dispatch_selectors = selectors;
     let mut checks = Vec::new();
     for selector in &mut dispatch_selectors {
         let SelectorExpr::Local { slot, func } = selector else {
@@ -71,7 +50,12 @@ pub(super) fn lower_raw_match_ir(
         };
         let slot = *slot;
         let func = func.clone();
-        checks.push(Part::CheckSelector(slot));
+        if !func
+            .as_ref()
+            .is_some_and(|func| func.name == "string" && func.options.is_empty())
+        {
+            checks.push(Part::CheckSelector(slot));
+        }
         *selector = SelectorExpr::CheckedLocal { slot, func };
     }
     let mut dispatch =
@@ -107,98 +91,23 @@ fn analyze_selectors(
     source: &str,
     ctx: SourceContext,
     selectors: &[String],
-    bindings: &DeclarationBindings,
-    body_slots: &BTreeSet<u32>,
-) -> Result<AnalyzedSelectors, CompileError> {
+    plan: &DeclarationPlan,
+) -> Result<Vec<SelectorExpr>, CompileError> {
     let mut parts = Vec::with_capacity(selectors.len());
-    let mut compile_time_values = Vec::with_capacity(selectors.len());
-    let mut all_compile_time = true;
-    let mut selector_counts = BTreeMap::new();
-
     for selector in selectors {
-        let name = resolve_alias(selector, &bindings.aliases)?;
-        *selector_counts.entry(name).or_insert(0_u32) += 1;
+        parts.push(analyze_selector(source, ctx, selector, plan)?);
     }
-
-    for selector in selectors {
-        let name = resolve_alias(selector, &bindings.aliases)?;
-        let direct_input_allowed = selector_counts.get(&name) == Some(&1);
-        let analyzed = analyze_selector(
-            source,
-            ctx,
-            selector,
-            bindings,
-            body_slots,
-            direct_input_allowed,
-        )?;
-        all_compile_time &= analyzed.compile_time_value.is_some();
-        compile_time_values.push(analyzed.compile_time_value.unwrap_or_default());
-        parts.push(analyzed.part);
-    }
-
-    Ok(AnalyzedSelectors {
-        parts,
-        compile_time_values: all_compile_time.then_some(compile_time_values),
-    })
-}
-
-struct AnalyzedSelector {
-    part: SelectorExpr,
-    compile_time_value: Option<String>,
+    Ok(parts)
 }
 
 fn analyze_selector(
     source: &str,
     ctx: SourceContext,
     selector: &str,
-    bindings: &DeclarationBindings,
-    body_slots: &BTreeSet<u32>,
-    direct_input_allowed: bool,
-) -> Result<AnalyzedSelector, CompileError> {
-    let name = resolve_alias(selector, &bindings.aliases)?;
-    let literal = bindings
-        .locals
-        .get(&name)
-        .and_then(LocalValue::as_literal)
-        .map(ToOwned::to_owned);
-    let direct_input_selector = direct_input_allowed
-        && bindings
-            .slots
-            .get(&name)
-            .is_some_and(|slot| !body_slots.contains(slot))
-        && bindings.input_functions.get(&name).is_some_and(|function| {
-            function.func.name == "string" && function.func.options.is_empty()
-        });
-    let mut part = bindings
-        .local_functions
-        .get(&name)
-        .cloned()
-        .or_else(|| bindings.input_functions.get(&name).cloned())
-        .map(selector_expr_from_decl_function)
-        .unwrap_or_else(|| SelectorExpr::Var(name.clone()));
-    if !direct_input_selector
-        && let Some(slot) = bindings.slots.get(&name).copied()
-        && bindings
-            .locals
-            .get(&name)
-            .is_none_or(|value| value.as_literal().is_none())
-    {
-        if let Some(function) = bindings
-            .local_functions
-            .get(&name)
-            .or_else(|| bindings.input_functions.get(&name))
-        {
-            part = SelectorExpr::Local {
-                slot,
-                func: Some(function.func.clone()),
-            };
-        } else {
-            part = SelectorExpr::Local { slot, func: None };
-        }
-    } else {
-        rewrite_selector_expr_from_locals(&mut part, &bindings.locals, &bindings.slots);
-    }
-    if matches!(part, SelectorExpr::Var(_)) && !direct_input_selector {
+    plan: &DeclarationPlan,
+) -> Result<SelectorExpr, CompileError> {
+    let name = plan.resolved_name(selector);
+    let Some(function) = plan.function(selector) else {
         let (line, col) = ctx.location(source, 0);
         return Err(CompileError::missing_selector_annotation_detail(
             line,
@@ -206,29 +115,14 @@ fn analyze_selector(
             "selector with function annotation",
             format!("selector ${name} has no function annotation"),
         ));
-    }
-    Ok(AnalyzedSelector {
-        compile_time_value: literal.filter(|value| value.is_ascii()),
-        part,
+    };
+    let Some(slot) = plan.slot(selector) else {
+        return Err(CompileError::internal("annotated selector without storage"));
+    };
+    Ok(SelectorExpr::Local {
+        slot,
+        func: Some(function.func.clone()),
     })
-}
-
-fn selector_expr_from_decl_function(function: DeclFunction) -> SelectorExpr {
-    match function.operand {
-        Operand::Var(var) => SelectorExpr::Call {
-            operand: Operand::Var(var),
-            func: function.func,
-        },
-        Operand::Literal { value, kind } => SelectorExpr::Call {
-            operand: Operand::Literal { value, kind },
-            func: function.func,
-        },
-        Operand::Call(call) => SelectorExpr::Call {
-            operand: Operand::Call(call),
-            func: function.func,
-        },
-        Operand::Local(slot) => SelectorExpr::Local { slot, func: None },
-    }
 }
 
 fn validate_match_arms(
@@ -299,26 +193,10 @@ fn validate_builtin_selector_variant_keys(
     Ok(())
 }
 
-fn resolve_compile_time_arm(
-    source: &str,
-    ctx: SourceContext,
-    selector_values: &[String],
-    arms: &[LoweredMatchArm],
-) -> Result<Vec<Part>, CompileError> {
-    if let Some(arm) = arms.iter().find(|arm| arm.matches(selector_values)) {
-        return Ok(arm.parts.clone());
-    }
-    if let Some(default_arm) = arms.iter().find(|arm| arm.is_default()) {
-        return Ok(default_arm.parts.clone());
-    }
-    let (line, _) = ctx.location(source, 0);
-    Err(CompileError::missing_default_arm(line))
-}
-
 fn lower_match_arm_patterns(
     source: &str,
     arms: Vec<MatchArm<'_>>,
-    bindings: &DeclarationBindings,
+    plan: &DeclarationPlan,
     ctx: SourceContext,
     options: CompileOptions,
     function_origin: Option<FunctionOriginContext>,
@@ -336,9 +214,14 @@ fn lower_match_arm_patterns(
             }
             other => other,
         };
-        let mut parts =
-            lower_pattern_node_to_parts(source, &arm.pattern, arm_ctx, options, function_origin)?;
-        lower_parts_with_declaration_bindings(&mut parts, bindings, false)?;
+        let parts = lower_pattern_node_to_parts(
+            source,
+            &arm.pattern,
+            arm_ctx,
+            options,
+            function_origin,
+            Some(plan),
+        )?;
         out.push(LoweredMatchArm {
             keys: arm.keys,
             parts,

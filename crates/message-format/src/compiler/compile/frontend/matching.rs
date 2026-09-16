@@ -32,19 +32,6 @@ impl LoweredMatchArm {
     pub(super) fn is_default(&self) -> bool {
         self.keys.iter().all(|key| key.is_default)
     }
-
-    pub(super) fn matches(&self, selectors: &[String]) -> bool {
-        if self.keys.len() != selectors.len() {
-            return false;
-        }
-        self.keys.iter().zip(selectors).all(|(key, selector)| {
-            if key.is_default {
-                true
-            } else {
-                key.key == *selector
-            }
-        })
-    }
 }
 
 pub(super) struct ParsedMatchDeclaration<'a> {

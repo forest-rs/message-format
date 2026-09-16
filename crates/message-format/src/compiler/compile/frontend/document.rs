@@ -9,16 +9,15 @@ use alloc::{
 use super::*;
 use crate::compiler::syntax::span::{SourceContext, byte_to_line_col};
 
-use super::bindings::{DeclarationBindings, collect_declaration_bindings};
-use super::pattern::{FunctionOriginContext, lower_pattern_node_to_parts};
-use super::raw_match::lower_raw_match_ir;
-use super::rewrite::{
-    compact_declaration_slots, lower_declaration_prelude, lower_parts_with_declaration_bindings,
+use super::bindings::{DeclarationPlan, build_declaration_plan};
+use super::pattern::{
+    FunctionOriginContext, lower_declaration_prelude, lower_pattern_node_to_parts,
 };
+use super::raw_match::lower_raw_match_ir;
 
 struct AnalyzedSingleMessage<'a> {
     declarations: crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'a>,
-    bindings: DeclarationBindings,
+    plan: DeclarationPlan,
     doc: crate::compiler::syntax::ast::SyntaxDocument<'a>,
 }
 
@@ -39,7 +38,7 @@ pub(super) fn parse_single_message(
         let mut parts = lower_raw_match_ir(
             source,
             ctx,
-            &analyzed.bindings,
+            &analyzed.plan,
             match_prelude,
             options,
             source_id.map(|source_id| FunctionOriginContext {
@@ -47,17 +46,7 @@ pub(super) fn parse_single_message(
                 base_byte: 0,
             }),
         )?;
-        let mut declarations = lower_declaration_prelude(
-            source,
-            &analyzed.declarations,
-            &analyzed.bindings,
-            ctx,
-            source_id.map(|source_id| FunctionOriginContext {
-                source_id,
-                base_byte: 0,
-            }),
-        )?;
-        compact_declaration_slots(&mut declarations, &mut parts)?;
+        let mut declarations = lower_declaration_prelude(&analyzed.declarations, &analyzed.plan)?;
         declarations.append(&mut parts);
         return Ok(Message {
             id: String::from("main"),
@@ -74,9 +63,10 @@ pub(super) fn parse_single_message(
         });
     }
 
+    let parts = preprocess_single_message_parts(source, ctx, &analyzed, options, source_id)?;
     Ok(Message {
         id: String::from("main"),
-        parts: preprocess_single_message_parts(source, ctx, analyzed, options, source_id)?,
+        parts,
         origin: source_id.map(|source_id| SourceSpan {
             source_id,
             byte_start: 0,
@@ -106,19 +96,20 @@ fn analyze_single_message(
     source_id: Option<SourceId>,
 ) -> Result<AnalyzedSingleMessage<'_>, CompileError> {
     let declarations = validate_and_parse_declarations(source, ctx)?;
-    let bindings = collect_declaration_bindings(
+    let doc = crate::compiler::syntax::parser::parse_document(source);
+    let plan = build_declaration_plan(
         source,
         &declarations,
+        &doc,
         ctx,
         source_id.map(|source_id| FunctionOriginContext {
             source_id,
             base_byte: 0,
         }),
     )?;
-    let doc = crate::compiler::syntax::parser::parse_document(source);
     Ok(AnalyzedSingleMessage {
         declarations,
-        bindings,
+        plan,
         doc,
     })
 }
@@ -126,7 +117,7 @@ fn analyze_single_message(
 fn preprocess_single_message_parts(
     source: &str,
     ctx: SourceContext,
-    analyzed: AnalyzedSingleMessage<'_>,
+    analyzed: &AnalyzedSingleMessage<'_>,
     options: CompileOptions,
     source_id: Option<SourceId>,
 ) -> Result<Vec<Part>, CompileError> {
@@ -159,19 +150,9 @@ fn preprocess_single_message_parts(
             source_id,
             base_byte: pattern.as_ptr() as usize - source.as_ptr() as usize,
         }),
+        has_declarations.then_some(&analyzed.plan),
     )?;
-    lower_parts_with_declaration_bindings(&mut parts, &analyzed.bindings, has_declarations)?;
-    let mut declarations = lower_declaration_prelude(
-        source,
-        &analyzed.declarations,
-        &analyzed.bindings,
-        ctx,
-        source_id.map(|source_id| FunctionOriginContext {
-            source_id,
-            base_byte: 0,
-        }),
-    )?;
-    compact_declaration_slots(&mut declarations, &mut parts)?;
+    let mut declarations = lower_declaration_prelude(&analyzed.declarations, &analyzed.plan)?;
     declarations.append(&mut parts);
     Ok(declarations)
 }
@@ -206,13 +187,4 @@ fn split_declarations_and_body_from_doc<'a>(
         );
     }
     ("", source)
-}
-
-fn extract_quoted_pattern(source: &str) -> Option<&str> {
-    let start = source.find("{{")?;
-    let end = source.rfind("}}")?;
-    if end < start + 2 {
-        return None;
-    }
-    Some(&source[start + 2..end])
 }

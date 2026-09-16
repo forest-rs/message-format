@@ -65,6 +65,8 @@ pub enum Opcode {
     LoadOptionArg = 0x14,
     /// Validate a message-local selector value without consuming it.
     CheckSelector = 0x15,
+    /// Resolve the popped value through optionless built-in `string` semantics.
+    ResolveString = 0x16,
     /// Output pool string by id.
     OutLit = 0x20,
     /// Output literal slice by offset and length.
@@ -79,6 +81,8 @@ pub enum Opcode {
     SelectArg = 0x25,
     /// Select using a previously validated message-local value.
     SelectLocal = 0x26,
+    /// Select an optionless built-in string argument directly.
+    SelectStringArg = 0x27,
     /// Begin select dispatch.
     SelectBegin = 0x30,
     /// Case compare against string-pool id.
@@ -113,12 +117,13 @@ impl Opcode {
             Self::LoadArg => 5,
             Self::LoadOptionArg => 9,
             Self::CheckSelector | Self::StoreLocal | Self::LoadLocal | Self::SelectLocal => 5,
+            Self::ResolveString => 1,
             Self::OutLit => 5,
             Self::OutSlice => 9,
             Self::OutVal => 1,
             Self::OutExpr => 9,
             Self::OutArg => 5,
-            Self::SelectArg => 5,
+            Self::SelectArg | Self::SelectStringArg => 5,
             Self::SelectBegin => 1,
             Self::CaseStr => 9,
             Self::CaseDefault => 5,
@@ -145,6 +150,7 @@ impl TryFrom<u8> for Opcode {
             0x11 => Ok(Self::LoadArg),
             0x14 => Ok(Self::LoadOptionArg),
             0x15 => Ok(Self::CheckSelector),
+            0x16 => Ok(Self::ResolveString),
             0x12 => Ok(Self::StoreLocal),
             0x13 => Ok(Self::LoadLocal),
             0x20 => Ok(Self::OutLit),
@@ -154,6 +160,7 @@ impl TryFrom<u8> for Opcode {
             0x24 => Ok(Self::OutArg),
             0x25 => Ok(Self::SelectArg),
             0x26 => Ok(Self::SelectLocal),
+            0x27 => Ok(Self::SelectStringArg),
             0x30 => Ok(Self::SelectBegin),
             0x31 => Ok(Self::CaseStr),
             0x32 => Ok(Self::CaseDefault),

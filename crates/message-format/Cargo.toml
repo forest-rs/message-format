@@ -20,12 +20,10 @@ icu4x = [
     "dep:icu_plurals",
     "dep:icu_calendar",
     "dep:icu_datetime",
-    "dep:libm",
 ]
 compile = [
     "dep:hashbrown",
     "dep:icu_normalizer",
-    "dep:libm",
     "dep:serde",
     "dep:toml",
 ]
@@ -60,7 +58,6 @@ hashbrown = { default-features = false, features = [
 icu_normalizer = { default-features = false, features = [
     "compiled_data",
 ], optional = true, version = "2.3.0" }
-libm = { optional = true, version = "0.2" }
 serde = { default-features = false, features = [
     "alloc",
     "derive",

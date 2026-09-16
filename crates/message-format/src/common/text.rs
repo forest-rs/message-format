@@ -3,10 +3,9 @@
 
 //! Shared pure string-processing utilities used by both compiler and runtime.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-};
+use alloc::string::String;
+#[cfg(any(feature = "icu4x", test))]
+use alloc::{format, string::ToString};
 
 pub(crate) fn is_valid_number_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -83,6 +82,7 @@ pub(crate) fn strip_bidi_controls(value: &str) -> String {
     value.chars().filter(|ch| !is_bidi_control(*ch)).collect()
 }
 
+#[cfg(any(feature = "icu4x", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SignDisplay {
     Auto,
@@ -90,6 +90,7 @@ pub(crate) enum SignDisplay {
     Never,
 }
 
+#[cfg(any(feature = "icu4x", test))]
 pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> String {
     match sign_display {
         SignDisplay::Auto => value,
@@ -108,11 +109,6 @@ pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> 
             }
         }
     }
-}
-
-#[cfg(any(feature = "compile", test))]
-pub(crate) fn format_signed_number(sign_display: SignDisplay, value: f64) -> String {
-    format_signed_string(sign_display, value.to_string())
 }
 
 #[cfg(test)]
@@ -196,16 +192,5 @@ mod tests {
         assert_eq!(format_signed_string(SignDisplay::Never, "-5".into()), "5");
         assert_eq!(format_signed_string(SignDisplay::Never, "+3".into()), "3");
         assert_eq!(format_signed_string(SignDisplay::Never, "42".into()), "42");
-    }
-
-    #[test]
-    fn format_signed_number_uses_shortest_repr() {
-        assert_eq!(
-            format_signed_number(SignDisplay::Auto, 1e23),
-            "100000000000000000000000"
-        );
-        assert_eq!(format_signed_number(SignDisplay::Auto, 2.75), "2.75");
-        assert_eq!(format_signed_number(SignDisplay::Always, 0.0), "+0");
-        assert_eq!(format_signed_number(SignDisplay::Never, -0.0), "0");
     }
 }

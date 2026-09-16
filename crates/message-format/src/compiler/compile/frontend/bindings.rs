@@ -1,280 +1,442 @@
 // Copyright 2026 the Message Format Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use alloc::{borrow::ToOwned, string::String};
+use alloc::string::String;
 
 use super::*;
 
-use super::local_eval::{
-    apply_literal_function, local_function_may_fail_select, normalize_local_function_expression,
-};
 use super::lower_expression_node_to_part;
 use super::pattern::FunctionOriginContext;
 use crate::common::text::parse_number_literal;
+use crate::compiler::syntax::ast::{
+    CallOperandNode, DeclarationPayloadNode, ExpressionNode, ExpressionPayloadNode, PatternNode,
+    PatternSegmentNode, SyntaxDocument,
+};
+use crate::compiler::syntax::ident::strip_boundary_bidi_controls;
+use crate::compiler::syntax::semantic::collect_var_refs;
 
-pub(super) struct DeclarationBindings {
-    pub(super) locals: BTreeMap<String, LocalValue>,
-    pub(super) aliases: BTreeMap<String, String>,
-    pub(super) input_aliases: BTreeMap<String, String>,
-    pub(super) local_functions: BTreeMap<String, DeclFunction>,
-    pub(super) input_functions: BTreeMap<String, DeclFunction>,
-    pub(super) slots: BTreeMap<String, u32>,
+pub(super) struct DeclarationPlan {
+    entries: BTreeMap<String, PlannedDeclaration>,
 }
 
-struct InputDeclarationBindings {
-    aliases: BTreeMap<String, String>,
-    functions: BTreeMap<String, DeclFunction>,
-}
-
-struct LocalDeclarationAnalysis {
-    values: BTreeMap<String, LocalValue>,
-    aliases: BTreeMap<String, String>,
-    functions: BTreeMap<String, DeclFunction>,
+struct PlannedDeclaration {
+    value: PlannedValue,
+    references: usize,
+    slot: Option<u32>,
 }
 
 #[derive(Clone)]
-pub(super) enum LocalValue {
-    Literal {
-        value: String,
-        kind: OperandLiteralKind,
+pub(super) enum PlannedValue {
+    Argument(String),
+    Alias {
+        evaluation: String,
+        resolved: String,
     },
-    Call,
-    UnknownFunction,
+    Literal(LocalLiteral),
+    Function(DeclFunction),
+    Unresolved,
 }
 
-impl LocalValue {
-    pub(super) fn as_literal(&self) -> Option<&str> {
-        match self {
-            Self::Literal { value, .. } => Some(value.as_str()),
-            Self::Call | Self::UnknownFunction => None,
+pub(super) struct ResolvedReference {
+    pub(super) value: ResolvedValue,
+    pub(super) fallback: Option<String>,
+}
+
+pub(super) enum ResolvedValue {
+    Unchanged,
+    Local(u32),
+    Literal(LocalLiteral),
+    Function(DeclFunction),
+    Argument(String),
+}
+
+#[derive(Clone)]
+pub(super) struct LocalLiteral {
+    pub(super) value: String,
+    pub(super) kind: OperandLiteralKind,
+}
+
+pub(super) type DeclFunction = CallExpr;
+
+impl DeclarationPlan {
+    pub(super) fn declaration(&self, name: &str) -> Option<(u32, &PlannedValue)> {
+        let entry = self.entries.get(name)?;
+        Some((entry.slot?, &entry.value))
+    }
+
+    pub(super) fn resolve_reference(
+        &self,
+        name: &str,
+        excluded: Option<&str>,
+    ) -> ResolvedReference {
+        let canonical = canonicalize_identifier(name);
+        if excluded == Some(canonical.as_str()) {
+            return ResolvedReference {
+                value: ResolvedValue::Unchanged,
+                fallback: None,
+            };
+        }
+        let resolved = self.resolved_name(&canonical);
+        if excluded != Some(resolved.as_str())
+            && let Some(slot) = self.slot(&canonical)
+        {
+            return ResolvedReference {
+                value: ResolvedValue::Local(slot),
+                fallback: Some(resolved),
+            };
+        }
+        if let Some(literal) = self.literal(&canonical) {
+            return ResolvedReference {
+                value: ResolvedValue::Literal(literal.clone()),
+                fallback: Some(resolved),
+            };
+        }
+        if let Some(function) = self.function(&canonical).cloned()
+            && self.slot(&canonical).is_none()
+        {
+            return ResolvedReference {
+                value: ResolvedValue::Function(function),
+                fallback: Some(resolved),
+            };
+        }
+        ResolvedReference {
+            value: ResolvedValue::Argument(self.argument_name(&resolved)),
+            fallback: None,
         }
     }
-}
 
-#[derive(Clone)]
-pub(super) struct DeclFunction {
-    pub(super) operand: Operand,
-    pub(super) func: FunctionSpec,
-}
+    pub(super) fn slot(&self, name: &str) -> Option<u32> {
+        self.resolved(name).and_then(|entry| entry.slot)
+    }
 
-impl DeclFunction {
-    pub(super) fn from_part(part: Part) -> Option<Self> {
-        match part {
-            Part::Call(CallExpr { operand, func, .. }) => Some(Self { operand, func }),
+    pub(super) fn literal(&self, name: &str) -> Option<&LocalLiteral> {
+        match &self.resolved(name)?.value {
+            PlannedValue::Literal(literal) => Some(literal),
             _ => None,
         }
     }
 
-    pub(super) fn into_part(self, fallback: Option<String>) -> Part {
-        Part::Call(CallExpr {
-            operand: self.operand,
-            func: self.func,
-            fallback,
-        })
+    pub(super) fn function(&self, name: &str) -> Option<&DeclFunction> {
+        match &self.resolved(name)?.value {
+            PlannedValue::Function(function) => Some(function),
+            _ => None,
+        }
+    }
+
+    pub(super) fn argument_name(&self, name: &str) -> String {
+        match self.resolved(name).map(|entry| &entry.value) {
+            Some(PlannedValue::Argument(source_name)) => source_name.clone(),
+            _ => name.to_string(),
+        }
+    }
+
+    pub(super) fn resolved_name(&self, name: &str) -> String {
+        match self.entries.get(name) {
+            Some(PlannedDeclaration {
+                value: PlannedValue::Alias { resolved, .. },
+                slot: None,
+                ..
+            }) => resolved.clone(),
+            _ => name.to_string(),
+        }
+    }
+
+    fn resolved(&self, name: &str) -> Option<&PlannedDeclaration> {
+        let entry = self.entries.get(name)?;
+        if entry.slot.is_none()
+            && let PlannedValue::Alias {
+                resolved: target, ..
+            } = &entry.value
+        {
+            return self.entries.get(target);
+        }
+        Some(entry)
     }
 }
 
-pub(super) fn collect_declaration_bindings(
+pub(super) fn build_declaration_plan(
     source: &str,
     declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
+    doc: &SyntaxDocument<'_>,
     ctx: SourceContext,
     function_origin: Option<FunctionOriginContext>,
-) -> Result<DeclarationBindings, CompileError> {
-    let input_bindings = collect_input_declarations(source, declarations, ctx, function_origin);
-    let local_analysis = analyze_local_declarations(
-        source,
-        declarations,
-        ctx,
-        function_origin,
-        &input_bindings.functions,
-    )?;
-    let mut ordered = declarations
-        .inputs
-        .iter()
-        .filter(|decl| bindings_input_needs_slot(&input_bindings.functions, &decl.canonical))
-        .map(|decl| (decl.expr.node.span.start, decl.canonical.as_str()))
-        .chain(
-            declarations
-                .locals
-                .iter()
-                .filter(|decl| {
-                    local_analysis
-                        .values
-                        .get(&decl.canonical)
-                        .is_none_or(|value| value.as_literal().is_none())
-                })
-                .map(|decl| (decl.expr.node.span.start, decl.canonical.as_str())),
-        )
-        .collect::<Vec<_>>();
-    ordered.sort_by_key(|(start, _)| *start);
-    let slots = ordered
-        .into_iter()
-        .enumerate()
-        .map(|(slot, (_, name))| {
-            u32::try_from(slot)
-                .map(|slot| (name.to_owned(), slot))
-                .map_err(|_| CompileError::size_overflow("declaration slots"))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-
-    Ok(DeclarationBindings {
-        locals: local_analysis.values,
-        aliases: local_analysis.aliases,
-        input_aliases: input_bindings.aliases,
-        local_functions: local_analysis.functions,
-        input_functions: input_bindings.functions,
-        slots,
-    })
-}
-
-fn bindings_input_needs_slot(functions: &BTreeMap<String, DeclFunction>, name: &str) -> bool {
-    functions.contains_key(name)
-}
-
-fn collect_input_declarations(
-    source: &str,
-    declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
-    ctx: SourceContext,
-    function_origin: Option<FunctionOriginContext>,
-) -> InputDeclarationBindings {
-    let mut functions = BTreeMap::new();
-    let mut aliases = BTreeMap::new();
+) -> Result<DeclarationPlan, CompileError> {
+    let mut entries = BTreeMap::new();
     for declaration in &declarations.inputs {
-        if let Ok(parsed) =
-            lower_expression_node_to_part(source, &declaration.expr.node, ctx, function_origin)
-            && let Some((name, function)) = extract_declared_function_part(parsed)
-        {
-            functions.insert(name, function);
-        }
-
-        aliases.insert(
+        let parsed =
+            lower_expression_node_to_part(source, &declaration.expr.node, ctx, function_origin);
+        let value = parsed.ok().and_then(extract_input_function).map_or_else(
+            || PlannedValue::Argument(declaration.source_name.clone()),
+            PlannedValue::Function,
+        );
+        entries.insert(
             declaration.canonical.clone(),
-            declaration.source_name.clone(),
+            PlannedDeclaration {
+                value,
+                references: 0,
+                slot: None,
+            },
         );
     }
 
-    InputDeclarationBindings { aliases, functions }
-}
-
-fn analyze_local_declarations(
-    source: &str,
-    declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
-    ctx: SourceContext,
-    function_origin: Option<FunctionOriginContext>,
-    input_functions: &BTreeMap<String, DeclFunction>,
-) -> Result<LocalDeclarationAnalysis, CompileError> {
-    let mut values = BTreeMap::new();
-    let mut aliases = BTreeMap::new();
-    let mut functions = BTreeMap::new();
-
     for declaration in &declarations.locals {
-        let name = declaration.canonical.clone();
         let parsed =
             lower_expression_node_to_part(source, &declaration.expr.node, ctx, function_origin)?;
-        let direct_literal_kind = local_literal_kind(source, &declaration.expr.node);
+        let value = plan_local_value(source, &declaration.expr.node, parsed, &entries);
+        entries.insert(
+            declaration.canonical.clone(),
+            PlannedDeclaration {
+                value,
+                references: 0,
+                slot: None,
+            },
+        );
+    }
 
-        if let Part::Var(alias) = &parsed {
-            aliases.insert(name.clone(), alias.clone());
-            // A local alias still denotes the already-analyzed value. Keep a
-            // value binding as well so later re-annotations preserve the
-            // structured numeric call instead of falling back to a runtime
-            // variable lookup for the alias name.
-            if let Some(value) = values.get(&canonicalize_identifier(alias)).cloned() {
-                values.insert(name.clone(), value);
-            }
-        }
-
-        if let Some(function) = normalize_declared_function_part(parsed.clone(), input_functions) {
-            functions.insert(name.clone(), function);
-        }
-
-        if let Some(value) = evaluate_local_value(parsed, direct_literal_kind, &values) {
-            values.insert(name, value);
+    for (name, references) in declaration_reference_counts(source, declarations, doc) {
+        if let Some(entry) = entries.get_mut(&name) {
+            entry.references = references;
         }
     }
 
-    Ok(LocalDeclarationAnalysis {
-        values,
-        aliases,
-        functions,
-    })
+    let ordered = ordered_declarations(declarations);
+    let inlined = inlined_string_functions(&ordered, &entries);
+    let mut next_slot = 0_u32;
+    for (_, name, _) in &ordered {
+        let stores = {
+            let entry = entries
+                .get(*name)
+                .ok_or_else(|| CompileError::internal("missing planned declaration"))?;
+            stores_runtime_value(entry, &entries, &inlined) && !inlined.contains(*name)
+        };
+        if stores {
+            entries.get_mut(*name).expect("entry checked above").slot = Some(next_slot);
+            next_slot = next_slot
+                .checked_add(1)
+                .ok_or_else(|| CompileError::size_overflow("declaration slots"))?;
+        }
+    }
+
+    Ok(DeclarationPlan { entries })
 }
 
-fn extract_declared_function_part(part: Part) -> Option<(String, DeclFunction)> {
+fn plan_local_value(
+    source: &str,
+    expression: &ExpressionNode<'_>,
+    parsed: Part,
+    entries: &BTreeMap<String, PlannedDeclaration>,
+) -> PlannedValue {
+    if let Part::Var(alias) = &parsed {
+        let canonical = canonicalize_identifier(alias);
+        let resolved = match entries.get(&canonical).map(|entry| &entry.value) {
+            Some(PlannedValue::Alias { resolved, .. }) => resolved.clone(),
+            _ => canonical.clone(),
+        };
+        if let Some(PlannedValue::Literal(literal)) =
+            entries.get(&resolved).map(|entry| &entry.value)
+        {
+            return PlannedValue::Literal(literal.clone());
+        }
+        return PlannedValue::Alias {
+            evaluation: canonical,
+            resolved,
+        };
+    }
+
+    if let Part::Literal(value) = &parsed {
+        return PlannedValue::Literal(LocalLiteral {
+            value: value.clone(),
+            kind: local_literal_kind(source, expression).unwrap_or(OperandLiteralKind::String),
+        });
+    }
+
+    let Part::Call(function) = parsed else {
+        return PlannedValue::Unresolved;
+    };
+    PlannedValue::Function(function)
+}
+
+fn extract_input_function(part: Part) -> Option<DeclFunction> {
     match part {
         Part::Call(CallExpr {
             operand: Operand::Var(var),
             func,
             ..
-        }) => Some((
-            var.clone(),
-            DeclFunction {
-                operand: Operand::Var(var),
-                func,
-            },
-        )),
+        }) => Some(CallExpr {
+            operand: Operand::Var(var),
+            func,
+            fallback: None,
+        }),
         _ => None,
     }
 }
 
-fn normalize_declared_function_part(
-    part: Part,
-    input_functions: &BTreeMap<String, DeclFunction>,
-) -> Option<DeclFunction> {
-    DeclFunction::from_part(part)
-        .map(|function| normalize_local_function_expression(function, input_functions))
+fn stores_runtime_value(
+    entry: &PlannedDeclaration,
+    entries: &BTreeMap<String, PlannedDeclaration>,
+    inlined: &BTreeSet<String>,
+) -> bool {
+    match &entry.value {
+        PlannedValue::Function(_) => true,
+        PlannedValue::Alias { resolved, .. } => !matches!(
+            entries.get(resolved),
+            Some(PlannedDeclaration {
+                value: PlannedValue::Function(_),
+                ..
+            }) if !inlined.contains(resolved)
+        ),
+        PlannedValue::Argument(_) | PlannedValue::Literal(_) | PlannedValue::Unresolved => false,
+    }
 }
 
-fn evaluate_local_value(
-    part: Part,
-    direct_literal_kind: Option<OperandLiteralKind>,
-    known_values: &BTreeMap<String, LocalValue>,
-) -> Option<LocalValue> {
-    match part {
-        Part::Literal(value) => Some(LocalValue::Literal {
-            value,
-            kind: direct_literal_kind.unwrap_or(OperandLiteralKind::String),
-        }),
-        Part::Call(CallExpr { operand, func, .. }) => {
-            if local_function_may_fail_select(&func) {
-                return None;
+pub(super) fn ordered_declarations<'a, 'source>(
+    declarations: &'a crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'source>,
+) -> Vec<(usize, &'a str, &'a ExpressionNode<'source>)> {
+    let mut ordered = declarations
+        .inputs
+        .iter()
+        .map(|decl| {
+            (
+                decl.expr.node.span.start,
+                decl.canonical.as_str(),
+                &decl.expr.node,
+            )
+        })
+        .chain(declarations.locals.iter().map(|decl| {
+            (
+                decl.expr.node.span.start,
+                decl.canonical.as_str(),
+                &decl.expr.node,
+            )
+        }))
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|(start, _, _)| *start);
+    ordered
+}
+
+fn inlined_string_functions(
+    ordered: &[(usize, &str, &ExpressionNode<'_>)],
+    entries: &BTreeMap<String, PlannedDeclaration>,
+) -> BTreeSet<String> {
+    ordered
+        .windows(2)
+        .filter_map(|pair| {
+            let (_, producer_name, producer) = pair[0];
+            let (_, _, consumer) = pair[1];
+            (entries
+                .get(producer_name)
+                .is_some_and(|entry| entry.references == 1)
+                && is_optionless_call(producer, "string")
+                && is_numeric_consumer_of(consumer, producer_name))
+            .then(|| producer_name.to_string())
+        })
+        .collect()
+}
+
+fn is_optionless_call(expression: &ExpressionNode<'_>, name: &str) -> bool {
+    matches!(
+        &expression.payload,
+        Some(ExpressionPayloadNode::Call(call))
+            if call.function.name == name && call.function.options.is_empty()
+    )
+}
+
+fn is_numeric_consumer_of(expression: &ExpressionNode<'_>, producer: &str) -> bool {
+    let Some(ExpressionPayloadNode::Call(call)) = &expression.payload else {
+        return false;
+    };
+    let CallOperandNode::Var(var) = &call.operand else {
+        return false;
+    };
+    matches!(call.function.name, "number" | "integer" | "offset")
+        && canonical_reference(var.name).as_deref() == Some(producer)
+}
+
+fn declaration_reference_counts(
+    source: &str,
+    declarations: &crate::compiler::syntax::semantic::CanonicalDeclarationPrelude<'_>,
+    doc: &SyntaxDocument<'_>,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for declaration in &declarations.inputs {
+        count_declaration_references(&declaration.expr.node, &declaration.canonical, &mut counts);
+    }
+    for declaration in &declarations.locals {
+        count_declaration_references(&declaration.expr.node, &declaration.canonical, &mut counts);
+    }
+    for declaration in &doc.declarations {
+        if let Some(DeclarationPayloadNode::Match {
+            selectors,
+            variants,
+        }) = &declaration.payload
+        {
+            for selector in selectors {
+                count_references(selector, &mut counts);
             }
-            let base = match operand {
-                Operand::Literal { value, kind } => Some(Operand::Literal { value, kind }),
-                Operand::Var(var) => match known_values.get(&var) {
-                    Some(LocalValue::Literal { value, kind }) => Some(Operand::Literal {
-                        value: value.clone(),
-                        kind: *kind,
-                    }),
-                    Some(LocalValue::Call) | Some(LocalValue::UnknownFunction) | None => None,
-                },
-                Operand::Local(_) | Operand::Call(_) => None,
-            };
-            // Numeric calls and calls over a non-literal declaration remain
-            // runtime values; folding them would lose exact payload/options.
-            if matches!(
-                func.name.as_str(),
-                "string" | "number" | "integer" | "offset"
-            ) || base.is_none()
-            {
-                Some(LocalValue::Call)
-            } else {
-                let Some(Operand::Literal { value, .. }) = base else {
-                    return None;
-                };
-                Some(apply_literal_function(value, &func))
+            for variant in variants {
+                count_pattern_references(&variant.pattern, &mut counts);
             }
         }
-        _ => None,
+    }
+    if let Some(body) = &doc.body {
+        let body_source = source.get(body.span.clone()).unwrap_or_default();
+        if let Some(pattern) = extract_quoted_pattern(body_source) {
+            count_pattern_references(
+                &crate::compiler::syntax::parser::parse_pattern(pattern),
+                &mut counts,
+            );
+        } else {
+            count_pattern_references(body, &mut counts);
+        }
+    }
+    counts
+}
+
+fn count_pattern_references(pattern: &PatternNode<'_>, counts: &mut BTreeMap<String, usize>) {
+    for segment in &pattern.segments {
+        if let PatternSegmentNode::Expression(expression) = segment {
+            count_references(expression, counts);
+        }
     }
 }
 
-fn local_literal_kind(
-    source: &str,
-    expr: &crate::compiler::syntax::ast::ExpressionNode<'_>,
-) -> Option<OperandLiteralKind> {
+fn count_declaration_references(
+    expression: &ExpressionNode<'_>,
+    declared_name: &str,
+    counts: &mut BTreeMap<String, usize>,
+) {
+    let mut skipped_operand = false;
+    for name in collect_var_refs(expression) {
+        if !skipped_operand && name == declared_name {
+            skipped_operand = true;
+        } else {
+            *counts.entry(name).or_default() += 1;
+        }
+    }
+}
+
+fn count_references(expression: &ExpressionNode<'_>, counts: &mut BTreeMap<String, usize>) {
+    for name in collect_var_refs(expression) {
+        *counts.entry(name).or_default() += 1;
+    }
+    if let Some(ExpressionPayloadNode::Markup(markup)) = &expression.payload {
+        for option in &markup.options {
+            if let crate::compiler::syntax::ast::OptionValue::Variable(name) = option.value
+                && let Some(name) = canonical_reference(name)
+            {
+                *counts.entry(name).or_default() += 1;
+            }
+        }
+    }
+}
+
+fn canonical_reference(name: &str) -> Option<String> {
+    strip_boundary_bidi_controls(name).map(|name| canonicalize_identifier(&name))
+}
+
+fn local_literal_kind(source: &str, expr: &ExpressionNode<'_>) -> Option<OperandLiteralKind> {
     let literal = match &expr.payload {
-        Some(crate::compiler::syntax::ast::ExpressionPayloadNode::Literal(literal))
+        Some(ExpressionPayloadNode::Literal(literal))
             if !literal.is_markup && literal.function.is_none() =>
         {
             literal

@@ -50,15 +50,26 @@ The compiler emits `CheckSelector` once for each source selector, before variant
 dispatch. Each check reports `BadSelector` if the local is a fallback or an
 unselectable resolved number. `SelectLocal` compares exact candidates directly.
 When keyword candidates require a category from that same stored number,
-`ProjectSelect` invokes the host's stored-value projection path without
-reapplying options or repeating the diagnostic. These instructions require a
-definitely initialized slot. Repeated default subtrees share a target; jumps to
-an ancestor default close each intervening select scope with `SelectEnd`.
+`ProjectSelect` invokes the host's stored-value projection path. `BuiltinHost`
+uses the retained numeric options directly, without reapplying them or
+repeating the diagnostic. These instructions require a definitely initialized
+slot. Repeated default subtrees share a target; jumps to an ancestor default
+close each intervening select scope with `SelectEnd`.
 
 Failed expressions carry `Value::Fallback` through nested calls and declarations.
 Failure state is attached to the value rather than to the following instruction.
-Resolved strings retain raw text and direction metadata separately; bidi
-isolation is applied at output, so later annotations consume the raw text.
+`Value::FunctionFallback` distinguishes a function that already reported its
+failure from a missing or propagated operand, preventing duplicate selector
+diagnostics while retaining the current expression's fallback text.
+Resolved strings retain raw text and any requested direction metadata
+separately; bidi isolation is applied at output, so later annotations consume
+the raw text. An optionless `:string` leaves direction unspecified, while the
+compiler represents requested default isolation explicitly as `u:dir=auto`.
+
+Optionless built-in `:string` resolution uses `ResolveString`, so its semantic
+text and fallback behavior do not depend on a host implementation. A single
+selector-only input may use the equivalent direct `SelectStringArg` path; repeated
+selectors or values read by a pattern resolve once into a local.
 
 ## Host Contract
 
@@ -83,6 +94,10 @@ selection metadata in their resolved values can override it to compute a
 category without decoding or reapplying the declaration's options.
 
 `Host::format_default` may override plain interpolation rendering for values.
+`Host::format_default_to` is the direct-output form; `true` means the host
+handled the value and may have written output, while `false` means it wrote
+nothing and requests the VM's built-in rendering. Its default preserves
+`format_default`, while hosts may override it to avoid a temporary owned string.
 
 Host implementations must be side-effect safe for repeated calls because the VM may execute the same message many times with reused formatter scratch buffers.
 

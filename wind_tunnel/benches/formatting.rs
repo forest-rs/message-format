@@ -563,6 +563,47 @@ fn build_builtin_call_catalog_with_opts() -> Catalog {
     Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
 }
 
+fn build_builtin_percent_catalog_with_static_opts() -> Catalog {
+    let strings = [
+        "main",
+        "amount",
+        "number",
+        "style",
+        "percent",
+        "minimumFractionDigits",
+        "2",
+    ];
+    let funcs = [FuncEntry {
+        name_str_id: 2,
+        static_options: vec![(3, 4), (5, 6)],
+    }];
+    let code = vec![
+        vm::Opcode::LoadArg as u8,
+        1,
+        0,
+        0,
+        0,
+        vm::Opcode::CallFunc as u8,
+        0,
+        0,
+        1,
+        0,
+        vm::Opcode::OutVal as u8,
+        vm::Opcode::Halt as u8,
+    ];
+    let bytes = build_catalog_with_funcs(
+        &strings,
+        "",
+        &[MessageEntry {
+            name_str_id: 0,
+            entry_pc: 0,
+        }],
+        &code,
+        &funcs,
+    );
+    Catalog::from_bytes(&bytes).expect("valid benchmark catalog")
+}
+
 fn build_icu_percent_catalog() -> Catalog {
     compile_catalog("main = { $amount :number style=percent minimumFractionDigits=1 }")
 }
@@ -636,6 +677,7 @@ fn bench_formatting(c: &mut Criterion) {
     let markup_option_variable_catalog = build_markup_option_variable_catalog();
     let builtin_catalog_no_opts = build_builtin_call_catalog_no_opts();
     let builtin_catalog_with_opts = build_builtin_call_catalog_with_opts();
+    let builtin_percent_catalog_with_static_opts = build_builtin_percent_catalog_with_static_opts();
     let icu_percent_catalog = build_icu_percent_catalog();
     let icu_currency_catalog = build_icu_currency_catalog();
     let icu_date_catalog = build_icu_date_catalog();
@@ -820,6 +862,28 @@ fn bench_formatting(c: &mut Criterion) {
         b.iter(|| {
             let out = formatter
                 .format_by_id_for_bench("main", black_box(&builtin_args_with_opts))
+                .expect("format");
+            black_box(out);
+        });
+    });
+    let builtin_percent_args = message_args(
+        &builtin_percent_catalog_with_static_opts,
+        &[("amount", Value::Float(0.42))],
+    );
+    builtin_group.bench_function("builtin_number_percent_static_opts", |b| {
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter =
+            Formatter::new(&builtin_percent_catalog_with_static_opts, host).expect("formatter");
+        assert_eq!(
+            formatter
+                .format_by_id_for_bench("main", &builtin_percent_args)
+                .expect("format"),
+            "42.00%",
+            "the benchmark must exercise percent formatting with static options"
+        );
+        b.iter(|| {
+            let out = formatter
+                .format_by_id_for_bench("main", black_box(&builtin_percent_args))
                 .expect("format");
             black_box(out);
         });
