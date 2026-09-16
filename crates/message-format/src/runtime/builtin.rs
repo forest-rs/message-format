@@ -15,9 +15,12 @@ use core::str::FromStr;
 use fixed_decimal::{Decimal, Sign, SignedRoundingMode, UnsignedRoundingMode};
 use icu_calendar::Date;
 use icu_datetime::fieldsets;
-use icu_datetime::input::{DateTime, Time};
-use icu_datetime::options::{Length, TimePrecision};
-use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
+use icu_datetime::fieldsets::builder::{DateFields, FieldSetBuilder, ZoneStyle};
+use icu_datetime::fieldsets::enums::CompositeFieldSet;
+use icu_datetime::input::{DateTime, Time, TimeZone, UtcOffset, ZonedDateTime};
+use icu_datetime::options::{Alignment, Length, SubsecondDigits, TimePrecision, YearStyle};
+use icu_datetime::preferences::HourCycle;
+use icu_datetime::{DateTimeFormatter, DateTimeFormatterPreferences, NoCalendarFormatter};
 use icu_decimal::options::{DecimalFormatterOptions, GroupingStrategy};
 use icu_decimal::preferences::NumberingSystem;
 use icu_decimal::{DecimalFormatter, DecimalFormatterPreferences};
@@ -145,9 +148,11 @@ enum BuiltinOptionKey {
     MinimumSignificantDigits,
     MaximumSignificantDigits,
     NumberingSystem,
+    FractionalSecondDigits,
+    HourCycle,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 35;
+const BUILTIN_OPTION_KEY_COUNT: usize = 37;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
@@ -187,6 +192,8 @@ impl BuiltinOptionKey {
             Self::MinimumSignificantDigits => 32,
             Self::MaximumSignificantDigits => 33,
             Self::NumberingSystem => 34,
+            Self::FractionalSecondDigits => 35,
+            Self::HourCycle => 36,
         }
     }
 }
@@ -258,6 +265,14 @@ struct DateTimeFormatterCache {
     short: TimeStyleDateTimeFormatterCache,
     medium: TimeStyleDateTimeFormatterCache,
     long: TimeStyleDateTimeFormatterCache,
+    fields: Option<CachedFieldDateTimeFormatter>,
+}
+
+#[derive(Debug)]
+struct CachedFieldDateTimeFormatter {
+    field_set: CompositeFieldSet,
+    hour_cycle: Option<HourCycle>,
+    formatter: DateTimeFormatter<CompositeFieldSet>,
 }
 
 #[derive(Debug, Default)]
@@ -487,16 +502,28 @@ impl BuiltinHost {
                 validate_datetime_style_field_exclusivity(&options)?;
                 let text = validate_datetime_operand(raw_arg, catalog)?;
                 let (date, time) = parse_iso_datetime(&text)?;
-                let date_style = resolve_date_style(&options, true);
-                let time_precision = resolve_time_precision(&options, true);
-                let formatted = format_icu_datetime_cached(
-                    locale,
-                    &mut icu_formatters.datetime,
-                    date,
-                    time,
-                    date_style,
-                    time_precision,
-                )?;
+                let formatted = if has_datetime_field_options(&options) {
+                    let offset = parse_iso_utc_offset(&text)?;
+                    format_icu_datetime_fields_cached(
+                        locale,
+                        &mut icu_formatters.datetime,
+                        date,
+                        time,
+                        offset,
+                        &options,
+                    )?
+                } else {
+                    let date_style = resolve_date_style(&options, true);
+                    let time_precision = resolve_time_precision(&options, true);
+                    format_icu_datetime_cached(
+                        locale,
+                        &mut icu_formatters.datetime,
+                        date,
+                        time,
+                        date_style,
+                        time_precision,
+                    )?
+                };
                 Ok(resolved_formatted(
                     raw_arg,
                     formatted,
@@ -1665,6 +1692,8 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "minimumSignificantDigits" => BuiltinOptionKey::MinimumSignificantDigits,
         "maximumSignificantDigits" => BuiltinOptionKey::MaximumSignificantDigits,
         "numberingSystem" => BuiltinOptionKey::NumberingSystem,
+        "fractionalSecondDigits" => BuiltinOptionKey::FractionalSecondDigits,
+        "hourCycle" => BuiltinOptionKey::HourCycle,
         "signDisplay" => BuiltinOptionKey::SignDisplay,
         "currency" => BuiltinOptionKey::Currency,
         "add" => BuiltinOptionKey::Add,
@@ -1768,6 +1797,7 @@ fn validate_builtin_option_values(
                 BuiltinOptionKey::TimePrecision,
                 &["hour", "minute", "second"],
             )?;
+            validate_datetime_field_option_values(options)?;
         }
         BuiltinFn::Currency => {
             validate_enum_option(
@@ -1806,6 +1836,53 @@ fn validate_enum_option(
         return Ok(());
     }
     Err(bad_option())
+}
+
+fn validate_datetime_field_option_values(
+    options: &EffectiveOptions<'_>,
+) -> Result<(), FormatError> {
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::Weekday,
+        &["long", "short", "narrow"],
+    )?;
+    validate_enum_option(options, BuiltinOptionKey::Era, &["long", "short", "narrow"])?;
+    validate_enum_option(options, BuiltinOptionKey::Year, &["numeric", "2-digit"])?;
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::Month,
+        &["numeric", "2-digit", "long", "short", "narrow"],
+    )?;
+    for key in [
+        BuiltinOptionKey::Day,
+        BuiltinOptionKey::Hour,
+        BuiltinOptionKey::Minute,
+        BuiltinOptionKey::Second,
+    ] {
+        validate_enum_option(options, key, &["numeric", "2-digit"])?;
+    }
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::FractionalSecondDigits,
+        &["1", "2", "3"],
+    )?;
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::HourCycle,
+        &["h11", "h12", "h23", "h24"],
+    )?;
+    validate_enum_option(
+        options,
+        BuiltinOptionKey::TimeZoneName,
+        &[
+            "long",
+            "short",
+            "shortOffset",
+            "longOffset",
+            "shortGeneric",
+            "longGeneric",
+        ],
+    )
 }
 
 fn validate_digit_range_relationship(
@@ -2384,11 +2461,166 @@ fn validate_datetime_style_field_exclusivity(
         || options.get(BuiltinOptionKey::Second).is_some()
         || options.get(BuiltinOptionKey::Weekday).is_some()
         || options.get(BuiltinOptionKey::Era).is_some()
-        || options.get(BuiltinOptionKey::TimeZoneName).is_some();
+        || options.get(BuiltinOptionKey::TimeZoneName).is_some()
+        || options
+            .get(BuiltinOptionKey::FractionalSecondDigits)
+            .is_some()
+        || options.get(BuiltinOptionKey::HourCycle).is_some();
     if has_style && has_field {
         return Err(bad_option());
     }
     Ok(())
+}
+
+fn has_datetime_field_options(options: &EffectiveOptions<'_>) -> bool {
+    [
+        BuiltinOptionKey::Year,
+        BuiltinOptionKey::Month,
+        BuiltinOptionKey::Day,
+        BuiltinOptionKey::Hour,
+        BuiltinOptionKey::Minute,
+        BuiltinOptionKey::Second,
+        BuiltinOptionKey::Weekday,
+        BuiltinOptionKey::Era,
+        BuiltinOptionKey::FractionalSecondDigits,
+        BuiltinOptionKey::HourCycle,
+        BuiltinOptionKey::TimeZoneName,
+    ]
+    .into_iter()
+    .any(|key| options.get(key).is_some())
+}
+
+fn resolve_datetime_field_set(
+    options: &EffectiveOptions<'_>,
+) -> Result<(CompositeFieldSet, Option<HourCycle>), FormatError> {
+    let year = options.get(BuiltinOptionKey::Year);
+    let month = options.get(BuiltinOptionKey::Month);
+    let day = options.get(BuiltinOptionKey::Day);
+    let weekday = options.get(BuiltinOptionKey::Weekday);
+    let era = options.get(BuiltinOptionKey::Era);
+    let hour = options.get(BuiltinOptionKey::Hour);
+    let minute = options.get(BuiltinOptionKey::Minute);
+    let second = options.get(BuiltinOptionKey::Second);
+    let date_fields = match (
+        year.is_some(),
+        month.is_some(),
+        day.is_some(),
+        weekday.is_some(),
+    ) {
+        (false, false, false, false) => None,
+        (false, false, true, false) => Some(DateFields::D),
+        (false, true, true, false) => Some(DateFields::MD),
+        (true, true, true, false) => Some(DateFields::YMD),
+        (false, false, true, true) => Some(DateFields::DE),
+        (false, true, true, true) => Some(DateFields::MDE),
+        (true, true, true, true) => Some(DateFields::YMDE),
+        (false, false, false, true) => Some(DateFields::E),
+        (false, true, false, false) => Some(DateFields::M),
+        (true, true, false, false) => Some(DateFields::YM),
+        (true, false, false, false) => Some(DateFields::Y),
+        _ => {
+            return Err(unsupported_operation(
+                UnsupportedOperation::DateTimeFormattingForLocale,
+            ));
+        }
+    };
+
+    if era.is_some() && year.is_none() {
+        return Err(unsupported_operation(
+            UnsupportedOperation::DateTimeFormattingForLocale,
+        ));
+    }
+
+    let fractional_digits = match options
+        .get(BuiltinOptionKey::FractionalSecondDigits)
+        .as_deref()
+    {
+        None => None,
+        Some("1") => Some(SubsecondDigits::S1),
+        Some("2") => Some(SubsecondDigits::S2),
+        Some("3") => Some(SubsecondDigits::S3),
+        Some(_) => return Err(bad_option()),
+    };
+    let time_precision = if let Some(digits) = fractional_digits {
+        Some(TimePrecision::Subsecond(digits))
+    } else if second.is_some() {
+        Some(TimePrecision::Second)
+    } else if minute.is_some() {
+        Some(TimePrecision::Minute)
+    } else if hour.is_some() {
+        Some(TimePrecision::Hour)
+    } else {
+        None
+    };
+
+    if date_fields.is_none()
+        && time_precision.is_none()
+        && options.get(BuiltinOptionKey::TimeZoneName).is_none()
+    {
+        return Err(bad_option());
+    }
+
+    let requested_values = [
+        year.as_deref(),
+        month.as_deref(),
+        day.as_deref(),
+        weekday.as_deref(),
+        era.as_deref(),
+        hour.as_deref(),
+        minute.as_deref(),
+        second.as_deref(),
+    ];
+    let length = if requested_values.contains(&Some("long")) {
+        Length::Long
+    } else if requested_values.contains(&Some("short")) {
+        Length::Medium
+    } else {
+        Length::Short
+    };
+    let alignment = requested_values
+        .contains(&Some("2-digit"))
+        .then_some(Alignment::Column);
+    let year_style = if era.is_some() {
+        Some(YearStyle::WithEra)
+    } else if year.as_deref() == Some("numeric") {
+        Some(YearStyle::Full)
+    } else {
+        None
+    };
+    let hour_cycle = match options.get(BuiltinOptionKey::HourCycle).as_deref() {
+        None => None,
+        Some("h11") => Some(HourCycle::H11),
+        Some("h12") => Some(HourCycle::H12),
+        Some("h23") => Some(HourCycle::H23),
+        Some("h24") => {
+            return Err(unsupported_operation(
+                UnsupportedOperation::DateTimeFormattingForLocale,
+            ));
+        }
+        Some(_) => return Err(bad_option()),
+    };
+    let zone_style = match options.get(BuiltinOptionKey::TimeZoneName).as_deref() {
+        None => None,
+        Some("long") => Some(ZoneStyle::SpecificLong),
+        Some("short") => Some(ZoneStyle::SpecificShort),
+        Some("shortOffset") => Some(ZoneStyle::LocalizedOffsetShort),
+        Some("longOffset") => Some(ZoneStyle::LocalizedOffsetLong),
+        Some("shortGeneric") => Some(ZoneStyle::GenericShort),
+        Some("longGeneric") => Some(ZoneStyle::GenericLong),
+        Some(_) => return Err(bad_option()),
+    };
+
+    let mut builder = FieldSetBuilder::new();
+    builder.date_fields = date_fields;
+    builder.time_precision = time_precision;
+    builder.length = Some(length);
+    builder.alignment = alignment;
+    builder.year_style = year_style;
+    builder.zone_style = zone_style;
+    let field_set = builder
+        .build_composite()
+        .map_err(|_| unsupported_operation(UnsupportedOperation::DateTimeFormattingForLocale))?;
+    Ok((field_set, hour_cycle))
 }
 
 fn validate_date_operand<'a>(
@@ -2485,6 +2717,30 @@ fn parse_iso_datetime(text: &str) -> Result<(Date<icu_calendar::Iso>, Time), For
     };
 
     Ok((date, time))
+}
+
+fn parse_iso_utc_offset(text: &str) -> Result<UtcOffset, FormatError> {
+    let Some((_, time)) = text.split_once('T') else {
+        return Ok(UtcOffset::zero());
+    };
+    if time.ends_with('Z') {
+        return Ok(UtcOffset::zero());
+    }
+    let Some(position) = time.rfind(['+', '-']) else {
+        return Ok(UtcOffset::zero());
+    };
+    let sign = if time.as_bytes()[position] == b'-' {
+        -1
+    } else {
+        1
+    };
+    let (hours, minutes) = time[position + 1..]
+        .split_once(':')
+        .ok_or_else(bad_operand)?;
+    let hours = hours.parse::<i32>().map_err(|_| bad_operand())?;
+    let minutes = minutes.parse::<i32>().map_err(|_| bad_operand())?;
+    let seconds = sign * (hours * 60 + minutes) * 60;
+    UtcOffset::try_from_seconds(seconds).map_err(|_| bad_operand())
 }
 
 fn parse_seconds_component(value: &str) -> Result<(u8, u32), FormatError> {
@@ -2663,6 +2919,45 @@ fn format_icu_datetime_cached(
     let formatter = slot.as_ref().expect("datetime formatter initialized");
     let dt = DateTime { date, time };
     Ok(formatter.format(&dt).to_string())
+}
+
+fn format_icu_datetime_fields_cached(
+    locale: &Locale,
+    cache: &mut DateTimeFormatterCache,
+    date: Date<icu_calendar::Iso>,
+    time: Time,
+    offset: UtcOffset,
+    options: &EffectiveOptions<'_>,
+) -> Result<String, FormatError> {
+    let (field_set, hour_cycle) = resolve_datetime_field_set(options)?;
+    if !cache
+        .fields
+        .as_ref()
+        .is_some_and(|cached| cached.field_set == field_set && cached.hour_cycle == hour_cycle)
+    {
+        let mut preferences = DateTimeFormatterPreferences::from(locale);
+        preferences.hour_cycle = hour_cycle;
+        let formatter = DateTimeFormatter::try_new(preferences, field_set).map_err(|_| {
+            unsupported_operation(UnsupportedOperation::DateTimeFormattingForLocale)
+        })?;
+        cache.fields = Some(CachedFieldDateTimeFormatter {
+            field_set,
+            hour_cycle,
+            formatter,
+        });
+    }
+    let datetime = DateTime { date, time };
+    let zone = TimeZone::UNKNOWN
+        .with_offset(Some(offset))
+        .at_date_time(datetime);
+    let datetime = ZonedDateTime { date, time, zone };
+    Ok(cache
+        .fields
+        .as_ref()
+        .expect("datetime field formatter initialized")
+        .formatter
+        .format(&datetime)
+        .to_string())
 }
 
 #[derive(Clone, Copy)]
@@ -3901,6 +4196,98 @@ mod tests {
         assert_ne!(short, long);
         assert!(short_host.icu_formatters.datetime.short.minute.is_some());
         assert!(long_host.icu_formatters.datetime.short.second.is_some());
+    }
+
+    #[test]
+    fn datetime_field_options_control_the_dynamic_formatter() {
+        let input = Value::Str("2024-05-01T14:30:45.123".to_string());
+        let cases = [
+            ("datetime year=numeric", "2024"),
+            ("datetime month=long day=numeric", "May 1"),
+            ("datetime weekday=long", "Wednesday"),
+            (
+                "datetime hour=2-digit minute=2-digit hourCycle=h23",
+                "14:30",
+            ),
+        ];
+        for (function, expected) in cases {
+            let mut host = builtin_host(&[function]);
+            let value = host
+                .call(0, core::slice::from_ref(&input), FunctionOptions::new(&[]))
+                .expect("formatted");
+            let Value::Formatted(value) = value else {
+                panic!("datetime must produce a resolved formatted value");
+            };
+            assert_eq!(value.text(), expected, "function={function}");
+            assert!(host.icu_formatters.datetime.fields.is_some());
+        }
+    }
+
+    #[test]
+    fn datetime_fractional_second_digits_are_rendered() {
+        let mut host = builtin_host(&[
+            "datetime hour=numeric minute=2-digit second=2-digit fractionalSecondDigits=2 hourCycle=h23",
+        ]);
+        let value = host
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:45.123".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("formatted");
+        let Value::Formatted(value) = value else {
+            panic!("datetime must produce a resolved formatted value");
+        };
+        assert_eq!(value.text(), "14:30:45.12");
+    }
+
+    #[test]
+    fn datetime_rejects_invalid_or_unsupported_field_requests() {
+        let input = [Value::Str("2024-05-01T14:30:45".to_string())];
+        let mut invalid = builtin_host(&["datetime month=huge"]);
+        let error = invalid
+            .call(0, &input, FunctionOptions::new(&[]))
+            .expect_err("invalid field value");
+        assert_function_error(error, MessageFunctionError::BadOption);
+
+        for function in [
+            "datetime dateStyle=short year=numeric",
+            "datetime year=numeric day=numeric",
+            "datetime hour=numeric hourCycle=h24",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let error = host
+                .call(0, &input, FunctionOptions::new(&[]))
+                .expect_err("unsupported field request");
+            assert!(matches!(
+                error,
+                HostCallError::Function(
+                    MessageFunctionError::BadOption
+                        | MessageFunctionError::UnsupportedOperation(
+                            UnsupportedOperation::DateTimeFormattingForLocale
+                        )
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn datetime_time_zone_name_uses_the_operand_offset() {
+        let mut host = builtin_host(&[
+            "datetime hour=2-digit minute=2-digit hourCycle=h23 timeZoneName=longOffset",
+        ]);
+        let value = host
+            .call(
+                0,
+                &[Value::Str("2024-05-01T14:30:45+07:00".to_string())],
+                FunctionOptions::new(&[]),
+            )
+            .expect("formatted");
+        let Value::Formatted(value) = value else {
+            panic!("datetime must produce a resolved formatted value");
+        };
+        assert!(value.text().contains("14:30"));
+        assert!(value.text().contains("GMT+07:00"), "{}", value.text());
     }
 
     #[test]
