@@ -31,13 +31,6 @@ pub enum Value {
     Float(f64),
     /// Owned UTF-8 string.
     Str(String),
-    /// A value carrying the universal `u:id` formatting annotation.
-    Identified {
-        /// Underlying function result.
-        value: Box<Self>,
-        /// User-provided identifier.
-        id: String,
-    },
     /// String resolved by the `string` function, retaining direction metadata.
     String(ResolvedString),
     /// Reference to a catalog string-pool entry.
@@ -83,7 +76,6 @@ pub struct ResolvedFormatted {
     pub(crate) formatted: String,
     pub(crate) kind: super::vm::FormattedValueKind,
     pub(crate) selection: Option<ResolvedNumber>,
-    pub(crate) id: Option<Box<str>>,
 }
 
 #[cfg(feature = "icu4x")]
@@ -94,7 +86,6 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::String,
             selection: None,
-            id: None,
         }
     }
 
@@ -104,7 +95,6 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::Number,
             selection: None,
-            id: None,
         }
     }
 
@@ -114,7 +104,6 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::Number,
             selection: Some(selection),
-            id: None,
         }
     }
 
@@ -127,11 +116,7 @@ impl ResolvedFormatted {
 
 impl Value {
     pub(crate) fn is_fallback(&self) -> bool {
-        match self {
-            Self::Fallback(_) | Self::FunctionFallback(_) => true,
-            Self::Identified { value, .. } => value.is_fallback(),
-            _ => false,
-        }
+        matches!(self, Self::Fallback(_) | Self::FunctionFallback(_))
     }
 }
 
@@ -142,8 +127,6 @@ pub struct ResolvedString {
     text: ResolvedStringText,
     /// Direction requested by the string function.
     pub(crate) direction: StringDirection,
-    /// User-provided `u:id`, when present.
-    pub(crate) id: Option<Box<str>>,
 }
 
 const INLINE_STRING_CAPACITY: usize = 24;
@@ -199,11 +182,7 @@ impl ResolvedString {
         } else {
             ResolvedStringText::Heap(text.into())
         };
-        Self {
-            text,
-            direction,
-            id: None,
-        }
+        Self { text, direction }
     }
 
     pub(crate) fn from_owned(text: String, direction: StringDirection) -> Self {
@@ -213,7 +192,6 @@ impl ResolvedString {
         Self {
             text: ResolvedStringText::Heap(text.into_boxed_str()),
             direction,
-            id: None,
         }
     }
 
@@ -228,7 +206,6 @@ impl ResolvedString {
                 bytes,
             },
             direction,
-            id: None,
         }
     }
 
@@ -265,7 +242,7 @@ impl ResolvedString {
 
 impl PartialEq for ResolvedString {
     fn eq(&self, other: &Self) -> bool {
-        self.direction == other.direction && self.id == other.id && self.text() == other.text()
+        self.direction == other.direction && self.text() == other.text()
     }
 }
 
@@ -303,8 +280,6 @@ pub struct ResolvedNumber {
     pub(crate) selection: NumberSelection,
     /// Whether a `select` option was explicitly resolved for this value.
     pub(crate) has_explicit_select: bool,
-    /// User-provided `u:id`, when present.
-    pub(crate) id: Option<Box<str>>,
 }
 
 /// Exact numeric payload retained by [`ResolvedNumber`].
@@ -393,7 +368,6 @@ impl ResolvedNumber {
             format,
             selection,
             has_explicit_select,
-            id: None,
         }
     }
 

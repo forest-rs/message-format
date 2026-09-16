@@ -16,7 +16,7 @@ use crate::runtime::{
 #[derive(Default)]
 pub(crate) struct VmState {
     pub(crate) fuel: Option<u64>,
-    pub(crate) values: Vec<Value>,
+    pub(crate) values: Vec<super::vm::StoredValue>,
     pub(crate) stack: Vec<usize>,
     pub(crate) locals: Vec<usize>,
     pub(crate) call_args: Vec<Value>,

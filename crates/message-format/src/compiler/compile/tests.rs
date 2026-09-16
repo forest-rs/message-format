@@ -2776,6 +2776,29 @@ fn optionless_string_reannotation_retains_inherited_universal_id() {
 }
 
 #[test]
+fn explicit_universal_id_overrides_inherited_id() {
+    let source = ".local $x={foo :custom u:id=first} {{{$x :custom u:id=second}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let host = HostFn(|_fn_id, args: &[Value], _opts| {
+        Ok(args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Value::Str("result".to_string())))
+    });
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut sink = UniversalIdSink::default();
+
+    formatter
+        .format_to(message, &[], &mut sink, None)
+        .expect("formatted");
+
+    assert_eq!(sink.output, "foo");
+    assert_eq!(sink.ids, ["second"]);
+}
+
+#[test]
 fn universal_id_does_not_change_dynamic_option_values_seen_by_custom_hosts() {
     let source = ".local $o={a :custom u:id=opt} {{{a :custom option=$o}}}";
     let bytes = compile_str(source).expect("compiled");
