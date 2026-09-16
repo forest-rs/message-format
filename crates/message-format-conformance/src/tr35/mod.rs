@@ -3,6 +3,7 @@
 
 mod helpers;
 
+mod currency_fn;
 mod datetime_fn;
 mod declarations;
 mod errors;

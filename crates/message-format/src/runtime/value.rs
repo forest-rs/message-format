@@ -12,6 +12,8 @@ use crate::runtime::Catalog;
 
 #[cfg(feature = "icu4x")]
 use fixed_decimal::Decimal;
+#[cfg(feature = "icu4x")]
+use icu_experimental::dimension::currency::CurrencyType;
 
 /// String-pool identifier.
 pub type StrId = u32;
@@ -76,6 +78,33 @@ pub struct ResolvedFormatted {
     pub(crate) formatted: String,
     pub(crate) kind: super::vm::FormattedValueKind,
     pub(crate) selection: Option<ResolvedNumber>,
+    pub(crate) currency: Option<ResolvedCurrencyOptions>,
+}
+
+/// Currency options retained across annotations of a resolved currency value.
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedCurrencyOptions {
+    pub(crate) code: CurrencyType,
+    pub(crate) display: CurrencyDisplay,
+    pub(crate) sign: CurrencySign,
+}
+
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurrencyDisplay {
+    Symbol,
+    NarrowSymbol,
+    Code,
+    Name,
+    Never,
+}
+
+#[cfg(feature = "icu4x")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurrencySign {
+    Standard,
+    Accounting,
 }
 
 #[cfg(feature = "icu4x")]
@@ -86,6 +115,7 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::String,
             selection: None,
+            currency: None,
         }
     }
 
@@ -95,6 +125,7 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::Number,
             selection: None,
+            currency: None,
         }
     }
 
@@ -104,6 +135,21 @@ impl ResolvedFormatted {
             formatted,
             kind: super::vm::FormattedValueKind::Number,
             selection: Some(selection),
+            currency: None,
+        }
+    }
+
+    pub(crate) fn currency(
+        source: Value,
+        formatted: String,
+        currency: ResolvedCurrencyOptions,
+    ) -> Self {
+        Self {
+            source,
+            formatted,
+            kind: super::vm::FormattedValueKind::Number,
+            selection: None,
+            currency: Some(currency),
         }
     }
 

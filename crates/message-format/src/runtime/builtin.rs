@@ -18,6 +18,12 @@ use icu_datetime::fieldsets;
 use icu_datetime::input::{DateTime, Time};
 use icu_datetime::options::{Length, TimePrecision};
 use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
+use icu_decimal::DecimalFormatter;
+use icu_experimental::dimension::currency::CurrencyType;
+use icu_experimental::dimension::currency::formatter::{
+    CurrencyFormatter, CurrencyFormatterPreferences,
+};
+use icu_experimental::dimension::currency::options::{CurrencyFormatterOptions, CurrencyUsage};
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};
 
@@ -31,8 +37,9 @@ use crate::runtime::{
         UnsupportedOperation,
     },
     value::{
-        NumberFormatOptions, NumberGrouping, NumberSelection, NumberSignDisplay, NumberValue,
-        ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
+        CurrencyDisplay, CurrencySign, NumberFormatOptions, NumberGrouping, NumberSelection,
+        NumberSignDisplay, NumberValue, ResolvedCurrencyOptions, ResolvedFormatted, ResolvedNumber,
+        ResolvedSelect, ResolvedString, StringDirection, Value,
     },
     vm::{
         FormatField, FormatSink, FormattedValue, FormattedValueKind, FunctionOptions, Host,
@@ -125,9 +132,11 @@ enum BuiltinOptionKey {
     DateLength,
     Precision,
     TimePrecision,
+    CurrencyDisplay,
+    CurrencySign,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 30;
+const BUILTIN_OPTION_KEY_COUNT: usize = 32;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
@@ -162,6 +171,8 @@ impl BuiltinOptionKey {
             Self::DateLength => 27,
             Self::Precision => 28,
             Self::TimePrecision => 29,
+            Self::CurrencyDisplay => 30,
+            Self::CurrencySign => 31,
         }
     }
 }
@@ -191,9 +202,18 @@ enum BuiltinGrouping {
 
 #[derive(Debug, Default)]
 struct IcuFormatterCache {
+    currency: Option<CachedCurrencyFormatter>,
     date: DateFormatterCache,
     time: TimeFormatterCache,
     datetime: DateTimeFormatterCache,
+}
+
+#[derive(Debug)]
+struct CachedCurrencyFormatter {
+    currency: CurrencyType,
+    display: CurrencyDisplay,
+    sign: CurrencySign,
+    formatter: CurrencyFormatter<DecimalFormatter>,
 }
 
 #[derive(Debug, Default)]
@@ -409,12 +429,20 @@ impl BuiltinHost {
                 ))))
             }
             BuiltinFn::Currency => {
-                let formatted = format_currency(raw_arg, catalog, &options)?;
-                Ok(resolved_formatted(
+                let (formatted, currency) = format_currency(
                     raw_arg,
-                    formatted,
-                    FormattedValueKind::Number,
-                ))
+                    catalog,
+                    locale,
+                    &mut icu_formatters.currency,
+                    &options,
+                )?;
+                let source = match raw_arg {
+                    Value::Formatted(value) => value.source.clone(),
+                    value => value.clone(),
+                };
+                Ok(Value::Formatted(Box::new(ResolvedFormatted::currency(
+                    source, formatted, currency,
+                ))))
             }
             BuiltinFn::Offset => Ok(Value::Number(resolve_offset(raw_arg, catalog, &options)?)),
             BuiltinFn::TestSelect => Ok(Value::ResolvedSelect(Box::new(ResolvedSelect::new(
@@ -1429,6 +1457,8 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "dateLength" => BuiltinOptionKey::DateLength,
         "precision" => BuiltinOptionKey::Precision,
         "timePrecision" => BuiltinOptionKey::TimePrecision,
+        "currencyDisplay" => BuiltinOptionKey::CurrencyDisplay,
+        "currencySign" => BuiltinOptionKey::CurrencySign,
         _ => return None,
     })
 }
@@ -1505,9 +1535,20 @@ fn validate_builtin_option_values(
                 &["hour", "minute", "second"],
             )?;
         }
+        BuiltinFn::Currency => {
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::CurrencyDisplay,
+                &["narrowSymbol", "symbol", "name", "code", "never"],
+            )?;
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::CurrencySign,
+                &["accounting", "standard"],
+            )?;
+        }
         BuiltinFn::String
         | BuiltinFn::Percent
-        | BuiltinFn::Currency
         | BuiltinFn::Offset
         | BuiltinFn::TestSelect
         | BuiltinFn::TestFunction
@@ -1880,30 +1921,86 @@ fn multiply_decimal_by_100(value: &str) -> Result<String, FormatError> {
 fn format_currency(
     value: &Value,
     catalog: &Catalog,
+    locale: &Locale,
+    cache: &mut Option<CachedCurrencyFormatter>,
     options: &EffectiveOptions<'_>,
-) -> Result<String, FormatError> {
-    let Some(currency) = options.get(BuiltinOptionKey::Currency) else {
-        if let Value::Formatted(value) = value
-            && looks_like_currency_literal(&value.formatted)
-        {
-            return Ok(value.formatted.clone());
-        }
-        if let Some(raw) = value_text(catalog, value)
-            && looks_like_currency_literal(raw)
-        {
-            return Ok(raw.to_string());
-        }
-        return Err(bad_operand());
+) -> Result<(String, ResolvedCurrencyOptions), FormatError> {
+    let inherited = match value {
+        Value::Formatted(value) => value.currency.as_ref(),
+        _ => None,
     };
-    let value = numeric_source(value);
-    if let Value::Int(v) = value {
-        return Ok(format!("{} {v}", currency));
+    let currency = match options.get(BuiltinOptionKey::Currency) {
+        Some(code) => code.parse::<CurrencyType>().map_err(|_| bad_option())?,
+        None => inherited
+            .map(|options| options.code)
+            .ok_or_else(bad_operand)?,
+    };
+    let display = match options.get(BuiltinOptionKey::CurrencyDisplay).as_deref() {
+        Some("narrowSymbol") => CurrencyDisplay::NarrowSymbol,
+        Some("code") => CurrencyDisplay::Code,
+        Some("name") => CurrencyDisplay::Name,
+        Some("never") => CurrencyDisplay::Never,
+        Some("symbol") => CurrencyDisplay::Symbol,
+        None => inherited.map_or(CurrencyDisplay::Symbol, |options| options.display),
+        Some(_) => return Err(bad_option()),
+    };
+    let sign = match options.get(BuiltinOptionKey::CurrencySign).as_deref() {
+        Some("accounting") => CurrencySign::Accounting,
+        Some("standard") => CurrencySign::Standard,
+        None => inherited.map_or(CurrencySign::Standard, |options| options.sign),
+        Some(_) => return Err(bad_option()),
+    };
+    let number = match parse_number_value(value, catalog)? {
+        NumberValue::Integer(value) => Decimal::from(value),
+        NumberValue::Decimal(value) => *value,
+        NumberValue::NonFinite(_) => return Err(bad_operand()),
+    };
+    let usage = match sign {
+        CurrencySign::Standard => CurrencyUsage::Standard,
+        CurrencySign::Accounting => CurrencyUsage::Accounting,
+    };
+    if !cache.as_ref().is_some_and(|cached| {
+        cached.currency == currency && cached.display == display && cached.sign == sign
+    }) {
+        let prefs = CurrencyFormatterPreferences::from(locale);
+        let formatter_options = CurrencyFormatterOptions::from(usage);
+        let formatter = match display {
+            CurrencyDisplay::Symbol => {
+                CurrencyFormatter::try_new_symbol(prefs, currency, formatter_options)
+            }
+            CurrencyDisplay::NarrowSymbol => {
+                CurrencyFormatter::try_new_symbol_narrow(prefs, currency, formatter_options)
+            }
+            CurrencyDisplay::Code => {
+                CurrencyFormatter::try_new_code(prefs, currency, formatter_options)
+            }
+            CurrencyDisplay::Name => CurrencyFormatter::try_new_name(prefs, currency),
+            CurrencyDisplay::Never => {
+                CurrencyFormatter::try_new_no_currency(prefs, currency, formatter_options)
+            }
+        }
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        *cache = Some(CachedCurrencyFormatter {
+            currency,
+            display,
+            sign,
+            formatter,
+        });
     }
-    if let Value::Number(number) = value {
-        return Ok(format!("{} {}", currency, number.text()));
-    }
-    let number = numeric_operand(value, catalog)?;
-    Ok(format!("{} {number}", currency))
+    let formatted = cache
+        .as_ref()
+        .expect("currency formatter initialized")
+        .formatter
+        .format_fixed_decimal(&number)
+        .to_string();
+    Ok((
+        formatted,
+        ResolvedCurrencyOptions {
+            code: currency,
+            display,
+            sign,
+        },
+    ))
 }
 
 fn numeric_source(mut value: &Value) -> &Value {
@@ -1911,20 +2008,6 @@ fn numeric_source(mut value: &Value) -> &Value {
         value = &formatted.source;
     }
     value
-}
-
-fn looks_like_currency_literal(value: &str) -> bool {
-    let mut parts = value.splitn(2, ' ');
-    let Some(code) = parts.next() else {
-        return false;
-    };
-    let Some(number) = parts.next() else {
-        return false;
-    };
-    if code.len() != 3 || !code.chars().all(|ch| ch.is_ascii_uppercase()) {
-        return false;
-    }
-    parse_number_literal(number).is_some()
 }
 
 fn resolve_offset(
@@ -3548,6 +3631,13 @@ mod tests {
 
     #[test]
     fn builtin_host_caches_icu_formatters_after_first_use() {
+        let mut currency_host = builtin_host(&["currency currency=USD"]);
+        assert!(currency_host.icu_formatters.currency.is_none());
+        let _ = currency_host
+            .call(0, &[Value::Int(42)], FunctionOptions::new(&[]))
+            .expect("formatted");
+        assert!(currency_host.icu_formatters.currency.is_some());
+
         let mut date_host = builtin_host(&["date style=short"]);
         assert!(date_host.icu_formatters.date.short.is_none());
         let _ = date_host
