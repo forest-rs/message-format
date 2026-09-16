@@ -548,22 +548,21 @@ fn wg_params_to_args(catalog: &Catalog, params: &[WgParam]) -> Result<Vec<(u32, 
     params
         .iter()
         .filter_map(|param| {
-            if let Some(value_type) = &param.value_type {
-                return Some(Err(format!(
+            let value = match (param.value_type.as_deref(), &param.value) {
+                (Some("datetime"), serde_json::Value::String(v)) => Ok(Value::Str(v.clone())),
+                (Some(value_type), _) => Err(format!(
                     "parameter {:?} has unsupported type {value_type:?}",
                     param.name
-                )));
-            }
-            let value = match &param.value {
-                serde_json::Value::String(v) => Ok(Value::Str(v.clone())),
-                serde_json::Value::Bool(v) => Ok(Value::Bool(*v)),
-                serde_json::Value::Null => Ok(Value::Null),
-                serde_json::Value::Number(v) => Ok(if let Some(i) = v.as_i64() {
+                )),
+                (None, serde_json::Value::String(v)) => Ok(Value::Str(v.clone())),
+                (None, serde_json::Value::Bool(v)) => Ok(Value::Bool(*v)),
+                (None, serde_json::Value::Null) => Ok(Value::Null),
+                (None, serde_json::Value::Number(v)) => Ok(if let Some(i) = v.as_i64() {
                     Value::Int(i)
                 } else {
                     Value::Float(v.as_f64().unwrap_or_default())
                 }),
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(format!(
+                (None, serde_json::Value::Array(_) | serde_json::Value::Object(_)) => Err(format!(
                     "parameter {:?} has unsupported structured value",
                     param.name
                 )),
@@ -719,6 +718,15 @@ mod tests {
         let text = fs::read_to_string(root.join("syntax-errors.json")).expect("read");
         let suite: WgSuite = serde_json::from_str(&text).expect("json");
         assert!(!suite.tests.is_empty());
+    }
+
+    #[test]
+    fn wg_datetime_parameter_is_supported() {
+        let Some(root) = wg_tests_root() else {
+            return;
+        };
+        let report = run_wg_json_file(&root.join("functions/datetime.json")).expect("report");
+        assert_eq!(report.failed, 0);
     }
 
     fn test_case(src: &str, exp: Option<&str>, errors: Option<&[&str]>) -> WgTest {
