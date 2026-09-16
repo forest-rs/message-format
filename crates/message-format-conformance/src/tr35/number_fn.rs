@@ -387,6 +387,36 @@ fn number_sign_display_never() {
     );
 }
 
+/// TR35 §14 — `exceptZero` adds a plus sign only to positive non-zero values.
+#[test]
+fn number_sign_display_except_zero() {
+    assert_format(
+        "{ $x :number signDisplay=exceptZero }",
+        &[("x", Value::Float(0.0))],
+        "0",
+    );
+    assert_format(
+        "{ $x :number signDisplay=exceptZero }",
+        &[("x", Value::Float(2.0))],
+        "+2",
+    );
+}
+
+/// TR35 §14 — `negative` suppresses the sign of negative zero only.
+#[test]
+fn number_sign_display_negative() {
+    assert_format(
+        "{ $x :number signDisplay=negative }",
+        &[("x", Value::Float(-0.0))],
+        "0",
+    );
+    assert_format(
+        "{ $x :number signDisplay=negative }",
+        &[("x", Value::Float(-2.0))],
+        "-2",
+    );
+}
+
 /// F-15 — currently-supported signDisplay values reject unknown literals.
 #[test]
 fn number_sign_display_invalid_value_is_bad_option() {

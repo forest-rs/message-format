@@ -1596,7 +1596,10 @@ fn compile_str_rejects_invalid_builtin_number_sign_display_literal() {
         } => {
             assert_eq!(function, "number");
             assert_eq!(option, "signDisplay");
-            assert_eq!(expected, "\"auto\", \"always\", or \"never\"");
+            assert_eq!(
+                expected,
+                "\"auto\", \"always\", \"exceptZero\", \"negative\", or \"never\""
+            );
             assert_eq!(found, "bogus");
         }
         other => panic!("unexpected error: {other:?}"),

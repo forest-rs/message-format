@@ -85,6 +85,8 @@ pub(crate) fn strip_bidi_controls(value: &str) -> String {
 pub(crate) enum SignDisplay {
     Auto,
     Always,
+    ExceptZero,
+    Negative,
     Never,
 }
 
@@ -98,6 +100,32 @@ pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> 
                 format!("+{value}")
             }
         }
+        SignDisplay::ExceptZero => {
+            if is_zero_numeric_text(&value) {
+                value
+                    .strip_prefix('-')
+                    .or_else(|| value.strip_prefix('+'))
+                    .unwrap_or(&value)
+                    .to_string()
+            } else if value.starts_with('-') || value.starts_with('+') {
+                value
+            } else {
+                format!("+{value}")
+            }
+        }
+        SignDisplay::Negative => {
+            if is_zero_numeric_text(&value) {
+                value
+                    .strip_prefix('-')
+                    .or_else(|| value.strip_prefix('+'))
+                    .unwrap_or(&value)
+                    .to_string()
+            } else if let Some(value) = value.strip_prefix('+') {
+                value.to_string()
+            } else {
+                value
+            }
+        }
         SignDisplay::Never => {
             if let Some(stripped) = value.strip_prefix('-').or_else(|| value.strip_prefix('+')) {
                 stripped.to_string()
@@ -106,6 +134,26 @@ pub(crate) fn format_signed_string(sign_display: SignDisplay, value: String) -> 
             }
         }
     }
+}
+
+fn is_zero_numeric_text(value: &str) -> bool {
+    let value = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    let significand = value
+        .split_once(['e', 'E'])
+        .map_or(value, |(significand, _)| significand);
+    let mut saw_digit = false;
+    for ch in significand.chars() {
+        match ch {
+            '0' => saw_digit = true,
+            '.' => {}
+            '1'..='9' => return false,
+            _ => return false,
+        }
+    }
+    saw_digit
 }
 
 #[cfg(test)]
@@ -189,5 +237,33 @@ mod tests {
         assert_eq!(format_signed_string(SignDisplay::Never, "-5".into()), "5");
         assert_eq!(format_signed_string(SignDisplay::Never, "+3".into()), "3");
         assert_eq!(format_signed_string(SignDisplay::Never, "42".into()), "42");
+    }
+
+    #[test]
+    fn sign_display_except_zero() {
+        assert_eq!(
+            format_signed_string(SignDisplay::ExceptZero, "0.00".into()),
+            "0.00"
+        );
+        assert_eq!(
+            format_signed_string(SignDisplay::ExceptZero, "-0E4".into()),
+            "0E4"
+        );
+        assert_eq!(
+            format_signed_string(SignDisplay::ExceptZero, "2".into()),
+            "+2"
+        );
+    }
+
+    #[test]
+    fn sign_display_negative() {
+        assert_eq!(
+            format_signed_string(SignDisplay::Negative, "-0".into()),
+            "0"
+        );
+        assert_eq!(
+            format_signed_string(SignDisplay::Negative, "-2".into()),
+            "-2"
+        );
     }
 }
