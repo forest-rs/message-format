@@ -39,9 +39,9 @@ use crate::runtime::{
         UnsupportedOperation,
     },
     value::{
-        CurrencyDisplay, CurrencySign, NumberFormatOptions, NumberGrouping, NumberSelection,
-        NumberSignDisplay, NumberValue, ResolvedCurrencyOptions, ResolvedFormatted, ResolvedNumber,
-        ResolvedSelect, ResolvedString, StringDirection, Value,
+        CurrencyDisplay, CurrencySign, NumberFormatOptions, NumberGrouping, NumberNotation,
+        NumberSelection, NumberSignDisplay, NumberValue, ResolvedCurrencyOptions,
+        ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
     vm::{
         FormatField, FormatSink, FormattedValue, FormattedValueKind, FunctionOptions, Host,
@@ -1235,9 +1235,11 @@ fn resolve_number_format_options(
         Some("never") => NumberSignDisplay::Never,
         Some(_) => return Err(bad_option()),
     };
-    let notation_scientific = match options.get(BuiltinOptionKey::Notation).as_deref() {
-        None => inherited.notation_scientific,
-        Some("scientific") => true,
+    let notation = match options.get(BuiltinOptionKey::Notation).as_deref() {
+        None => inherited.notation,
+        Some("standard") => NumberNotation::Standard,
+        Some("scientific") => NumberNotation::Scientific,
+        Some("engineering") => NumberNotation::Engineering,
         Some(_) => return Err(bad_option()),
     };
     let grouping = match options.get(BuiltinOptionKey::UseGrouping).as_deref() {
@@ -1277,7 +1279,7 @@ fn resolve_number_format_options(
         minimum_integer_digits,
         numbering_system,
         sign_display,
-        notation_scientific,
+        notation,
         grouping,
     })
 }
@@ -1331,7 +1333,10 @@ fn render_resolved_number(
             value.to_string(),
         ));
     }
-    if format.notation_scientific {
+    if matches!(
+        format.notation,
+        NumberNotation::Scientific | NumberNotation::Engineering
+    ) {
         let text = if format.minimum_significant_digits.is_some()
             || format.maximum_significant_digits.is_some()
         {
@@ -1350,7 +1355,11 @@ fn render_resolved_number(
                 NumberSignDisplay::Negative => SignDisplay::Negative,
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
-            format_scientific_text(&text, format.minimum_significant_digits.is_some()),
+            format_scientific_text(
+                &text,
+                format.minimum_significant_digits.is_some(),
+                format.notation == NumberNotation::Engineering,
+            ),
         ));
     }
     let text = if format.minimum_significant_digits.is_some()
@@ -1410,7 +1419,7 @@ fn render_resolved_number(
         .to_string())
 }
 
-fn format_scientific_text(value: &str, preserve_trailing_zeros: bool) -> String {
+fn format_scientific_text(value: &str, preserve_trailing_zeros: bool, engineering: bool) -> String {
     let (sign, unsigned) = if let Some(value) = value.strip_prefix('-') {
         ("-", value)
     } else if let Some(value) = value.strip_prefix('+') {
@@ -1425,12 +1434,23 @@ fn format_scientific_text(value: &str, preserve_trailing_zeros: bool) -> String 
         return format!("{sign}0E0");
     }
     let significant = &digits[leading..];
-    let exponent = integer.len().cast_signed() - leading.cast_signed() - 1;
-    let mut mantissa = significant[..1].to_string();
-    let rest = if preserve_trailing_zeros {
-        &significant[1..]
+    let scientific_exponent = integer.len().cast_signed() - leading.cast_signed() - 1;
+    let exponent = if engineering {
+        scientific_exponent.div_euclid(3) * 3
     } else {
-        significant[1..].trim_end_matches('0')
+        scientific_exponent
+    };
+    let integer_digits = usize::try_from(scientific_exponent - exponent + 1)
+        .expect("engineering mantissa has one to three integer digits");
+    let mut padded = significant.to_string();
+    if padded.len() < integer_digits {
+        padded.push_str(&"0".repeat(integer_digits - padded.len()));
+    }
+    let mut mantissa = padded[..integer_digits].to_string();
+    let rest = if preserve_trailing_zeros {
+        &padded[integer_digits..]
+    } else {
+        padded[integer_digits..].trim_end_matches('0')
     };
     if !rest.is_empty() {
         mantissa.push('.');
