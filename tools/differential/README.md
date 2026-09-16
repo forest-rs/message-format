@@ -11,6 +11,9 @@ From the workspace root:
 deno run --allow-read --allow-run tools/differential/compare.ts
 ```
 
+Pass `--all` to include every disagreement in the JSON report instead of only
+base cases and one mutated representative per WG file.
+
 The default checkout locations are `../messageformat` and
 `../message-format-wg`. Pass those two paths as positional arguments to override
 them. Deno executes the TypeScript sources directly; no npm installation or
