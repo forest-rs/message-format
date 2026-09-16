@@ -407,6 +407,12 @@ fn percent_multiplies_by_100() {
     assert_format("{ $x :percent }", &[("x", Value::Float(0.42))], "42%");
 }
 
+/// F-20 — percent output uses the locale's default number grouping.
+#[test]
+fn percent_groups_scaled_values() {
+    assert_format("{ $x :percent }", &[("x", Value::Int(42))], "4,200%");
+}
+
 /// F-20 — :number style=percent should multiply by 100 (spec-canonical form).
 #[test]
 fn number_style_percent() {

@@ -421,11 +421,11 @@ mod tests {
         let args = MessageArgs::new();
         assert_eq!(
             compile_and_format("{1e23 :integer}", &args),
-            "100000000000000000000000"
+            "100,000,000,000,000,000,000,000"
         );
         assert_eq!(
             compile_and_format("{1e24 :integer}", &args),
-            "1000000000000000000000000"
+            "1,000,000,000,000,000,000,000,000"
         );
     }
 
@@ -435,11 +435,11 @@ mod tests {
         let args = MessageArgs::new();
         assert_eq!(
             compile_and_format("{1e23 :number}", &args),
-            "100000000000000000000000"
+            "100,000,000,000,000,000,000,000"
         );
         assert_eq!(
             compile_and_format("{1e24 :number}", &args),
-            "1000000000000000000000000"
+            "1,000,000,000,000,000,000,000,000"
         );
     }
 
@@ -467,7 +467,7 @@ mod tests {
         let args = MessageArgs::new();
         assert_eq!(
             compile_and_format("{-1e23 :offset subtract=1 signDisplay=never}", &args),
-            "100000000000000000000001"
+            "100,000,000,000,000,000,000,001"
         );
     }
 
