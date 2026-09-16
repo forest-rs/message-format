@@ -1062,7 +1062,7 @@ fn builtin_option_literal_domain(function: &str, option: &str) -> Option<&'stati
         ("number" | "integer", "signDisplay") => {
             Some(&["auto", "always", "exceptZero", "negative", "never"])
         }
-        ("number" | "integer", "style") => Some(&["percent"]),
+        ("number" | "integer", "style") => Some(&["decimal", "percent"]),
         ("number" | "integer", "select") => Some(&["exact", "plural", "ordinal"]),
         ("number" | "integer", "notation") => Some(&["standard", "scientific", "engineering"]),
         ("number" | "integer", "useGrouping") => Some(&["auto", "always", "never", "min2"]),
@@ -1091,6 +1091,7 @@ fn join_expected_values(values: &'static [&'static str]) -> &'static str {
             "\"auto\", \"always\", \"exceptZero\", \"negative\", or \"never\""
         }
         ["percent"] => "\"percent\"",
+        ["decimal", "percent"] => "\"decimal\" or \"percent\"",
         ["exact", "plural", "ordinal"] => "\"exact\", \"plural\", or \"ordinal\"",
         ["scientific"] => "\"scientific\"",
         ["standard", "scientific", "engineering"] => {

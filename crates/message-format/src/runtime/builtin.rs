@@ -26,6 +26,12 @@ use icu_experimental::dimension::currency::formatter::{
     CurrencyFormatter, CurrencyFormatterPreferences,
 };
 use icu_experimental::dimension::currency::options::{CurrencyFormatterOptions, CurrencyUsage};
+use icu_experimental::dimension::percent::formatter::{
+    PercentFormatter, PercentFormatterPreferences,
+};
+use icu_experimental::dimension::percent::options::{
+    Display as PercentDisplay, PercentFormatterOptions,
+};
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};
 
@@ -40,7 +46,7 @@ use crate::runtime::{
     },
     value::{
         CurrencyDisplay, CurrencySign, NumberFormatOptions, NumberGrouping, NumberNotation,
-        NumberSelection, NumberSignDisplay, NumberValue, ResolvedCurrencyOptions,
+        NumberSelection, NumberSignDisplay, NumberStyle, NumberValue, ResolvedCurrencyOptions,
         ResolvedFormatted, ResolvedNumber, ResolvedSelect, ResolvedString, StringDirection, Value,
     },
     vm::{
@@ -203,6 +209,7 @@ enum BuiltinSelectMode {
 #[derive(Debug, Default)]
 struct IcuFormatterCache {
     decimal: Option<CachedDecimalFormatter>,
+    percent: Option<CachedPercentFormatter>,
     currency: Option<CachedCurrencyFormatter>,
     date: DateFormatterCache,
     time: TimeFormatterCache,
@@ -214,6 +221,14 @@ struct CachedDecimalFormatter {
     grouping: NumberGrouping,
     numbering_system: Option<NumberingSystem>,
     formatter: DecimalFormatter,
+}
+
+#[derive(Debug)]
+struct CachedPercentFormatter {
+    grouping: NumberGrouping,
+    numbering_system: Option<NumberingSystem>,
+    display: PercentDisplay,
+    formatter: PercentFormatter<DecimalFormatter>,
 }
 
 #[derive(Debug)]
@@ -403,34 +418,14 @@ impl BuiltinHost {
                 }) {
                     on_error(MessageFunctionError::BadOption);
                 }
-                match options.get(BuiltinOptionKey::Style).as_deref() {
-                    Some("percent") => {
-                        let minimum_fraction_digits = parse_minimum_fraction_digits(&options)?;
-                        let maximum_fraction_digits = parse_maximum_fraction_digits(&options)?;
-                        let _ = parse_minimum_integer_digits(&options)?;
-                        validate_digit_range_relationship(
-                            minimum_fraction_digits,
-                            maximum_fraction_digits,
-                        )?;
-                        let sign_display = parse_sign_display(&options)?;
-                        return Ok(Value::Str(format_percent(
-                            raw_arg,
-                            catalog,
-                            minimum_fraction_digits,
-                            sign_display,
-                        )?));
-                    }
-                    Some(_) => return Err(bad_option()),
-                    None => {}
-                }
                 let resolved = resolve_number(raw_arg, catalog, integer_only, &options, on_error)?;
                 Ok(Value::Number(resolved))
             }
             BuiltinFn::Percent => {
                 let (source, selection) = resolve_percent(raw_arg, catalog, &options)?;
-                let mut formatted =
-                    render_resolved_number(locale, &mut icu_formatters.decimal, &selection)?;
-                formatted.push('%');
+                let mut presentation = source.clone();
+                presentation.format.style = NumberStyle::Percent;
+                let formatted = render_resolved_number(locale, icu_formatters, &presentation)?;
                 Ok(Value::Formatted(Box::new(ResolvedFormatted::selectable(
                     Value::Number(source),
                     formatted,
@@ -774,10 +769,10 @@ impl Host for BuiltinHost {
                     NumberSelection::None,
                     false,
                 );
-                render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, &number).ok()
+                render_resolved_number(&self.locale, &mut self.icu_formatters, &number).ok()
             }
             Value::Number(number) => {
-                render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, number).ok()
+                render_resolved_number(&self.locale, &mut self.icu_formatters, number).ok()
             }
             Value::Formatted(value) => Some(value.text().to_string()),
             Value::String(value) => {
@@ -818,7 +813,7 @@ impl Host for BuiltinHost {
             }
             if let Value::Number(number) = value {
                 let Ok(formatted) =
-                    render_resolved_number(&self.locale, &mut self.icu_formatters.decimal, number)
+                    render_resolved_number(&self.locale, &mut self.icu_formatters, number)
                 else {
                     return false;
                 };
@@ -1259,6 +1254,12 @@ fn resolve_number_format_options(
         })
         .transpose()?
         .or(inherited.numbering_system);
+    let style = match options.get(BuiltinOptionKey::Style).as_deref() {
+        None => inherited.style,
+        Some("decimal") => NumberStyle::Decimal,
+        Some("percent") => NumberStyle::Percent,
+        Some(_) => return Err(bad_option()),
+    };
     Ok(NumberFormatOptions {
         minimum_fraction_digits: if integer_only {
             None
@@ -1278,6 +1279,7 @@ fn resolve_number_format_options(
         maximum_significant_digits,
         minimum_integer_digits,
         numbering_system,
+        style,
         sign_display,
         notation,
         grouping,
@@ -1317,12 +1319,12 @@ fn parse_significant_digit_option_or_inherited(
 
 fn render_resolved_number(
     locale: &Locale,
-    cache: &mut Option<CachedDecimalFormatter>,
+    cache: &mut IcuFormatterCache,
     number: &ResolvedNumber,
 ) -> Result<String, FormatError> {
     let format = number.format;
     if let NumberValue::NonFinite(value) = number.value {
-        return Ok(format_signed_string(
+        let mut rendered = format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
@@ -1331,8 +1333,18 @@ fn render_resolved_number(
                 NumberSignDisplay::Never => SignDisplay::Never,
             },
             value.to_string(),
-        ));
+        );
+        if format.style == NumberStyle::Percent {
+            rendered.push('%');
+        }
+        return Ok(rendered);
     }
+    let number_text = number.text();
+    let number_text = if format.style == NumberStyle::Percent {
+        multiply_decimal_by_100(&number_text)?
+    } else {
+        number_text
+    };
     if matches!(
         format.notation,
         NumberNotation::Scientific | NumberNotation::Engineering
@@ -1340,14 +1352,14 @@ fn render_resolved_number(
         let text = if format.minimum_significant_digits.is_some()
             || format.maximum_significant_digits.is_some()
         {
-            let mut decimal = Decimal::from_str(&number.text())
+            let mut decimal = Decimal::from_str(&number_text)
                 .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
             apply_significant_digits(&mut decimal, format);
             decimal.to_string()
         } else {
-            number.text()
+            number_text
         };
-        return Ok(format_signed_string(
+        let mut rendered = format_signed_string(
             match format.sign_display {
                 NumberSignDisplay::Auto => SignDisplay::Auto,
                 NumberSignDisplay::Always => SignDisplay::Always,
@@ -1360,18 +1372,22 @@ fn render_resolved_number(
                 format.minimum_significant_digits.is_some(),
                 format.notation == NumberNotation::Engineering,
             ),
-        ));
+        );
+        if format.style == NumberStyle::Percent {
+            rendered.push('%');
+        }
+        return Ok(rendered);
     }
     let text = if format.minimum_significant_digits.is_some()
         || format.maximum_significant_digits.is_some()
     {
-        let mut decimal = Decimal::from_str(&number.text())
+        let mut decimal = Decimal::from_str(&number_text)
             .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
         apply_significant_digits(&mut decimal, format);
         decimal.to_string()
     } else {
         let text = format_int_or_decimal_with_min_fraction_digits(
-            number.text(),
+            number_text,
             format.minimum_fraction_digits.map_or(0, usize::from),
         );
         apply_maximum_fraction_digits(text, format.maximum_fraction_digits.map(usize::from))
@@ -1389,15 +1405,56 @@ fn render_resolved_number(
     let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
     let decimal = Decimal::from_str(&text)
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-    if !cache.as_ref().is_some_and(|cached| {
+    let grouping_strategy = match format.grouping {
+        NumberGrouping::Auto => GroupingStrategy::Auto,
+        NumberGrouping::Always => GroupingStrategy::Always,
+        NumberGrouping::Never => GroupingStrategy::Never,
+        NumberGrouping::Min2 => GroupingStrategy::Min2,
+    };
+    if format.style == NumberStyle::Percent {
+        let display = if text.starts_with('+') {
+            PercentDisplay::ExplicitSign
+        } else {
+            PercentDisplay::Standard
+        };
+        if !cache.percent.as_ref().is_some_and(|cached| {
+            cached.grouping == format.grouping
+                && cached.numbering_system == format.numbering_system
+                && cached.display == display
+        }) {
+            let mut decimal_preferences = DecimalFormatterPreferences::from(locale);
+            decimal_preferences.numbering_system = format.numbering_system;
+            let decimal_formatter = DecimalFormatter::try_new(
+                decimal_preferences,
+                DecimalFormatterOptions::from(grouping_strategy),
+            )
+            .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+            let mut percent_preferences = PercentFormatterPreferences::from(locale);
+            percent_preferences.numbering_system = format.numbering_system;
+            let formatter = PercentFormatter::try_new_with_decimal_formatter(
+                percent_preferences,
+                decimal_formatter,
+                PercentFormatterOptions::from(display),
+            )
+            .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+            cache.percent = Some(CachedPercentFormatter {
+                grouping: format.grouping,
+                numbering_system: format.numbering_system,
+                display,
+                formatter,
+            });
+        }
+        return Ok(cache
+            .percent
+            .as_ref()
+            .expect("percent formatter initialized")
+            .formatter
+            .format(&decimal)
+            .to_string());
+    }
+    if !cache.decimal.as_ref().is_some_and(|cached| {
         cached.grouping == format.grouping && cached.numbering_system == format.numbering_system
     }) {
-        let grouping_strategy = match format.grouping {
-            NumberGrouping::Auto => GroupingStrategy::Auto,
-            NumberGrouping::Always => GroupingStrategy::Always,
-            NumberGrouping::Never => GroupingStrategy::Never,
-            NumberGrouping::Min2 => GroupingStrategy::Min2,
-        };
         let mut preferences = DecimalFormatterPreferences::from(locale);
         preferences.numbering_system = format.numbering_system;
         let formatter = DecimalFormatter::try_new(
@@ -1405,13 +1462,14 @@ fn render_resolved_number(
             DecimalFormatterOptions::from(grouping_strategy),
         )
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-        *cache = Some(CachedDecimalFormatter {
+        cache.decimal = Some(CachedDecimalFormatter {
             grouping: format.grouping,
             numbering_system: format.numbering_system,
             formatter,
         });
     }
     Ok(cache
+        .decimal
         .as_ref()
         .expect("decimal formatter initialized")
         .formatter
@@ -1750,41 +1808,6 @@ fn validate_enum_option(
     Err(bad_option())
 }
 
-fn parse_minimum_fraction_digits(
-    options: &EffectiveOptions<'_>,
-) -> Result<Option<usize>, FormatError> {
-    parse_digit_option(
-        options,
-        BuiltinOptionKey::MinimumFractionDigits,
-        MAX_FRACTION_DIGITS,
-    )
-}
-
-fn parse_maximum_fraction_digits(
-    options: &EffectiveOptions<'_>,
-) -> Result<Option<usize>, FormatError> {
-    parse_digit_option(
-        options,
-        BuiltinOptionKey::MaximumFractionDigits,
-        MAX_FRACTION_DIGITS,
-    )
-}
-
-fn parse_digit_option(
-    options: &EffectiveOptions<'_>,
-    key: BuiltinOptionKey,
-    max: usize,
-) -> Result<Option<usize>, FormatError> {
-    let Some(raw) = options.get(key) else {
-        return Ok(None);
-    };
-    let value = raw.parse::<usize>().map_err(|_| bad_option())?;
-    if value > max {
-        return Err(bad_option());
-    }
-    Ok(Some(value))
-}
-
 fn validate_digit_range_relationship(
     min: Option<usize>,
     max: Option<usize>,
@@ -1882,29 +1905,6 @@ fn carry_integer_digits(digits: &mut Vec<u8>) {
     digits.insert(0, b'1');
 }
 
-fn parse_minimum_integer_digits(
-    options: &EffectiveOptions<'_>,
-) -> Result<Option<usize>, FormatError> {
-    parse_digit_option(
-        options,
-        BuiltinOptionKey::MinimumIntegerDigits,
-        MAX_INTEGER_DIGITS,
-    )
-}
-
-fn parse_sign_display(options: &EffectiveOptions<'_>) -> Result<SignDisplay, FormatError> {
-    Ok(
-        match options.get(BuiltinOptionKey::SignDisplay).as_deref() {
-            Some("always") => SignDisplay::Always,
-            Some("exceptZero") => SignDisplay::ExceptZero,
-            Some("negative") => SignDisplay::Negative,
-            Some("never") => SignDisplay::Never,
-            Some("auto") | None => SignDisplay::Auto,
-            Some(_) => return Err(bad_option()),
-        },
-    )
-}
-
 #[cfg(test)]
 fn format_scientific(value: f64) -> String {
     if !value.is_finite() {
@@ -1970,37 +1970,6 @@ fn numeric_operand(value: &Value, catalog: &Catalog) -> Result<f64, FormatError>
             .and_then(parse_number_literal)
             .ok_or_else(bad_operand),
     }
-}
-
-fn format_percent(
-    value: &Value,
-    catalog: &Catalog,
-    minimum_fraction_digits: Option<usize>,
-    sign_display: SignDisplay,
-) -> Result<String, FormatError> {
-    let value = numeric_source(value);
-    if let Value::Number(number) = value {
-        if let NumberValue::NonFinite(value) = number.value {
-            return Ok(format_signed_string(sign_display, format!("{}%", value)));
-        }
-        let rendered = multiply_decimal_by_100(&number.text())?;
-        let rendered = if let Some(minimum) = minimum_fraction_digits {
-            format_int_or_decimal_with_min_fraction_digits(rendered, minimum)
-        } else {
-            rendered
-        };
-        return Ok(format!("{}%", format_signed_string(sign_display, rendered)));
-    }
-    let mut number = numeric_operand(value, catalog)? * 100.0;
-    if number == -0.0 {
-        number = 0.0;
-    }
-    let rendered = if let Some(min) = minimum_fraction_digits {
-        format!("{number:.min$}")
-    } else {
-        number.to_string()
-    };
-    Ok(format!("{rendered}%"))
 }
 
 fn multiply_decimal_by_100(value: &str) -> Result<String, FormatError> {
@@ -3348,7 +3317,8 @@ mod tests {
             false,
         );
         assert_eq!(
-            render_resolved_number(&locale, &mut None, &number).expect("formatted"),
+            render_resolved_number(&locale, &mut IcuFormatterCache::default(), &number)
+                .expect("formatted"),
             "1\u{202f}234"
         );
     }
@@ -3733,16 +3703,16 @@ mod tests {
         let out = host
             .call(0, &[Value::Float(0.5)], FunctionOptions::new(&[]))
             .expect("formatted");
-        assert_eq!(out, Value::Str("50%".to_string()));
+        assert_number_rendered(&mut host, out, "50%");
     }
 
     #[test]
-    fn number_style_percent_rejects_large_integer_that_would_lose_precision() {
+    fn number_style_percent_preserves_large_integer_precision() {
         let mut host = builtin_host(&["number style=percent"]);
-        let err = host
+        let out = host
             .call(0, &[Value::Int(i64::MAX)], FunctionOptions::new(&[]))
-            .expect_err("must fail");
-        assert_function_error(err, MessageFunctionError::BadOperand);
+            .expect("formatted");
+        assert_number_rendered(&mut host, out, "922,337,203,685,477,580,700%");
     }
 
     #[test]
@@ -3751,16 +3721,59 @@ mod tests {
         let out = host
             .call(0, &[Value::Float(0.123)], FunctionOptions::new(&[]))
             .expect("formatted");
-        assert_eq!(out, Value::Str("12.3%".to_string()));
+        assert_number_rendered(&mut host, out, "12.3%");
     }
 
     #[test]
-    fn integer_style_percent_multiplies_by_100() {
+    fn number_style_percent_composes_number_options() {
+        let mut host = builtin_host(&[
+            "number style=percent maximumFractionDigits=1 useGrouping=never",
+            "number style=percent minimumIntegerDigits=4",
+            "number style=percent minimumSignificantDigits=4",
+            "number style=percent numberingSystem=arab",
+        ]);
+
+        let cases = [
+            (0, Value::Float(12.3456), "1234.6%"),
+            (1, Value::Float(0.5), "0,050%"),
+            (2, Value::Float(0.5), "50.00%"),
+            (3, Value::Float(0.5), "٥٠%"),
+        ];
+        for (fn_id, input, expected) in cases {
+            let out = host
+                .call(fn_id, &[input], FunctionOptions::new(&[]))
+                .expect("formatted");
+            assert_number_rendered(&mut host, out, expected);
+        }
+    }
+
+    #[test]
+    fn number_style_percent_is_inherited_and_can_be_reset() {
+        let mut host = builtin_host(&["number style=percent", "number", "number style=decimal"]);
+        let percent = host
+            .call(0, &[Value::Float(0.5)], FunctionOptions::new(&[]))
+            .expect("percent");
+        let inherited = host
+            .call(
+                1,
+                core::slice::from_ref(&percent),
+                FunctionOptions::new(&[]),
+            )
+            .expect("inherited");
+        assert_number_rendered(&mut host, inherited, "50%");
+        let decimal = host
+            .call(2, &[percent], FunctionOptions::new(&[]))
+            .expect("reset");
+        assert_number_rendered(&mut host, decimal, "0.5");
+    }
+
+    #[test]
+    fn integer_style_percent_formats_the_resolved_integer() {
         let mut host = builtin_host(&["integer style=percent"]);
         let out = host
             .call(0, &[Value::Float(0.42)], FunctionOptions::new(&[]))
             .expect("formatted");
-        assert_eq!(out, Value::Str("42%".to_string()));
+        assert_number_rendered(&mut host, out, "0%");
     }
 
     #[test]

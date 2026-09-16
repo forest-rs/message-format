@@ -328,6 +328,7 @@ pub(crate) struct NumberFormatOptions {
     pub(crate) maximum_significant_digits: Option<u8>,
     pub(crate) minimum_integer_digits: Option<u8>,
     pub(crate) numbering_system: Option<NumberingSystem>,
+    pub(crate) style: NumberStyle,
     pub(crate) sign_display: NumberSignDisplay,
     pub(crate) notation: NumberNotation,
     pub(crate) grouping: NumberGrouping,
@@ -341,10 +342,17 @@ impl NumberFormatOptions {
         maximum_significant_digits: None,
         minimum_integer_digits: None,
         numbering_system: None,
+        style: NumberStyle::Decimal,
         sign_display: NumberSignDisplay::Auto,
         notation: NumberNotation::Standard,
         grouping: NumberGrouping::Auto,
     };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumberStyle {
+    Decimal,
+    Percent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
