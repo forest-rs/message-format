@@ -77,7 +77,9 @@ impl DeclarationUses {
                     }
                     self.visit_parts(default, aliases);
                 }
-                Part::MarkupOpen { options, .. } | Part::MarkupClose { options, .. } => {
+                Part::MarkupOpen { options, .. }
+                | Part::MarkupClose { options, .. }
+                | Part::MarkupStandalone { options, .. } => {
                     self.visit_options(options);
                 }
                 Part::Text(_) | Part::Literal(_) | Part::Var(_) => {}

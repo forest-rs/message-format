@@ -611,7 +611,7 @@ fn validate_instruction_operands(
             let len = read_u32(code, base + 5)?;
             validate_literal_ref(decoded.pc, offset, len, literals)?;
         }
-        Opcode::MarkupOpen | Opcode::MarkupClose => {
+        Opcode::MarkupOpen | Opcode::MarkupClose | Opcode::MarkupStandalone => {
             let id = read_u32(code, base + 1)?;
             if id as usize >= string_count {
                 return Err(CatalogError::InvalidStringRef { pc: decoded.pc, id });
@@ -669,7 +669,7 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
             (pops, 1)
         }
         Opcode::ProjectSelect | Opcode::ResolveString => (1, 1),
-        Opcode::MarkupOpen | Opcode::MarkupClose => {
+        Opcode::MarkupOpen | Opcode::MarkupClose | Opcode::MarkupStandalone => {
             let optc = u32::from(code[base + 5]);
             let pops = optc.saturating_mul(2);
             (pops, 0)

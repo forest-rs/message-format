@@ -174,12 +174,16 @@ fn selector_operand_failure_short_circuits_option_resolution() {
     assert_eq!(output.value, "CATCHALL");
     assert_errors_multiset(
         &output.errors,
-        &[missing_arg("x"), FormatError::BadSelector { source: None }],
+        &[
+            missing_arg("x"),
+            function_error(MessageFunctionError::BadOperand),
+            FormatError::BadSelector { source: None },
+        ],
     );
 }
 
 /// A fallback propagated through a local is re-annotated using the current
-/// variable's fallback representation, without invoking the function host.
+/// variable's fallback representation, while reporting the bad operand.
 #[test]
 fn local_fallback_reannotation_uses_current_variable_name() {
     let output = format_output(
@@ -187,7 +191,13 @@ fn local_fallback_reannotation_uses_current_variable_name() {
         &[],
     );
     assert_eq!(output.value, "{$b}");
-    assert_errors_multiset(&output.errors, &[missing_arg("missing")]);
+    assert_errors_multiset(
+        &output.errors,
+        &[
+            missing_arg("missing"),
+            function_error(MessageFunctionError::BadOperand),
+        ],
+    );
 }
 
 /// Plain local aliases retain their own fallback identity when rendered.

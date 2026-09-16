@@ -118,7 +118,7 @@ impl<'a> Iterator for FunctionOptionsIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         for (key, value) in self.inner.by_ref() {
             if !value.is_fallback() {
-                return Some((*key, value));
+                return Some((*key, unwrapped_value(value)));
             }
         }
         None
@@ -170,6 +170,20 @@ pub trait Host {
         _index: &Self::CatalogIndex,
         _fn_id: u16,
     ) -> Option<bool> {
+        None
+    }
+
+    /// Return the diagnostic produced when a known function cannot be called
+    /// because its operand was unresolved.
+    ///
+    /// The default preserves custom-host behavior that can only determine
+    /// operand validity by entering [`Host::call`].
+    fn unresolved_operand_error(
+        &self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+    ) -> Option<MessageFunctionError> {
         None
     }
 
@@ -279,6 +293,15 @@ impl<H: Host + ?Sized> Host for Box<H> {
         fn_id: u16,
     ) -> Option<bool> {
         H::function_is_known(self, catalog, index, fn_id)
+    }
+
+    fn unresolved_operand_error(
+        &self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+    ) -> Option<MessageFunctionError> {
+        H::unresolved_operand_error(self, catalog, index, fn_id)
     }
 
     fn call(
@@ -415,6 +438,14 @@ where
 /// string formatting APIs intentionally discard markup and diagnostics; use the
 /// runtime sink path when you need structured output.
 pub trait FormatSink {
+    /// Whether this sink wants semantic formatting events.
+    ///
+    /// The default keeps ordinary string formatting on its allocation-free
+    /// path. Rich sinks should return `true` and implement the semantic
+    /// callbacks below.
+    fn wants_structured_output(&self) -> bool {
+        false
+    }
     /// Literal text from the message pattern.
     fn literal(&mut self, s: &str);
     /// Expression output (variable interpolation, literal expressions, function results).
@@ -426,6 +457,94 @@ pub trait FormatSink {
     fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]);
     /// Markup close tag with options.
     fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]);
+
+    /// A semantically typed formatted value.
+    fn formatted_value(&mut self, value: &FormattedValue<'_>) {
+        self.expression(&value.value);
+    }
+
+    /// One bidi isolation control surrounding a formatted value.
+    fn bidi_isolation(&mut self, value: &str) {
+        self.expression(value);
+    }
+
+    /// A recoverable expression fallback.
+    fn fallback(&mut self, _source: &str, rendered: &str) {
+        self.expression(rendered);
+    }
+
+    /// A markup boundary with retained semantic metadata.
+    fn markup(
+        &mut self,
+        kind: MarkupKind,
+        name: &str,
+        _id: Option<&str>,
+        options: &[FormatOption<'_>],
+    ) {
+        match kind {
+            MarkupKind::Open => self.markup_open(name, options),
+            MarkupKind::Close => self.markup_close(name, options),
+            MarkupKind::Standalone => {
+                self.markup_open(name, options);
+                self.markup_close(name, options);
+            }
+        }
+    }
+}
+
+/// Semantic kind of a formatted expression value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormattedValueKind {
+    /// A string value.
+    String,
+    /// A localized number value.
+    Number,
+}
+
+/// Direction metadata attached to a formatted string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatDirection {
+    /// Left-to-right text.
+    LeftToRight,
+    /// Right-to-left text.
+    RightToLeft,
+}
+
+/// One semantic field within a formatted value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatField<'a> {
+    /// Field kind, such as `integer`.
+    pub kind: &'a str,
+    /// Rendered field value.
+    pub value: Cow<'a, str>,
+}
+
+/// Metadata for one formatted expression value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormattedValue<'a> {
+    /// Semantic value kind.
+    pub kind: FormattedValueKind,
+    /// Complete rendered value, excluding bidi isolation controls.
+    pub value: Cow<'a, str>,
+    /// Resolved locale, when the formatter supplies one.
+    pub locale: Option<Cow<'a, str>>,
+    /// User-provided `u:id`, when present.
+    pub id: Option<&'a str>,
+    /// Explicit resolved direction, when `ltr` or `rtl` was requested.
+    pub direction: Option<FormatDirection>,
+    /// Semantic subfields of the formatted value.
+    pub fields: &'a [FormatField<'a>],
+}
+
+/// Kind of markup boundary in structured output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkupKind {
+    /// Opening markup.
+    Open,
+    /// Closing markup.
+    Close,
+    /// Self-closing markup.
+    Standalone,
 }
 
 impl FormatSink for String {
@@ -445,6 +564,9 @@ impl FormatSink for String {
 struct SinkForward<'a, S: FormatSink + ?Sized>(&'a mut S);
 
 impl<S: FormatSink + ?Sized> FormatSink for SinkForward<'_, S> {
+    fn wants_structured_output(&self) -> bool {
+        self.0.wants_structured_output()
+    }
     fn literal(&mut self, s: &str) {
         self.0.literal(s);
     }
@@ -459,6 +581,95 @@ impl<S: FormatSink + ?Sized> FormatSink for SinkForward<'_, S> {
 
     fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]) {
         self.0.markup_close(name, options);
+    }
+
+    fn formatted_value(&mut self, value: &FormattedValue<'_>) {
+        self.0.formatted_value(value);
+    }
+
+    fn bidi_isolation(&mut self, value: &str) {
+        self.0.bidi_isolation(value);
+    }
+
+    fn fallback(&mut self, source: &str, rendered: &str) {
+        self.0.fallback(source, rendered);
+    }
+
+    fn markup(
+        &mut self,
+        kind: MarkupKind,
+        name: &str,
+        id: Option<&str>,
+        options: &[FormatOption<'_>],
+    ) {
+        self.0.markup(kind, name, id, options);
+    }
+}
+
+struct IdentifiedSink<'a, S: FormatSink + ?Sized> {
+    sink: &'a mut S,
+    id: &'a str,
+}
+
+impl<S: FormatSink + ?Sized> FormatSink for IdentifiedSink<'_, S> {
+    fn wants_structured_output(&self) -> bool {
+        self.sink.wants_structured_output()
+    }
+
+    fn literal(&mut self, value: &str) {
+        self.sink.literal(value);
+    }
+
+    fn expression(&mut self, value: &str) {
+        if self.sink.wants_structured_output() {
+            self.sink.formatted_value(&FormattedValue {
+                kind: FormattedValueKind::String,
+                value: Cow::Borrowed(value),
+                locale: None,
+                id: Some(self.id),
+                direction: None,
+                fields: &[],
+            });
+        } else {
+            self.sink.expression(value);
+        }
+    }
+
+    fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]) {
+        self.sink.markup_open(name, options);
+    }
+
+    fn markup_close(&mut self, name: &str, options: &[FormatOption<'_>]) {
+        self.sink.markup_close(name, options);
+    }
+
+    fn formatted_value(&mut self, value: &FormattedValue<'_>) {
+        self.sink.formatted_value(&FormattedValue {
+            kind: value.kind,
+            value: Cow::Borrowed(value.value.as_ref()),
+            locale: value.locale.as_deref().map(Cow::Borrowed),
+            id: Some(self.id),
+            direction: value.direction,
+            fields: value.fields,
+        });
+    }
+
+    fn bidi_isolation(&mut self, value: &str) {
+        self.sink.bidi_isolation(value);
+    }
+
+    fn fallback(&mut self, source: &str, rendered: &str) {
+        self.sink.fallback(source, rendered);
+    }
+
+    fn markup(
+        &mut self,
+        kind: MarkupKind,
+        name: &str,
+        id: Option<&str>,
+        options: &[FormatOption<'_>],
+    ) {
+        self.sink.markup(kind, name, id, options);
     }
 }
 
@@ -553,6 +764,16 @@ impl<'a> SelectorValue<'a> {
                         str_id: None,
                     })
             }
+            #[cfg(feature = "icu4x")]
+            Value::Formatted(value) if value.selection.is_some() => Self::Borrowed {
+                view: ValueView::Number(
+                    value
+                        .selection
+                        .as_ref()
+                        .expect("guard requires selectable formatted value"),
+                ),
+                str_id: None,
+            },
             Value::LitRef { off, len } => {
                 catalog
                     .literal_opt(*off, *len)
@@ -928,6 +1149,7 @@ where
                     call_options,
                     &mut diagnostics,
                     &mut expr_state,
+                    sink.wants_structured_output(),
                 )?;
             }
             Opcode::ProjectSelect => {
@@ -942,7 +1164,7 @@ where
                     &mut diagnostics,
                 )?;
             }
-            Opcode::MarkupOpen | Opcode::MarkupClose => {
+            Opcode::MarkupOpen | Opcode::MarkupClose | Opcode::MarkupStandalone => {
                 handle_markup_instruction(
                     sink,
                     values,
@@ -952,6 +1174,7 @@ where
                     base,
                     code,
                     call_options,
+                    &mut diagnostics,
                 )?;
             }
         }
@@ -1155,16 +1378,25 @@ fn resolve_optionless_string(
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
 ) -> Result<Value, FormatError> {
+    let function_fallback = matches!(value, Value::FunctionFallback(_));
     if expr_state.should_skip_call() || value.is_fallback() {
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
             }
         }
+        if function_fallback {
+            record_diagnostic(
+                diagnostics,
+                FormatError::Function(MessageFunctionError::BadOperand),
+            );
+        }
         return expr_state.take_fallback(catalog);
     }
 
-    let resolved = if let Value::Int(value) = value {
+    let mut resolved = if let Value::String(value) = value {
+        value.clone()
+    } else if let Value::Int(value) = value {
         let text = format_i64(*value);
         ResolvedString::from_integer(text.as_str(), *value, StringDirection::Unspecified)
     } else {
@@ -1174,6 +1406,9 @@ fn resolve_optionless_string(
             None => ResolvedString::plain_borrowed(""),
         }
     };
+    if resolved.id.is_none() {
+        resolved.id = value_id(value).map(|id| id.to_string().into_boxed_str());
+    }
     expr_state.clear_fallback();
     Ok(Value::String(resolved))
 }
@@ -1266,6 +1501,7 @@ fn handle_call_opcode<H: Host>(
     call_options: &mut Vec<(u32, Value)>,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
+    structured_output: bool,
 ) -> Result<(), FormatError> {
     let fn_id = read_u16(code, base + 1)?;
     let arg_count = code[base + 3] as usize;
@@ -1291,6 +1527,7 @@ fn handle_call_opcode<H: Host>(
             catalog,
             diagnostics,
             expr_state,
+            structured_output,
         )?
     } else {
         decode_call_args(values, stack, arg_count, call_args)?;
@@ -1304,6 +1541,7 @@ fn handle_call_opcode<H: Host>(
             catalog,
             diagnostics,
             expr_state,
+            structured_output,
         )?
     };
     stack.push(store_value(values, result));
@@ -1322,7 +1560,7 @@ fn handle_project_select<H: Host>(
 ) -> Result<(), FormatError> {
     let fn_id = read_u16(code, base + 1)?;
     let value_id = stack.pop().ok_or(FormatError::StackUnderflow)?;
-    let value = stored_value(values, value_id)?;
+    let value = unwrapped_value(stored_value(values, value_id)?);
     let prechecked_invalid_number = {
         #[cfg(feature = "icu4x")]
         {
@@ -1343,15 +1581,6 @@ fn handle_project_select<H: Host>(
     }
     let mut on_error = |error| record_diagnostic(diagnostics, FormatError::Function(error));
     if matches!(value, Value::Fallback(_)) {
-        if matches!(
-            host.project_select(catalog, index, fn_id, value, &mut on_error),
-            Err(HostCallError::Function(MessageFunctionError::BadOperand))
-        ) {
-            record_diagnostic(
-                diagnostics,
-                FormatError::Function(MessageFunctionError::BadOperand),
-            );
-        }
         stack.push(store_value(values, Value::Null));
         return Ok(());
     }
@@ -1383,6 +1612,7 @@ fn handle_markup_instruction<S>(
     base: usize,
     code: &[u8],
     call_options: &mut Vec<(u32, Value)>,
+    diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) -> Result<(), FormatError>
 where
     S: FormatSink + ?Sized,
@@ -1398,11 +1628,14 @@ where
         resolve_markup_option_key,
     )?;
 
-    if opcode == Opcode::MarkupOpen {
-        emit_markup_open(sink, catalog, name_str_id, call_options);
-    } else {
-        emit_markup_close(sink, catalog, name_str_id, call_options);
-    }
+    emit_markup(
+        sink,
+        catalog,
+        name_str_id,
+        call_options,
+        opcode,
+        diagnostics,
+    );
 
     Ok(())
 }
@@ -1417,6 +1650,7 @@ fn handle_call_instruction<H: Host>(
     catalog: &Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
+    structured_output: bool,
 ) -> Result<Value, FormatError> {
     // If a missing variable was loaded as an operand for this function call,
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
@@ -1437,6 +1671,8 @@ fn handle_call_instruction<H: Host>(
             }
             if host.function_is_known(catalog, index, fn_id) == Some(false) {
                 record_diagnostic(diagnostics, FormatError::UnknownFunction { fn_id });
+            } else if let Some(error) = host.unresolved_operand_error(catalog, index, fn_id) {
+                record_diagnostic(diagnostics, FormatError::Function(error));
             }
             if opcode == Opcode::CallSelect && has_pending_operand_error {
                 record_bad_selector(diagnostics, None);
@@ -1449,18 +1685,113 @@ fn handle_call_instruction<H: Host>(
             expr_state.take_fallback(catalog)
         }
     } else {
-        handle_resolved_call(
+        let inherited_id = structured_output
+            .then(|| {
+                call_args
+                    .first()
+                    .and_then(value_id)
+                    .map(ToString::to_string)
+            })
+            .flatten();
+        let unwrapped_args;
+        let host_args = if call_args
+            .iter()
+            .any(|value| matches!(value, Value::Identified { .. }))
+        {
+            unwrapped_args = call_args
+                .iter()
+                .map(|value| unwrapped_value(value).clone())
+                .collect::<Vec<_>>();
+            unwrapped_args.as_slice()
+        } else {
+            call_args
+        };
+        let result = handle_resolved_call(
             host,
             index,
             opcode,
             fn_id,
-            call_args,
+            host_args,
             call_options,
             catalog,
             diagnostics,
             expr_state,
-        )
+        )?;
+        if opcode == Opcode::CallFunc && structured_output {
+            Ok(attach_call_id(
+                result,
+                resolved_call_id(fn_id, call_options, catalog).or(inherited_id),
+            ))
+        } else {
+            Ok(result)
+        }
     }
+}
+
+fn unwrapped_value(mut value: &Value) -> &Value {
+    while let Value::Identified { value: inner, .. } = value {
+        value = inner;
+    }
+    value
+}
+
+fn value_id(value: &Value) -> Option<&str> {
+    match value {
+        Value::Identified { id, .. } => Some(id),
+        Value::String(value) => value.id.as_deref(),
+        #[cfg(feature = "icu4x")]
+        Value::Number(value) => value.id.as_deref(),
+        #[cfg(feature = "icu4x")]
+        Value::Formatted(value) => value.id.as_deref(),
+        _ => None,
+    }
+}
+
+fn resolved_call_id(fn_id: u16, options: &[(u32, Value)], catalog: &Catalog) -> Option<String> {
+    for (key_id, value) in options.iter().rev() {
+        if catalog.pool_string_opt(*key_id) == Some("u:id") {
+            if value.is_fallback() {
+                return None;
+            }
+            return ValueView::from_value(value, catalog)
+                .map(|value| value.format_display().into_owned());
+        }
+    }
+    catalog
+        .func(fn_id)?
+        .static_options
+        .iter()
+        .find_map(|(key_id, value_id)| {
+            if catalog.pool_string_opt(*key_id) == Some("u:id") {
+                catalog.pool_string_opt(*value_id).map(ToString::to_string)
+            } else {
+                None
+            }
+        })
+}
+
+fn attach_call_id(mut value: Value, id: Option<String>) -> Value {
+    let Some(id) = id else {
+        return value;
+    };
+    match &mut value {
+        Value::String(value) => value.id = Some(id.into_boxed_str()),
+        #[cfg(feature = "icu4x")]
+        Value::Number(value) => value.id = Some(id.into_boxed_str()),
+        #[cfg(feature = "icu4x")]
+        Value::Formatted(value) => value.id = Some(id.into_boxed_str()),
+        Value::Identified {
+            id: existing_id, ..
+        } => *existing_id = id,
+        Value::Null | Value::Fallback(_) | Value::FunctionFallback(_) => return value,
+        _ => {
+            return Value::Identified {
+                value: Box::new(value),
+                id,
+            };
+        }
+    }
+    value
 }
 
 fn handle_resolved_call<H: Host>(
@@ -1582,31 +1913,38 @@ fn emit_expr_literal_slice<S: FormatSink + ?Sized>(
     len: u32,
 ) {
     if let Some(text) = catalog.literal_opt(off, len) {
-        sink.expression(text);
+        emit_string_expression(sink, text);
     }
 }
 
-fn emit_markup_open<S: FormatSink + ?Sized>(
+fn emit_markup<S: FormatSink + ?Sized>(
     sink: &mut S,
     catalog: &Catalog,
     name_id: u32,
     options: &[(u32, Value)],
+    opcode: Opcode,
+    diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) {
     if let Some(name) = catalog.pool_string_opt(name_id) {
-        let resolved = resolve_markup_options(options, catalog);
-        sink.markup_open(name, &resolved);
-    }
-}
-
-fn emit_markup_close<S: FormatSink + ?Sized>(
-    sink: &mut S,
-    catalog: &Catalog,
-    name_id: u32,
-    options: &[(u32, Value)],
-) {
-    if let Some(name) = catalog.pool_string_opt(name_id) {
-        let resolved = resolve_markup_options(options, catalog);
-        sink.markup_close(name, &resolved);
+        let mut resolved = resolve_markup_options(options, catalog);
+        let id = resolved
+            .iter()
+            .find(|option| option.key == "u:id")
+            .map(|option| option.value.clone());
+        if resolved.iter().any(|option| option.key == "u:dir") {
+            record_diagnostic(
+                diagnostics,
+                FormatError::Function(MessageFunctionError::BadOption),
+            );
+        }
+        resolved.retain(|option| option.key != "u:dir");
+        let kind = match opcode {
+            Opcode::MarkupOpen => MarkupKind::Open,
+            Opcode::MarkupClose => MarkupKind::Close,
+            Opcode::MarkupStandalone => MarkupKind::Standalone,
+            _ => return,
+        };
+        sink.markup(kind, name, id.as_deref(), &resolved);
     }
 }
 
@@ -1634,6 +1972,7 @@ impl<'a> ValueView<'a> {
             Value::Int(v) => Some(Self::Int(*v)),
             Value::Float(v) => Some(Self::Float(*v)),
             Value::Str(v) => Some(Self::Text(v)),
+            Value::Identified { value, .. } => Self::from_value(value, catalog),
             Value::String(v) => Some(Self::ExactText(v.text())),
             Value::StrRef(id) => catalog.pool_string_opt(*id).map(Self::Text),
             Value::Fallback(id) => catalog.pool_string_opt(*id).map(Self::Fallback),
@@ -1656,9 +1995,8 @@ impl<'a> ValueView<'a> {
                 sink.expression(rendered.as_str());
             }
             Self::Float(v) => sink.expression(&v.to_string()),
-            Self::Text(v) => sink.expression(v),
-            Self::ExactText(v) => sink.expression(v),
-            Self::Fallback(v) => sink.expression(v),
+            Self::Text(v) | Self::ExactText(v) => emit_string_expression(sink, v),
+            Self::Fallback(v) => emit_fallback(sink, v),
             Self::ResolvedSelect(v) => sink.expression(v),
             #[cfg(feature = "icu4x")]
             Self::Formatted(v) => sink.expression(v),
@@ -1798,6 +2136,29 @@ impl<'a> ValueView<'a> {
     }
 }
 
+fn emit_string_expression<S: FormatSink + ?Sized>(sink: &mut S, value: &str) {
+    if sink.wants_structured_output() {
+        sink.formatted_value(&FormattedValue {
+            kind: FormattedValueKind::String,
+            value: Cow::Borrowed(value),
+            locale: None,
+            id: None,
+            direction: None,
+            fields: &[],
+        });
+    } else {
+        sink.expression(value);
+    }
+}
+
+fn emit_fallback<S: FormatSink + ?Sized>(sink: &mut S, rendered: &str) {
+    let source = rendered
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .unwrap_or(rendered);
+    sink.fallback(source, rendered);
+}
+
 #[cfg(feature = "icu4x")]
 fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatch {
     let matches = match &number.value {
@@ -1841,8 +2202,75 @@ fn display_matches_case(value: &impl fmt::Display, case: &str) -> bool {
 }
 
 fn emit_value_ref<S: FormatSink + ?Sized>(sink: &mut S, catalog: &Catalog, value: &Value) {
+    if let Value::String(value) = value {
+        emit_resolved_string(sink, value, None);
+        return;
+    }
+    if sink.wants_structured_output() {
+        match value {
+            #[cfg(feature = "icu4x")]
+            Value::Formatted(value) => {
+                sink.formatted_value(&FormattedValue {
+                    kind: value.kind,
+                    value: Cow::Borrowed(value.text()),
+                    locale: None,
+                    id: value.id.as_deref(),
+                    direction: None,
+                    fields: &[],
+                });
+                return;
+            }
+            #[cfg(feature = "icu4x")]
+            Value::Number(number) => {
+                sink.formatted_value(&FormattedValue {
+                    kind: FormattedValueKind::Number,
+                    value: Cow::Owned(number.text()),
+                    locale: None,
+                    id: number.id.as_deref(),
+                    direction: None,
+                    fields: &[],
+                });
+                return;
+            }
+            _ => {}
+        }
+    }
     if let Some(view) = ValueView::from_value(value, catalog) {
         view.emit_expression(sink);
+    }
+}
+
+pub(crate) fn emit_resolved_string<'a, S: FormatSink + ?Sized>(
+    sink: &mut S,
+    value: &'a ResolvedString,
+    locale: Option<Cow<'a, str>>,
+) {
+    let (opening, direction) = match value.direction {
+        StringDirection::Unspecified => (None, None),
+        #[cfg(feature = "icu4x")]
+        StringDirection::Auto => (Some("\u{2068}"), None),
+        #[cfg(feature = "icu4x")]
+        StringDirection::Ltr => (Some("\u{2066}"), Some(FormatDirection::LeftToRight)),
+        #[cfg(feature = "icu4x")]
+        StringDirection::Rtl => (Some("\u{2067}"), Some(FormatDirection::RightToLeft)),
+    };
+    if let Some(opening) = opening {
+        sink.bidi_isolation(opening);
+    }
+    if sink.wants_structured_output() {
+        sink.formatted_value(&FormattedValue {
+            kind: FormattedValueKind::String,
+            value: Cow::Borrowed(value.text()),
+            locale,
+            id: value.id.as_deref(),
+            direction,
+            fields: &[],
+        });
+    } else {
+        sink.expression(value.text());
+    }
+    if opening.is_some() {
+        sink.bidi_isolation("\u{2069}");
     }
 }
 
@@ -1853,6 +2281,17 @@ fn emit_output_value<H: Host, S: FormatSink + ?Sized>(
     catalog: &Catalog,
     value: &Value,
 ) {
+    if let Value::Identified { value, id } = value {
+        let mut identified = IdentifiedSink {
+            sink,
+            id: id.as_str(),
+        };
+        let mut forwarded = SinkForward(&mut identified);
+        if !host.format_default_to(catalog, index, value, &mut forwarded) {
+            emit_value_ref(&mut identified, catalog, value);
+        }
+        return;
+    }
     let mut forwarded = SinkForward(sink);
     if !host.format_default_to(catalog, index, value, &mut forwarded) {
         emit_value_ref(sink, catalog, value);
@@ -1869,10 +2308,7 @@ fn emit_arg_direct_or_fallback<H: Host, S: FormatSink + ?Sized>(
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) {
     if let Some(value) = args.get_ref(key_id) {
-        let mut forwarded = SinkForward(sink);
-        if !host.format_default_to(catalog, index, value, &mut forwarded) {
-            emit_value_ref(sink, catalog, value);
-        }
+        emit_output_value(sink, host, index, catalog, value);
         return;
     }
 
@@ -1885,7 +2321,7 @@ fn emit_arg_direct_or_fallback<H: Host, S: FormatSink + ?Sized>(
     fallback.push('$');
     fallback.push_str(&key);
     fallback.push('}');
-    sink.expression(&fallback);
+    sink.fallback(&fallback[1..fallback.len() - 1], &fallback);
 }
 
 fn resolve_markup_options<'a>(
@@ -1909,6 +2345,12 @@ fn format_value_display<'a>(value: &'a Value, catalog: &'a Catalog) -> Cow<'a, s
 }
 
 fn value_case_match(value: &Value, case: &str, catalog: &Catalog) -> CaseMatch {
+    #[cfg(feature = "icu4x")]
+    if let Value::Formatted(value) = value
+        && let Some(number) = &value.selection
+    {
+        return ValueView::Number(number).case_match(case);
+    }
     ValueView::from_value(value, catalog).map_or(CaseMatch::No, |view| view.case_match(case))
 }
 
@@ -2581,7 +3023,13 @@ mod tests {
             .format_to_for_test_by_id("main", &[], &mut sink)
             .expect("formatted");
         assert_eq!(sink, "{$name}");
-        assert_eq!(errors, vec![FormatError::MissingArg("name".to_string())]);
+        assert_eq!(
+            errors,
+            vec![
+                FormatError::MissingArg("name".to_string()),
+                FormatError::UnknownFunction { fn_id: 9 },
+            ]
+        );
     }
 
     #[test]
