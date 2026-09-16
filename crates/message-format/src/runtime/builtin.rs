@@ -476,6 +476,20 @@ impl Host for BuiltinHost {
         BuiltinHostCatalogIndex::new(catalog)
     }
 
+    fn function_is_known(
+        &self,
+        _catalog: &Catalog,
+        index: &BuiltinHostCatalogIndex,
+        fn_id: u16,
+    ) -> Option<bool> {
+        Some(
+            index
+                .by_id
+                .get(usize::from(fn_id))
+                .is_some_and(Option::is_some),
+        )
+    }
+
     fn call(
         &mut self,
         catalog: &Catalog,

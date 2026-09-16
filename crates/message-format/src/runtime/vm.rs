@@ -159,6 +159,20 @@ pub trait Host {
     /// `type CatalogIndex = ();` and return `Ok(())`.
     fn index(&mut self, catalog: &Catalog) -> Result<Self::CatalogIndex, FormatError>;
 
+    /// Report whether `fn_id` names a function provided by this host.
+    ///
+    /// Returning `None` means that availability can only be determined by
+    /// calling the function. The VM uses a definite `Some(false)` to report an
+    /// unknown function even when operand failure prevents the call itself.
+    fn function_is_known(
+        &self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Call function id with positional args and `(key, value)` options.
     ///
     /// Recoverable function diagnostics are reported through `on_error`; a
@@ -258,6 +272,15 @@ impl<H: Host + ?Sized> Host for Box<H> {
         H::index(self, catalog)
     }
 
+    fn function_is_known(
+        &self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+    ) -> Option<bool> {
+        H::function_is_known(self, catalog, index, fn_id)
+    }
+
     fn call(
         &mut self,
         catalog: &Catalog,
@@ -322,6 +345,15 @@ impl Host for NoopHost {
 
     fn index(&mut self, _catalog: &Catalog) -> Result<(), FormatError> {
         Ok(())
+    }
+
+    fn function_is_known(
+        &self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+    ) -> Option<bool> {
+        Some(false)
     }
 
     fn call(
@@ -1402,6 +1434,9 @@ fn handle_call_instruction<H: Host>(
         if let Some(pending_errors) = expr_state.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
+            }
+            if host.function_is_known(catalog, index, fn_id) == Some(false) {
+                record_diagnostic(diagnostics, FormatError::UnknownFunction { fn_id });
             }
             if opcode == Opcode::CallSelect && has_pending_operand_error {
                 record_bad_selector(diagnostics, None);

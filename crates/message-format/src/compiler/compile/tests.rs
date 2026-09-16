@@ -2642,6 +2642,35 @@ fn function_options_allow_grammar_whitespace_around_equals() {
     }
 }
 
+#[cfg(feature = "icu4x")]
+#[test]
+fn unresolved_operand_still_reports_an_unknown_function() {
+    for source in ["{$x :f}", "{$x :u:f}"] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut output = String::new();
+        let mut diagnostics = Vec::new();
+
+        formatter
+            .format_to(message, &[], &mut output, Some(&mut diagnostics))
+            .expect("formatted");
+
+        assert_eq!(output, "{$x}", "source={source}");
+        assert_eq!(
+            diagnostics,
+            vec![
+                crate::runtime::FormatError::MissingArg("x".to_string()),
+                crate::runtime::FormatError::UnknownFunction { fn_id: 0 },
+            ],
+            "source={source}"
+        );
+    }
+}
+
 #[test]
 fn malformed_expression_tails_remain_syntax_errors() {
     for source in [
