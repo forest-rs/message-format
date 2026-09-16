@@ -10,6 +10,7 @@ use core::{error::Error, fmt};
 use crate::runtime::Catalog;
 
 use fixed_decimal::Decimal;
+use icu_decimal::preferences::NumberingSystem;
 use icu_experimental::dimension::currency::CurrencyType;
 
 /// String-pool identifier.
@@ -326,6 +327,7 @@ pub(crate) struct NumberFormatOptions {
     pub(crate) minimum_significant_digits: Option<u8>,
     pub(crate) maximum_significant_digits: Option<u8>,
     pub(crate) minimum_integer_digits: Option<u8>,
+    pub(crate) numbering_system: Option<NumberingSystem>,
     pub(crate) sign_display: NumberSignDisplay,
     pub(crate) notation_scientific: bool,
     pub(crate) grouping: NumberGrouping,
@@ -338,6 +340,7 @@ impl NumberFormatOptions {
         minimum_significant_digits: None,
         maximum_significant_digits: None,
         minimum_integer_digits: None,
+        numbering_system: None,
         sign_display: NumberSignDisplay::Auto,
         notation_scientific: false,
         grouping: NumberGrouping::Auto,

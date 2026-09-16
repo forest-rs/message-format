@@ -577,6 +577,12 @@ fn number_minimum_integer_digits() {
     );
 }
 
+/// TR35 §14 — `numberingSystem` overrides the locale's default digits.
+#[test]
+fn number_numbering_system() {
+    assert_format("{12345 :number numberingSystem=arab}", &[], "١٢,٣٤٥");
+}
+
 /// F-34 — String value matching number-literal is accepted as :number operand.
 #[test]
 fn number_string_numeric_literal_accepted() {
