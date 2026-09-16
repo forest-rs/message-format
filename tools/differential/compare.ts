@@ -53,12 +53,14 @@ const MUTATION_VALUES: JsonValue[] = [
   "مرحبا",
 ];
 
+const detailed = Deno.args.includes("--all");
+const paths = Deno.args.filter((arg) => !arg.startsWith("--"));
 const repoRoot = await Deno.realPath(new URL("../..", import.meta.url));
 const jsRoot = await Deno.realPath(
-  Deno.args[0] ?? `${repoRoot}/../messageformat`,
+  paths[0] ?? `${repoRoot}/../messageformat`,
 );
 const wgRoot = await Deno.realPath(
-  Deno.args[1] ?? `${repoRoot}/../message-format-wg/test/tests`,
+  paths[1] ?? `${repoRoot}/../message-format-wg/test/tests`,
 );
 const toFileUrl = (path: string) => new URL(`file://${path}`).href;
 const messageformat = await import(
@@ -340,6 +342,7 @@ console.log(JSON.stringify(
     mutatedRepresentatives: representativesByFile(
       disagreements.filter(({ case: tc }) => tc.id.includes("/mutate/")),
     ),
+    ...(detailed ? { disagreements } : {}),
     partDisagreementSample: partDisagreements.slice(0, 3),
   },
   null,
