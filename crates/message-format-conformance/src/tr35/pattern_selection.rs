@@ -144,13 +144,7 @@ fn selector_missing_arg_falls_to_catchall() {
         &[], // no args → selector can't resolve
     );
     assert_eq!(output.value, "CATCHALL");
-    assert_errors_multiset(
-        &output.errors,
-        &[
-            FormatError::MissingArg("x".into()),
-            FormatError::BadSelector { source: None },
-        ],
-    );
+    assert_errors_multiset(&output.errors, &[FormatError::MissingArg("x".into())]);
 }
 
 /// E-7/SEL-5 — Invalid runtime selector options still emit `Bad Selector`.

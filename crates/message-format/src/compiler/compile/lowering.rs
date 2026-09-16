@@ -438,18 +438,15 @@ fn emit_selector_start(
             slot,
             func: Some(func),
         } if is_stored_numeric_keyword_projection(select) => {
-            let fn_id =
-                *func_map
-                    .get(&function_catalog_key(func))
-                    .ok_or(CompileError::internal(
-                        "missing stored numeric function entry",
-                    ))?;
-            code.push(schema::Opcode::LoadLocal as u8);
-            code.extend_from_slice(&slot.to_le_bytes());
-            code.push(schema::Opcode::ProjectSelect as u8);
-            code.extend_from_slice(&fn_id.to_le_bytes());
-            code.push(schema::Opcode::SelectBegin as u8);
-            Ok(())
+            emit_local_projection(*slot, func, func_map, code)
+        }
+        SelectorExpr::CheckedLocal {
+            slot,
+            func: Some(func),
+        } if builtin_numeric_selector_mode(&select.selector).is_none()
+            && !(func.name == "string" && func.options.is_empty()) =>
+        {
+            emit_local_projection(*slot, func, func_map, code)
         }
         SelectorExpr::CheckedLocal { slot, .. } => {
             code.push(schema::Opcode::SelectLocal as u8);
@@ -471,7 +468,7 @@ fn emit_selector_start(
             let str_id = *string_map
                 .get(name)
                 .ok_or(CompileError::internal("missing interned variable"))?;
-            code.push(schema::Opcode::SelectArg as u8);
+            code.push(schema::Opcode::SelectStringArg as u8);
             code.extend_from_slice(&str_id.to_le_bytes());
             Ok(())
         }
@@ -481,6 +478,25 @@ fn emit_selector_start(
             Ok(())
         }
     }
+}
+
+fn emit_local_projection(
+    slot: u32,
+    func: &FunctionSpec,
+    func_map: &BTreeMap<FunctionCatalogKey, u16>,
+    code: &mut Vec<u8>,
+) -> Result<(), CompileError> {
+    let fn_id = *func_map
+        .get(&function_catalog_key(func))
+        .ok_or(CompileError::internal(
+            "missing stored selector function entry",
+        ))?;
+    code.push(schema::Opcode::LoadLocal as u8);
+    code.extend_from_slice(&slot.to_le_bytes());
+    code.push(schema::Opcode::ProjectSelect as u8);
+    code.extend_from_slice(&fn_id.to_le_bytes());
+    code.push(schema::Opcode::SelectBegin as u8);
+    Ok(())
 }
 
 fn lower_selector(
@@ -505,6 +521,7 @@ fn lower_selector(
         SelectorExpr::Call { operand, func } => {
             if func.name == "string" && func.options.is_empty() {
                 emit_operand(operand, string_map, func_map, code)?;
+                code.push(schema::Opcode::ResolveString as u8);
                 return Ok(());
             }
             let func_key = function_catalog_key(func);
@@ -609,6 +626,20 @@ fn emit_call(
     func_map: &BTreeMap<FunctionCatalogKey, u16>,
     code: &mut Vec<u8>,
 ) -> Result<(), CompileError> {
+    if call.func.name == "string" && call.func.options.is_empty() {
+        emit_operand(&call.operand, string_map, func_map, code)?;
+        let fallback = call
+            .fallback
+            .clone()
+            .unwrap_or_else(|| render_operand_fallback(&call.operand, &call.func));
+        let fallback_id = *string_map
+            .get(&fallback)
+            .ok_or(CompileError::internal("missing string fallback"))?;
+        code.push(schema::Opcode::ExprFallback as u8);
+        code.extend_from_slice(&fallback_id.to_le_bytes());
+        code.push(schema::Opcode::ResolveString as u8);
+        return Ok(());
+    }
     let func_key = function_catalog_key(&call.func);
     let fn_id = *func_map
         .get(&func_key)

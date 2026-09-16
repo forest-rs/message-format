@@ -4,7 +4,10 @@
 #[cfg(feature = "icu4x")]
 use crate::runtime::BuiltinHost;
 use crate::runtime::schema;
-use crate::runtime::{Catalog, Formatter, FunctionOptions, HostFn, NoopHost, Value};
+use crate::runtime::{
+    Catalog, Formatter, FunctionOptions, Host, HostCallError, HostFn, MessageFunctionError,
+    NoopHost, Value,
+};
 use alloc::rc::Rc;
 use core::cell::Cell;
 
@@ -38,7 +41,7 @@ fn expect_errors(report: CompileReport) -> Vec<BuildError> {
     report.diagnostics
 }
 
-fn passthrough_host() -> impl crate::runtime::Host<CatalogIndex = ()> {
+fn passthrough_host() -> impl Host<CatalogIndex = ()> {
     HostFn(|_, args: &[Value], _: FunctionOptions<'_>| {
         Ok(args.first().cloned().unwrap_or(Value::Null))
     })
@@ -139,7 +142,10 @@ fn bare_string_input_selects_without_a_function_host() {
             .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let code = opcodes(&catalog);
-    assert_eq!(code.first(), Some(&schema::Opcode::SelectArg));
+    assert_eq!(code.first(), Some(&schema::Opcode::LoadArg));
+    assert!(code.contains(&schema::Opcode::ResolveString));
+    assert!(code.contains(&schema::Opcode::StoreLocal));
+    assert!(code.contains(&schema::Opcode::SelectLocal));
     assert!(!code.contains(&schema::Opcode::CallFunc));
 
     let args = vec![arg(&catalog, "kind", Value::Str("formal".to_string()))];
@@ -176,9 +182,576 @@ fn bare_string_input_uses_exact_text_for_non_string_values() {
     );
 }
 
+#[test]
+fn bare_string_input_selects_present_null_as_empty_text() {
+    for source in [
+        ".input {$x :string} .match $x || {{EMPTY}} * {{OTHER}}",
+        ".input {$x :string} .match $x $x || || {{EMPTY}} * * {{OTHER}}",
+    ] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let args = vec![arg(&catalog, "x", Value::Null)];
+        let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &args)
+                .expect("formatted"),
+            "EMPTY",
+            "source={source}"
+        );
+    }
+}
+
+#[test]
+fn structured_optionless_string_selector_resolves_literal_exactly() {
+    let mut builder = CatalogBuilder::new();
+    builder
+        .add_message(
+            Message::builder("main")
+                .select(
+                    SelectExpr::builder(SelectorExpr::call(
+                        Operand::literal("1.5"),
+                        FunctionSpec::new("string"),
+                    ))
+                    .arm("1", vec![Part::text("WRONG")])
+                    .arm("1.5", vec![Part::text("EXACT")])
+                    .default(vec![Part::text("OTHER")])
+                    .build(),
+                )
+                .build(),
+        )
+        .expect("message");
+
+    let compiled = expect_compiled(builder.compile());
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    assert!(opcodes(&catalog).contains(&schema::Opcode::ResolveString));
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &[])
+            .expect("formatted"),
+        "EXACT"
+    );
+}
+
+#[test]
+fn repeated_bare_string_selector_does_not_require_a_host() {
+    let bytes = compile_str(".input {$kind :string} .match $kind $kind a a {{A}} * * {{OTHER}}")
+        .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "kind", Value::Str("a".to_string()))];
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "A");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn bare_string_selector_is_host_free_when_a_fallback_arm_reads_the_input() {
+    let bytes =
+        compile_str(".input {$kind :string} .match $kind a {{A}} * {{{$kind}}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "kind", Value::Str("a".to_string()))];
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "A");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn missing_bare_string_input_reports_once_before_selector_validation() {
+    let bytes = compile_str(".input {$x :string} .match $x a {{A}} * {{{$x}}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(
+            message,
+            &Vec::<(u32, Value)>::new(),
+            &mut output,
+            Some(&mut diagnostics),
+        )
+        .expect("formatted");
+
+    assert_eq!(output, "{$x}");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(matches!(
+        diagnostics[0],
+        crate::runtime::FormatError::MissingArg(ref name) if name == "x"
+    ));
+}
+
+#[test]
+fn unused_string_input_is_still_resolved_once() {
+    let bytes = compile_str(".input {$x :string} {{hello}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(
+            message,
+            &Vec::<(u32, Value)>::new(),
+            &mut output,
+            Some(&mut diagnostics),
+        )
+        .expect("formatted");
+
+    assert_eq!(output, "hello");
+    assert_eq!(
+        diagnostics,
+        vec![crate::runtime::FormatError::MissingArg("x".to_string())]
+    );
+}
+
 #[cfg(feature = "icu4x")]
 #[test]
-fn direct_input_selector_compacts_later_live_slots() {
+fn string_selector_retries_do_not_repeat_declaration_diagnostics() {
+    let source = ".input {$x :number} .input {$y :string} .match $x $y \
+                  1 a {{EXACT}} one b {{PLURAL}} * * {{OTHER}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "OTHER");
+    assert_eq!(
+        diagnostics,
+        vec![crate::runtime::FormatError::MissingArg("y".to_string())]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn string_input_diagnostic_precedes_later_declaration_diagnostic() {
+    let source = ".input {$x :string} .local $y = {$missing :number} \
+                  .match $x a {{A}} * {{OTHER}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(
+            message,
+            &Vec::<(u32, Value)>::new(),
+            &mut output,
+            Some(&mut diagnostics),
+        )
+        .expect("formatted");
+
+    assert_eq!(output, "OTHER");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::MissingArg("x".to_string()),
+            crate::runtime::FormatError::MissingArg("missing".to_string()),
+        ]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn bare_string_resolution_is_not_locale_number_formatting() {
+    let bytes =
+        compile_str(".input {$x :string} .match $x 1.5 {{MATCH}} * {{OTHER}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "fr".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![arg(&catalog, "x", Value::Float(1.5))];
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "MATCH"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn single_use_string_to_number_chain_avoids_intermediate_string_storage() {
+    let source = ".input {$x :string} .local $n = {$x :number} {{value={$n}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let emitted = opcodes(&catalog);
+
+    assert!(emitted.contains(&schema::Opcode::ResolveString));
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|opcode| **opcode == schema::Opcode::StoreLocal)
+            .count(),
+        1
+    );
+
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![arg(&catalog, "x", Value::Int(21))];
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "value=21"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn fused_string_to_number_resolves_the_producers_operand() {
+    for source in [
+        ".local $n = {42} .local $s = {$n :string} .local $x = {$s :number} {{{$x}}}",
+        ".local $n = {42 :number} .local $s = {$n :string} .local $x = {$s :number} {{{$x}}}",
+    ] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let mut formatter =
+            Formatter::new(&catalog, BuiltinHost::new(&locale).expect("host")).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut output = String::new();
+        let mut diagnostics = Vec::new();
+
+        formatter
+            .format_to(message, &[], &mut output, Some(&mut diagnostics))
+            .expect("formatted");
+
+        assert_eq!(output, "42", "source={source}");
+        assert!(diagnostics.is_empty(), "source={source}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn fused_string_to_number_evaluates_its_input_once() {
+    let source = ".input {$n :custom} .local $s = {$n :string} .local $x = {$s :number} {{{$x}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let calls = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&calls);
+    let mut formatter = Formatter::new(
+        &catalog,
+        HostFn(move |_, args: &[Value], _| {
+            observed.set(observed.get() + 1);
+            Ok(args.first().cloned().unwrap_or(Value::Null))
+        }),
+    )
+    .expect("formatter");
+    let args = vec![arg(&catalog, "n", Value::Int(42))];
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "42"
+    );
+    assert_eq!(calls.get(), 2);
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn ordinary_body_references_prevent_single_use_string_fusion() {
+    let source = ".input {$s :string} .local $n = {$s :number} {{{$s} {$s} {$n}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let mut formatter =
+        Formatter::new(&catalog, BuiltinHost::new(&locale).expect("host")).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &[], &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|error| matches!(error, crate::runtime::FormatError::MissingArg(name) if name == "s"))
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+}
+
+#[derive(Default)]
+struct SplitSelectionHost;
+
+impl Host for SplitSelectionHost {
+    type CatalogIndex = ();
+
+    fn index(
+        &mut self,
+        _catalog: &Catalog,
+    ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+        Ok(())
+    }
+
+    fn call(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Ok(Value::Str("display".to_string()))
+    }
+
+    fn call_select(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Ok(Value::Str("one".to_string()))
+    }
+}
+
+#[derive(Default)]
+struct FailingSelectionHost;
+
+impl Host for FailingSelectionHost {
+    type CatalogIndex = ();
+
+    fn index(
+        &mut self,
+        _catalog: &Catalog,
+    ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+        Ok(())
+    }
+
+    fn call(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Ok(Value::Str("display".to_string()))
+    }
+
+    fn call_select(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Err(HostCallError::Function(MessageFunctionError::BadOperand))
+    }
+}
+
+#[derive(Default)]
+struct FailingNumericResolutionHost;
+
+impl Host for FailingNumericResolutionHost {
+    type CatalogIndex = ();
+
+    fn index(
+        &mut self,
+        _catalog: &Catalog,
+    ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+        Ok(())
+    }
+
+    fn call(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Err(HostCallError::Function(MessageFunctionError::BadOption))
+    }
+
+    fn call_select(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Ok(Value::Str("one".to_string()))
+    }
+}
+
+#[derive(Default)]
+struct RecoveringSelectionHost;
+
+impl Host for RecoveringSelectionHost {
+    type CatalogIndex = ();
+
+    fn index(
+        &mut self,
+        _catalog: &Catalog,
+    ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+        Ok(())
+    }
+
+    fn call(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        args: &[Value],
+        _opts: FunctionOptions<'_>,
+        _on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        Ok(args[0].clone())
+    }
+
+    fn call_select(
+        &mut self,
+        _catalog: &Catalog,
+        _index: &Self::CatalogIndex,
+        _fn_id: u16,
+        _args: &[Value],
+        _opts: FunctionOptions<'_>,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+    ) -> Result<Value, HostCallError> {
+        on_error(MessageFunctionError::BadOption);
+        Ok(Value::Str("one".to_string()))
+    }
+}
+
+#[test]
+fn stored_custom_input_uses_the_hosts_selection_entry_point() {
+    let bytes =
+        compile_str(".input {$x :custom} .match $x one {{ONE}} * {{OTHER}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    let mut formatter = Formatter::new(&catalog, SplitSelectionHost).expect("formatter");
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "ONE"
+    );
+}
+
+#[test]
+fn numeric_input_selection_preserves_custom_host_resolution_failure() {
+    let bytes =
+        compile_str(".input {$n :number} .match $n one {{ONE}} * {{OTHER}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "n", Value::Int(1))];
+    let mut formatter = Formatter::new(&catalog, FailingNumericResolutionHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "OTHER");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOption),
+            crate::runtime::FormatError::BadSelector { source: None },
+        ]
+    );
+}
+
+#[test]
+fn stored_custom_selector_errors_collapse_to_one_bad_selector() {
+    let bytes =
+        compile_str(".input {$x :custom} .match $x one {{ONE}} * {{OTHER}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    let mut formatter = Formatter::new(&catalog, FailingSelectionHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "OTHER");
+    assert_eq!(
+        diagnostics,
+        vec![crate::runtime::FormatError::BadSelector { source: None }]
+    );
+}
+
+#[test]
+fn stored_custom_selector_keeps_recoverable_host_diagnostics() {
+    let bytes =
+        compile_str(".input {$x :custom} .match $x one {{ONE}} * {{OTHER}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    let mut formatter = Formatter::new(&catalog, RecoveringSelectionHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "ONE");
+    assert_eq!(
+        diagnostics,
+        vec![crate::runtime::FormatError::Function(
+            MessageFunctionError::BadOption
+        )]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn string_input_selector_preserves_eager_declaration_slots() {
     let source =
         ".input {$kind :string} .input {$n :number} .match $kind formal {{n={$n}}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
@@ -188,7 +761,7 @@ fn direct_input_selector_compacts_later_live_slots() {
         code.iter()
             .filter(|opcode| **opcode == schema::Opcode::StoreLocal)
             .count(),
-        1
+        2
     );
 
     let locale = "en".parse().expect("locale");
@@ -208,8 +781,8 @@ fn direct_input_selector_compacts_later_live_slots() {
 
 #[cfg(feature = "icu4x")]
 #[test]
-fn unused_runtime_alias_does_not_consume_a_slot() {
-    let source = ".input {$n :number} .local $alias = {$n} {{n={$n}}}";
+fn runtime_value_alias_does_not_consume_a_slot() {
+    let source = ".input {$n :number} .local $alias = {$n} {{n={$alias}}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     assert_eq!(
@@ -223,6 +796,51 @@ fn unused_runtime_alias_does_not_consume_a_slot() {
 
 #[cfg(feature = "icu4x")]
 #[test]
+fn runtime_value_alias_in_dynamic_option_uses_source_slot() {
+    let source = ".input {$digits :number} .local $alias = {$digits} \
+                  {{{$n :number minimumFractionDigits=$alias}}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![
+        arg(&catalog, "digits", Value::Int(2)),
+        arg(&catalog, "n", Value::Int(3)),
+    ];
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "3.00"
+    );
+}
+
+#[test]
+fn unused_implicit_argument_alias_remains_eager() {
+    let bytes = compile_str(".local $alias = {$missing} {{hello}}").expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &[], &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "hello");
+    assert_eq!(
+        diagnostics,
+        vec![crate::runtime::FormatError::MissingArg(
+            "missing".to_string()
+        )]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
 fn stored_numeric_keyword_projection_reuses_declaration_function_entry() {
     let source = ".input {$n :number minimumFractionDigits=2} .match $n one {{one}} * {{other}}";
     let bytes = compile_str(source).expect("compiled");
@@ -230,8 +848,223 @@ fn stored_numeric_keyword_projection_reuses_declaration_function_entry() {
 
     assert_eq!(catalog.func_count(), 1);
     let emitted = opcodes(&catalog);
+    assert!(emitted.contains(&schema::Opcode::CallFunc));
+    assert!(emitted.contains(&schema::Opcode::StoreLocal));
     assert!(emitted.contains(&schema::Opcode::ProjectSelect));
     assert!(!emitted.contains(&schema::Opcode::CallSelect));
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn structured_numeric_selector_calls_apply_the_current_annotation() {
+    for (stored, selector, key) in [
+        ("1.5", FunctionSpec::new("integer"), "one"),
+        (
+            "2",
+            FunctionSpec::new("number").option_literal("select", "ordinal"),
+            "two",
+        ),
+        (
+            "1",
+            FunctionSpec::new("number").option_literal("minimumFractionDigits", "2"),
+            "other",
+        ),
+        (
+            "0",
+            FunctionSpec::new("offset").option_literal("add", "1"),
+            "one",
+        ),
+    ] {
+        let mut builder = CatalogBuilder::new();
+        builder
+            .add_message(
+                Message::builder("main")
+                    .part(Part::Bind {
+                        slot: 0,
+                        fallback: String::from("{$n}"),
+                        value: Box::new(Part::call(CallExpr::new(
+                            Operand::number_literal(stored),
+                            FunctionSpec::new("number"),
+                        ))),
+                    })
+                    .select(
+                        SelectExpr::builder(SelectorExpr::call(Operand::Local(0), selector))
+                            .arm(key, vec![Part::text("MATCH")])
+                            .default(vec![Part::text("OTHER")])
+                            .build(),
+                    )
+                    .build(),
+            )
+            .expect("message");
+        let compiled = expect_compiled(builder.compile());
+        let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+
+        assert_eq!(
+            formatter
+                .format_by_id_for_test("main", &[])
+                .expect("formatted"),
+            "MATCH",
+            "stored={stored}, key={key}"
+        );
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn structured_string_selector_matches_formatted_presentation() {
+    let mut builder = CatalogBuilder::new();
+    builder
+        .add_message(
+            Message::builder("main")
+                .select(
+                    SelectExpr::builder(SelectorExpr::call(
+                        Operand::var("v"),
+                        FunctionSpec::new("string"),
+                    ))
+                    .arm("1%", vec![Part::text("MATCH")])
+                    .default(vec![Part::text("OTHER")])
+                    .build(),
+                )
+                .build(),
+        )
+        .expect("message");
+    let compiled = expect_compiled(builder.compile());
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let value = Value::Formatted(Box::new(crate::runtime::ResolvedFormatted::new(
+        Value::Float(0.01),
+        "1%".to_string(),
+    )));
+    let args = vec![arg(&catalog, "v", value)];
+
+    assert_eq!(
+        formatter
+            .format_by_id_for_test("main", &args)
+            .expect("formatted"),
+        "MATCH"
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn formatted_numeric_reannotation_preserves_source_and_exactness() {
+    for (source, expected) in [
+        (
+            ".local $n = {42 :number} .local $p = {$n :percent} {{{$p} {$p :number}}}",
+            "4200% 42",
+        ),
+        (
+            ".local $n = {9007199254740993 :number} .local $p = {$n :percent} {{{$p} {$p :percent}}}",
+            "900719925474099300% 900719925474099300%",
+        ),
+        (
+            ".local $n = {9007199254740993 :number} .local $c = {$n :currency currency=USD} {{{$c} {$c :currency currency=USD}}}",
+            "USD 9007199254740993 USD 9007199254740993",
+        ),
+    ] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut output = String::new();
+        let mut diagnostics = Vec::new();
+
+        formatter
+            .format_to(message, &[], &mut output, Some(&mut diagnostics))
+            .expect("formatted");
+
+        assert_eq!(output, expected, "source={source}");
+        assert!(diagnostics.is_empty(), "source={source}: {diagnostics:?}");
+    }
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn structured_numeric_selector_preserves_dynamic_select_diagnostics() {
+    let mut builder = CatalogBuilder::new();
+    builder
+        .add_message(
+            Message::builder("main")
+                .part(Part::Bind {
+                    slot: 0,
+                    fallback: String::from("{$n}"),
+                    value: Box::new(Part::call(CallExpr::new(
+                        Operand::number_literal("1"),
+                        FunctionSpec::new("number"),
+                    ))),
+                })
+                .select(
+                    SelectExpr::builder(SelectorExpr::call(
+                        Operand::Local(0),
+                        FunctionSpec::new("number").option_var("select", "mode"),
+                    ))
+                    .arm("one", vec![Part::text("ONE")])
+                    .default(vec![Part::text("OTHER")])
+                    .build(),
+                )
+                .build(),
+        )
+        .expect("message");
+    let compiled = expect_compiled(builder.compile());
+    let catalog = Catalog::from_bytes(&compiled.bytes).expect("catalog");
+    let locale = "en".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![arg(&catalog, "mode", Value::Str("bogus".to_string()))];
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "OTHER");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOption),
+            crate::runtime::FormatError::BadSelector { source: None },
+        ]
+    );
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn reannotated_failed_selector_preserves_fallback_provenance() {
+    let source = ".input {$x :test:select decimalPlaces=9} \
+                  .local $y = {$x :test:select decimalPlaces=1} \
+                  .match $y 1.0 {{1.0}} 1 {{1}} * {{bad-option-value}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "und".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let args = vec![arg(&catalog, "x", Value::Int(1))];
+    let message = formatter.resolve("main").expect("message");
+    let mut output = String::new();
+    let mut diagnostics = Vec::new();
+
+    formatter
+        .format_to(message, &args, &mut output, Some(&mut diagnostics))
+        .expect("formatted");
+
+    assert_eq!(output, "bad-option-value");
+    assert_eq!(
+        diagnostics,
+        vec![
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOption),
+            crate::runtime::FormatError::BadSelector { source: None },
+            crate::runtime::FormatError::Function(MessageFunctionError::BadOperand),
+        ]
+    );
 }
 
 #[test]
@@ -1404,6 +2237,165 @@ fn compile_with_manifest_rejects_selector_only_usage_in_format_position() {
     }
 }
 
+#[test]
+fn compile_with_manifest_accepts_formatting_only_declarations() {
+    let mut manifest = FunctionManifest::new();
+    manifest.insert(FunctionSchema::new("custom:format").allow_format());
+
+    for source in [
+        ".local $x = {42 :custom:format} {{{$x}}}",
+        ".input {$x :custom:format} {{{$x}}}",
+    ] {
+        compile_with_manifest(source, CompileOptions::default(), &manifest)
+            .unwrap_or_else(|error| panic!("source={source}: {error}"));
+    }
+}
+
+#[test]
+fn compile_with_manifest_accepts_selection_only_declarations_and_aliases() {
+    let manifest = custom_select_manifest(custom_select_schema());
+
+    for source in [
+        ".local $x = {a :custom:select} .match $x a {{A}} * {{OTHER}}",
+        ".local $x = {a :custom:select} .local $y = {$x} .match $y a {{A}} * {{OTHER}}",
+    ] {
+        compile_with_manifest(source, CompileOptions::default(), &manifest)
+            .unwrap_or_else(|error| panic!("source={source}: {error}"));
+    }
+}
+
+#[test]
+fn compile_with_manifest_requires_format_permission_for_mixed_declaration_use() {
+    let manifest = custom_select_manifest(custom_select_schema());
+    let err = compile_with_manifest(
+        ".input {$x :custom:select} .match $x a {{{$x}}} * {{OTHER}}",
+        CompileOptions::default(),
+        &manifest,
+    )
+    .expect_err("formatting a selector-only declaration must fail");
+
+    assert!(matches!(
+        err,
+        CompileError::UnsupportedFunctionUsage { usage, .. } if usage == "format"
+    ));
+}
+
+#[test]
+fn compile_with_manifest_propagates_selection_through_structured_aliases() {
+    let selector = FunctionSpec::new("custom:select");
+    let mut builder = CatalogBuilder::new();
+    builder.set_function_manifest(custom_select_manifest(custom_select_schema()));
+    builder
+        .add_message(
+            Message::builder("main")
+                .part(Part::Bind {
+                    slot: 0,
+                    fallback: "{$x}".to_string(),
+                    value: Box::new(Part::call(CallExpr::new(
+                        Operand::literal("a"),
+                        selector.clone(),
+                    ))),
+                })
+                .part(Part::Bind {
+                    slot: 1,
+                    fallback: "{$alias}".to_string(),
+                    value: Box::new(Part::Local(0)),
+                })
+                .select(
+                    SelectExpr::builder(SelectorExpr::CheckedLocal {
+                        slot: 1,
+                        func: Some(selector),
+                    })
+                    .arm("a", vec![Part::text("A")])
+                    .default(vec![Part::text("OTHER")])
+                    .build(),
+                )
+                .build(),
+        )
+        .expect("message");
+
+    expect_compiled(builder.compile());
+}
+
+#[test]
+fn compile_with_manifest_checks_both_uses_without_selector_metadata() {
+    let function = FunctionSpec::new("custom:format");
+    let mut manifest = FunctionManifest::new();
+    manifest.insert(FunctionSchema::new("custom:format").allow_format());
+    let mut builder = CatalogBuilder::new();
+    builder.set_function_manifest(manifest);
+    builder
+        .add_message(
+            Message::builder("main")
+                .part(Part::Bind {
+                    slot: 0,
+                    fallback: "{$x}".to_string(),
+                    value: Box::new(Part::call(CallExpr::new(Operand::literal("a"), function))),
+                })
+                .part(Part::Local(0))
+                .select(
+                    SelectExpr::builder(SelectorExpr::CheckedLocal {
+                        slot: 0,
+                        func: None,
+                    })
+                    .arm("a", vec![Part::text("A")])
+                    .default(vec![Part::text("OTHER")])
+                    .build(),
+                )
+                .build(),
+        )
+        .expect("message");
+
+    assert!(
+        builder.compile().into_result().is_err(),
+        "selection must require selection permission even without selector metadata"
+    );
+}
+
+#[test]
+fn compile_with_manifest_propagates_aliases_inside_select_arms() {
+    let selector = FunctionSpec::new("custom:select");
+    let inner = Part::Select(
+        SelectExpr::builder(SelectorExpr::CheckedLocal {
+            slot: 1,
+            func: Some(selector.clone()),
+        })
+        .arm("a", vec![Part::text("A")])
+        .default(vec![Part::text("OTHER")])
+        .build(),
+    );
+    let outer = SelectExpr::builder(SelectorExpr::literal("outer"))
+        .arm(
+            "outer",
+            vec![
+                Part::Bind {
+                    slot: 1,
+                    fallback: "{$alias}".to_string(),
+                    value: Box::new(Part::Local(0)),
+                },
+                inner,
+            ],
+        )
+        .default(vec![Part::text("OTHER")])
+        .build();
+    let mut builder = CatalogBuilder::new();
+    builder.set_function_manifest(custom_select_manifest(custom_select_schema()));
+    builder
+        .add_message(
+            Message::builder("main")
+                .part(Part::Bind {
+                    slot: 0,
+                    fallback: "{$x}".to_string(),
+                    value: Box::new(Part::call(CallExpr::new(Operand::literal("a"), selector))),
+                })
+                .select(outer)
+                .build(),
+        )
+        .expect("message");
+
+    expect_compiled(builder.compile());
+}
+
 fn custom_select_manifest(schema: FunctionSchema) -> FunctionManifest {
     let mut manifest = FunctionManifest::new();
     manifest.insert(schema);
@@ -1418,12 +2410,14 @@ fn custom_select_schema() -> FunctionSchema {
 fn compile_with_manifest_accepts_selector_annotation_when_allowed() {
     let manifest = custom_select_manifest(custom_select_schema());
 
-    compile_with_manifest(
+    for source in [
         ".input { $kind :custom:select }\n.match $kind\na {{A}}\n* {{OTHER}}",
-        CompileOptions::default(),
-        &manifest,
-    )
-    .expect("compiled");
+        ".input { $kind :custom:select }\n.local $alias = {$kind}\n\
+         .match $alias\na {{A}}\n* {{OTHER}}",
+    ] {
+        compile_with_manifest(source, CompileOptions::default(), &manifest)
+            .unwrap_or_else(|error| panic!("source={source}: {error}"));
+    }
 }
 
 #[test]
@@ -1757,20 +2751,62 @@ fn compiles_and_formats_call() {
 }
 
 #[test]
-fn local_declaration_is_evaluated_once_when_interpolated_twice() {
+fn local_declaration_is_evaluated_once_and_selected_through_the_host() {
     let bytes = compile_str(
         ".local $n = {seed :test:format} .match $n called {{hit {$n} {$n}}} * {{miss}}",
     )
     .expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    struct CountingHost {
+        calls: Rc<Cell<u32>>,
+        selects: Rc<Cell<u32>>,
+    }
+
+    impl Host for CountingHost {
+        type CatalogIndex = ();
+
+        fn index(
+            &mut self,
+            _catalog: &Catalog,
+        ) -> Result<Self::CatalogIndex, crate::runtime::FormatError> {
+            Ok(())
+        }
+
+        fn call(
+            &mut self,
+            _catalog: &Catalog,
+            _index: &Self::CatalogIndex,
+            _fn_id: u16,
+            _args: &[Value],
+            _opts: FunctionOptions<'_>,
+            _on_error: &mut dyn FnMut(MessageFunctionError),
+        ) -> Result<Value, HostCallError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(Value::Str("called".to_string()))
+        }
+
+        fn call_select(
+            &mut self,
+            _catalog: &Catalog,
+            _index: &Self::CatalogIndex,
+            _fn_id: u16,
+            _args: &[Value],
+            _opts: FunctionOptions<'_>,
+            _on_error: &mut dyn FnMut(MessageFunctionError),
+        ) -> Result<Value, HostCallError> {
+            self.selects.set(self.selects.get() + 1);
+            Ok(Value::Str("called".to_string()))
+        }
+    }
+
     let calls = Rc::new(Cell::new(0));
-    let observed = Rc::clone(&calls);
+    let selects = Rc::new(Cell::new(0));
     let mut formatter = Formatter::new(
         &catalog,
-        HostFn(move |_fn_id, _args, _opts| {
-            observed.set(observed.get() + 1);
-            Ok(Value::Str("called".to_string()))
-        }),
+        CountingHost {
+            calls: Rc::clone(&calls),
+            selects: Rc::clone(&selects),
+        },
     )
     .expect("formatter");
     let output = formatter
@@ -1778,12 +2814,20 @@ fn local_declaration_is_evaluated_once_when_interpolated_twice() {
         .expect("formatted");
     assert_eq!(output, "hit called called");
     assert_eq!(calls.get(), 1);
+    assert_eq!(selects.get(), 1);
 }
 
 #[test]
 fn invalid_expr_fails() {
     let err = compile_str("{}").expect_err("must fail");
     assert!(matches!(err, CompileError::InvalidExpr { .. }));
+}
+
+#[test]
+fn reversed_quoted_pattern_delimiters_return_errors_without_panicking() {
+    for source in ["}}{{", ".local $x = {1} }}{{"] {
+        assert!(compile_str(source).is_err(), "source={source}");
+    }
 }
 
 #[test]
@@ -2109,8 +3153,8 @@ fn raw_match_with_local_literal_string_resolves_through_host() {
 
 #[test]
 fn raw_match_with_local_alias_selector_uses_input() {
-    let source =
-        ".input {$kind :string} .local $k = {$kind} .match $k formal {{Good evening}} * {{Hello}}";
+    let source = ".input {$kind :string} .local $k = {$kind} .local $k2 = {$k} \
+                  .match $k2 formal {{Good evening}} * {{Hello}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
@@ -2119,6 +3163,20 @@ fn raw_match_with_local_alias_selector_uses_input() {
         .format_by_id_for_test("main", &args)
         .expect("formatted");
     assert_eq!(out, "Good evening");
+}
+
+#[test]
+fn raw_match_rejects_unannotated_local_alias_selector() {
+    let error = compile_str(
+        ".input {$seed} .local $alias = {$seed} .local $alias2 = {$alias} \
+         .match $alias2 a {{A}} * {{OTHER}}",
+    )
+    .expect_err("an eager alias slot does not supply a selector annotation");
+
+    assert!(matches!(
+        error,
+        CompileError::MissingSelectorAnnotation { .. }
+    ));
 }
 
 #[cfg(feature = "icu4x")]
@@ -2231,8 +3289,8 @@ fn chained_local_aliases_are_substituted() {
 }
 
 #[test]
-fn alias_cycle_reports_resolution_overflow() {
-    let err = compile_str(
+fn long_alias_chain_is_substituted() {
+    let bytes = compile_str(
         ".input {$seed} \
          .local $a = {$seed} \
          .local $b = {$a} \
@@ -2246,9 +3304,14 @@ fn alias_cycle_reports_resolution_overflow() {
          .local $j = {$i} \
          {{Hello {$j}!}}",
     )
-    .expect_err("must fail");
-
-    assert!(matches!(err, CompileError::AliasResolutionOverflow { .. }));
+    .expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let args = vec![arg(&catalog, "seed", Value::Str("Chain".to_string()))];
+    let out = formatter
+        .format_by_id_for_test("main", &args)
+        .expect("formatted");
+    assert_eq!(out, "Hello Chain!");
 }
 
 #[cfg(feature = "icu4x")]
@@ -2266,15 +3329,31 @@ fn local_integer_function_is_evaluated() {
 }
 
 #[test]
-fn local_test_select_decimal_places_is_evaluated() {
+fn local_test_select_decimal_places_is_evaluated_by_the_host() {
     let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1.0 {{A}} * {{B}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let host = HostFn(|_, _: &[Value], _: FunctionOptions<'_>| Ok(Value::Str(String::from("1.0"))));
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
     assert_eq!(out, "A");
+}
+
+#[cfg(feature = "icu4x")]
+#[test]
+fn resolved_test_selector_preserves_exact_decimal_text() {
+    let source = ".local $x = {1 :test:select decimalPlaces=1} .match $x 1 {{integer}} 1.0 {{decimal}} * {{other}}";
+    let bytes = compile_str(source).expect("compiled");
+    let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+    let locale = "en-US".parse().expect("locale");
+    let host = BuiltinHost::new(&locale).expect("host");
+    let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+    let out = formatter
+        .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
+        .expect("formatted");
+    assert_eq!(out, "decimal");
 }
 
 #[test]
@@ -2286,7 +3365,7 @@ fn raw_match_with_dynamic_select_option_uses_default_arm() {
     let code = opcodes(&catalog);
     assert!(code.contains(&schema::Opcode::StoreLocal));
     assert!(code.contains(&schema::Opcode::CheckSelector));
-    assert!(code.contains(&schema::Opcode::SelectLocal));
+    assert!(code.contains(&schema::Opcode::ProjectSelect));
     let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
@@ -2307,11 +3386,11 @@ fn raw_match_with_unstable_selector_chain_uses_default_arm() {
 }
 
 #[test]
-fn raw_match_with_two_local_selectors_resolves_at_compile_time() {
+fn raw_match_with_two_local_selectors_resolves_through_the_host() {
     let source = ".local $x = {1 :test:select} .local $y = {0 :test:select} .match $x $y 1 1 {{1,1}} 1 * {{1,*}} * 1 {{*,1}} * * {{*,*}}";
     let bytes = compile_str(source).expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-    let mut formatter = Formatter::new(&catalog, NoopHost).expect("formatter");
+    let mut formatter = Formatter::new(&catalog, passthrough_host()).expect("formatter");
     let out = formatter
         .format_by_id_for_test("main", &Vec::<(u32, Value)>::new())
         .expect("formatted");
@@ -2619,7 +3698,7 @@ fn custom_host_observes_omitted_missing_option_without_diagnostics() {
 }
 
 #[test]
-fn custom_host_evaluates_string_input_once_for_repeated_uses() {
+fn optionless_string_input_is_resolved_without_the_host() {
     let bytes = compile_str(".input {$x :string} {{A={$x} B={$x}}}").expect("compiled");
     let catalog = Catalog::from_bytes(&bytes).expect("catalog");
     let calls = Rc::new(Cell::new(0));
@@ -2637,9 +3716,9 @@ fn custom_host_evaluates_string_input_once_for_repeated_uses() {
         formatter
             .format_by_id_for_test("main", &args)
             .expect("formatted"),
-        "A=resolved B=resolved"
+        "A=1 B=1"
     );
-    assert_eq!(calls.get(), 1);
+    assert_eq!(calls.get(), 0);
 }
 
 // ─── Attribute values (mf-1m8f) ──────────────────────────────────────

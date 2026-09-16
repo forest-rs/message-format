@@ -511,7 +511,7 @@ fn verify_code(
 
         match decoded.opcode {
             Opcode::ExprFallback if !expr_fallback_pending => expr_fallback_pending = true,
-            Opcode::CallFunc | Opcode::CallSelect | Opcode::StoreLocal => {
+            Opcode::CallFunc | Opcode::CallSelect | Opcode::ResolveString | Opcode::StoreLocal => {
                 expr_fallback_pending = false;
             }
             _ => {
@@ -583,6 +583,7 @@ fn validate_instruction_operands(
         | Opcode::OutLit
         | Opcode::OutArg
         | Opcode::SelectArg
+        | Opcode::SelectStringArg
         | Opcode::CaseStr
         | Opcode::ExprFallback => {
             let id = read_u32(code, base + 1)?;
@@ -656,14 +657,18 @@ fn stack_effect(code: &[u8], decoded: vm::Decoded) -> (u32, u32) {
         Opcode::JmpIfFalse | Opcode::OutVal | Opcode::SelectBegin | Opcode::StoreLocal => (1, 0),
         Opcode::PushConst | Opcode::LoadArg | Opcode::LoadOptionArg => (0, 1),
         Opcode::LoadLocal => (0, 1),
-        Opcode::CheckSelector | Opcode::OutArg | Opcode::SelectArg | Opcode::SelectLocal => (0, 0),
+        Opcode::CheckSelector
+        | Opcode::OutArg
+        | Opcode::SelectArg
+        | Opcode::SelectStringArg
+        | Opcode::SelectLocal => (0, 0),
         Opcode::CallFunc | Opcode::CallSelect => {
             let arg_count = u32::from(code[base + 3]);
             let optc = u32::from(code[base + 4]);
             let pops = arg_count + optc.saturating_mul(2);
             (pops, 1)
         }
-        Opcode::ProjectSelect => (1, 1),
+        Opcode::ProjectSelect | Opcode::ResolveString => (1, 1),
         Opcode::MarkupOpen | Opcode::MarkupClose => {
             let optc = u32::from(code[base + 5]);
             let pops = optc.saturating_mul(2);
@@ -860,7 +865,7 @@ impl AbstractExecutionVerifier {
 
 fn update_select_depth(select_depth: &mut u8, decoded: vm::Decoded) -> Result<(), CatalogError> {
     match decoded.opcode {
-        Opcode::SelectArg | Opcode::SelectLocal | Opcode::SelectBegin => {
+        Opcode::SelectArg | Opcode::SelectStringArg | Opcode::SelectLocal | Opcode::SelectBegin => {
             *select_depth =
                 select_depth
                     .checked_add(1)

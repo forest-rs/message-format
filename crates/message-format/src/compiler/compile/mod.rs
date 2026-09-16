@@ -14,7 +14,7 @@ use alloc::{
 
 use crate::runtime::schema::{self, FuncEntry, MessageEntry};
 
-use crate::common::text::{parse_number_literal, strip_bidi_controls};
+use crate::common::text::parse_number_literal;
 use crate::compiler::manifest::{
     FunctionManifest, FunctionOperandKind, FunctionSchema, FunctionSelectorKeyKind,
 };
@@ -29,6 +29,8 @@ use crate::compiler::syntax::literal::{
     decode_text_fragment, ensure_well_formed_quoted_pattern_body, parse_literal_text,
     validate_balanced_braces,
 };
+use analysis::DeclarationUses;
+mod analysis;
 mod encoder;
 mod error;
 mod frontend;
@@ -38,9 +40,7 @@ mod lowering;
 use encoder::{encode_catalog, sort_messages};
 pub use error::{CompileError, DiagnosticContext};
 use frontend::parse_single_message_with_source;
-use interning::{
-    collect_functions, collect_strings, escape_fallback_literal, function_dynamic_options,
-};
+use interning::{collect_catalog_items, escape_fallback_literal, function_dynamic_options};
 use lowering::{LiteralPool, lower_parts};
 
 /// Literal-pool optimization mode for compiler-emitted `LITS` bytes.
@@ -817,11 +817,10 @@ fn encode_messages(
     messages: &[Message],
     options: CompileOptions,
 ) -> Result<EncodedMessages, CompileError> {
-    let mut all_strings = BTreeSet::new();
-    collect_strings(messages, &mut all_strings);
+    let items = collect_catalog_items(messages)?;
 
     let mut string_map = BTreeMap::new();
-    for (idx, key) in all_strings.into_iter().enumerate() {
+    for (idx, key) in items.strings.into_iter().enumerate() {
         let id = u32::try_from(idx).map_err(|_| CompileError::TooManyStrings)?;
         string_map.insert(key, id);
     }
@@ -831,9 +830,8 @@ fn encode_messages(
         strings[*id as usize] = value;
     }
 
-    let (collected_funcs, func_map) = collect_functions(messages)?;
-
-    let func_entries: Vec<FuncEntry> = collected_funcs
+    let func_entries: Vec<FuncEntry> = items
+        .functions
         .iter()
         .map(|cf| {
             let name_str_id = *string_map
@@ -877,7 +875,7 @@ fn encode_messages(
         lower_parts(
             &message.parts,
             &string_map,
-            &func_map,
+            &items.function_ids,
             &mut literals,
             &mut code,
         )?;
@@ -1104,13 +1102,15 @@ fn collect_manifest_validation_errors(
 ) -> Vec<CompileError> {
     let mut errors = Vec::new();
     for message in messages {
-        collect_manifest_part_errors(&message.parts, manifest, message, &mut errors);
+        let uses = DeclarationUses::analyze(&message.parts);
+        collect_manifest_part_errors(&message.parts, &uses, manifest, message, &mut errors);
     }
     errors
 }
 
 fn collect_manifest_part_errors(
     parts: &[Part],
+    uses: &DeclarationUses,
     manifest: &FunctionManifest,
     message: &Message,
     errors: &mut Vec<CompileError>,
@@ -1128,8 +1128,29 @@ fn collect_manifest_part_errors(
                     errors,
                 );
             }
-            Part::Bind { value, .. } => {
-                collect_manifest_value_errors(value, manifest, message, errors);
+            Part::Bind { slot, value, .. } => {
+                let use_kind = uses.use_of(*slot);
+                let has_format_use = use_kind.formats();
+                let has_select_use = use_kind.selects();
+                let use_site = if has_format_use {
+                    FunctionUse::Format
+                } else if has_select_use {
+                    FunctionUse::Select
+                } else {
+                    // An unused declaration is still an ordinary eager
+                    // resolution, not a selector call.
+                    FunctionUse::Format
+                };
+                collect_manifest_value_errors(value, use_site, manifest, message, errors);
+                if has_format_use && has_select_use {
+                    collect_manifest_value_usage_error(
+                        value,
+                        FunctionUse::Select,
+                        manifest,
+                        message,
+                        errors,
+                    );
+                }
             }
             Part::Select(SelectExpr {
                 selector,
@@ -1138,9 +1159,9 @@ fn collect_manifest_part_errors(
             }) => {
                 collect_selector_manifest_errors(selector, arms, manifest, message, errors);
                 for arm in arms {
-                    collect_manifest_part_errors(&arm.parts, manifest, message, errors);
+                    collect_manifest_part_errors(&arm.parts, uses, manifest, message, errors);
                 }
-                collect_manifest_part_errors(default, manifest, message, errors);
+                collect_manifest_part_errors(default, uses, manifest, message, errors);
             }
             Part::Text(_)
             | Part::Literal(_)
@@ -1156,20 +1177,32 @@ fn collect_manifest_part_errors(
 
 fn collect_manifest_value_errors(
     value: &Part,
+    use_site: FunctionUse,
     manifest: &FunctionManifest,
     message: &Message,
     errors: &mut Vec<CompileError>,
 ) {
     if let Part::Call(CallExpr { operand, func, .. }) = value {
         collect_operand_manifest_errors(operand, manifest, message, errors);
-        collect_function_spec_errors_into(
-            func,
-            Some(operand),
-            FunctionUse::Select,
-            manifest,
-            message,
-            errors,
-        );
+        collect_function_spec_errors_into(func, Some(operand), use_site, manifest, message, errors);
+    }
+}
+
+fn collect_manifest_value_usage_error(
+    value: &Part,
+    use_site: FunctionUse,
+    manifest: &FunctionManifest,
+    message: &Message,
+    errors: &mut Vec<CompileError>,
+) {
+    let Part::Call(CallExpr { func, .. }) = value else {
+        return;
+    };
+    let Some(schema) = manifest.get(&func.name) else {
+        return;
+    };
+    if let Err(error) = validate_function_usage(schema, func, use_site, message) {
+        errors.push(error);
     }
 }
 

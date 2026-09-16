@@ -39,199 +39,157 @@ enum FunctionCatalogOptionValue {
     Var(String),
 }
 
-pub(super) fn collect_strings(messages: &[Message], out: &mut BTreeSet<String>) {
-    for message in messages {
-        out.insert(message.id.clone());
-        collect_parts_strings(&message.parts, out);
-    }
+pub(super) struct CatalogItems {
+    pub(super) strings: BTreeSet<String>,
+    pub(super) functions: Vec<CollectedFunc>,
+    pub(super) function_ids: BTreeMap<FunctionCatalogKey, u16>,
 }
 
-fn collect_parts_strings(parts: &[Part], out: &mut BTreeSet<String>) {
-    for part in parts {
-        match part {
-            Part::Text(_) | Part::Local(_) | Part::CheckSelector(_) => {}
-            Part::Literal(value) => {
-                out.insert(value.clone());
-            }
-            Part::Bind {
-                fallback, value, ..
-            } => {
-                out.insert(fallback.clone());
-                collect_parts_strings(core::slice::from_ref(value), out);
-            }
-            Part::Var(name) => {
-                out.insert(name.clone());
-            }
-            Part::Call(CallExpr {
-                operand,
-                func,
-                fallback,
-            }) => {
-                collect_operand_strings(operand, out);
-                collect_function_strings(func, out);
-                if let Some(fb) = fallback {
-                    out.insert(fb.clone());
-                } else {
-                    out.insert(render_call_fallback(operand, func));
+pub(super) fn collect_catalog_items(messages: &[Message]) -> Result<CatalogItems, CompileError> {
+    let mut items = CatalogItems {
+        strings: BTreeSet::new(),
+        functions: Vec::new(),
+        function_ids: BTreeMap::new(),
+    };
+    for message in messages {
+        items.strings.insert(message.id.clone());
+        items.visit_parts(&message.parts)?;
+    }
+    Ok(items)
+}
+
+impl CatalogItems {
+    fn visit_parts(&mut self, parts: &[Part]) -> Result<(), CompileError> {
+        for part in parts {
+            match part {
+                Part::Text(_) | Part::Local(_) | Part::CheckSelector(_) => {}
+                Part::Literal(value) | Part::Var(value) => {
+                    self.strings.insert(value.clone());
                 }
-            }
-            Part::Select(SelectExpr {
-                selector,
-                arms,
-                default,
-            }) => {
-                collect_selector_strings(selector, out);
-                for arm in arms {
-                    out.insert(arm.key.clone());
-                    collect_parts_strings(&arm.parts, out);
+                Part::Bind {
+                    fallback, value, ..
+                } => {
+                    self.strings.insert(fallback.clone());
+                    self.visit_parts(core::slice::from_ref(value))?;
                 }
-                collect_parts_strings(default, out);
-            }
-            Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
-                out.insert(name.clone());
-                for option in options {
-                    out.insert(option.key.clone());
-                    match &option.value {
-                        FunctionOptionValue::Literal(value) => {
-                            out.insert(value.clone());
-                        }
-                        FunctionOptionValue::Var(var) => {
-                            out.insert(var.clone());
-                        }
-                        FunctionOptionValue::ResolvedVar { name, value } => {
-                            out.insert(name.clone());
-                            out.insert(value.clone());
-                        }
-                        FunctionOptionValue::LocalVar { name, .. } => {
-                            out.insert(name.clone());
-                        }
+                Part::Call(call) => self.visit_call(call)?,
+                Part::Select(SelectExpr {
+                    selector,
+                    arms,
+                    default,
+                }) => {
+                    self.visit_selector(selector)?;
+                    for arm in arms {
+                        self.strings.insert(arm.key.clone());
+                        self.visit_parts(&arm.parts)?;
                     }
+                    self.visit_parts(default)?;
+                }
+                Part::MarkupOpen { name, options } | Part::MarkupClose { name, options } => {
+                    self.strings.insert(name.clone());
+                    self.visit_options(options);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_selector(&mut self, selector: &SelectorExpr) -> Result<(), CompileError> {
+        match selector {
+            SelectorExpr::Var(name) | SelectorExpr::Literal(name) => {
+                self.strings.insert(name.clone());
+            }
+            SelectorExpr::Call { operand, func } => {
+                self.visit_operand(operand)?;
+                self.visit_function(func)?;
+            }
+            SelectorExpr::Local { .. } | SelectorExpr::CheckedLocal { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn visit_call(&mut self, call: &CallExpr) -> Result<(), CompileError> {
+        self.visit_operand(&call.operand)?;
+        self.visit_function(&call.func)?;
+        self.strings.insert(
+            call.fallback
+                .clone()
+                .unwrap_or_else(|| render_call_fallback(&call.operand, &call.func)),
+        );
+        Ok(())
+    }
+
+    fn visit_operand(&mut self, operand: &Operand) -> Result<(), CompileError> {
+        match operand {
+            Operand::Var(value) | Operand::Literal { value, .. } => {
+                self.strings.insert(value.clone());
+            }
+            Operand::Local(_) => {}
+            Operand::Call(call) => self.visit_call(call)?,
+        }
+        Ok(())
+    }
+
+    fn visit_function(&mut self, func: &FunctionSpec) -> Result<(), CompileError> {
+        self.strings.insert(func.name.clone());
+        self.visit_options(&func.options);
+        for option in &func.options {
+            if let FunctionOptionValue::Var(var) = &option.value {
+                self.strings.insert(format!("{{${var}}}"));
+            }
+        }
+        if !is_optionless_string(func) {
+            self.register_function(func)?;
+        }
+        Ok(())
+    }
+
+    fn visit_options(&mut self, options: &[crate::compiler::semantic::FunctionOption]) {
+        for option in options {
+            self.strings.insert(option.key.clone());
+            match &option.value {
+                FunctionOptionValue::Literal(value) | FunctionOptionValue::Var(value) => {
+                    self.strings.insert(value.clone());
+                }
+                FunctionOptionValue::ResolvedVar { name, value } => {
+                    self.strings.insert(name.clone());
+                    self.strings.insert(value.clone());
+                }
+                FunctionOptionValue::LocalVar { name, .. } => {
+                    self.strings.insert(name.clone());
                 }
             }
         }
     }
-}
 
-/// Insert function name and static option key/value strings into the pool,
-/// plus dynamic option key and variable strings.
-fn collect_function_strings(func: &FunctionSpec, out: &mut BTreeSet<String>) {
-    out.insert(func.name.clone());
-    for option in &func.options {
-        out.insert(option.key.clone());
-        match &option.value {
-            FunctionOptionValue::Literal(value) => {
-                out.insert(value.clone());
-            }
-            FunctionOptionValue::Var(var) => {
-                out.insert(var.clone());
-                out.insert(format!("{{${var}}}"));
-            }
-            FunctionOptionValue::ResolvedVar { name, value } => {
-                out.insert(name.clone());
-                out.insert(value.clone());
-            }
-            FunctionOptionValue::LocalVar { name, .. } => {
-                out.insert(name.clone());
-            }
+    fn register_function(&mut self, func: &FunctionSpec) -> Result<(), CompileError> {
+        let key = function_catalog_key(func);
+        if self.function_ids.contains_key(&key) {
+            return Ok(());
         }
+        let id =
+            u16::try_from(self.functions.len()).map_err(|_| CompileError::FunctionIdOverflow)?;
+        self.function_ids.insert(key, id);
+        let static_options = func
+            .options
+            .iter()
+            .filter_map(|option| match &option.value {
+                FunctionOptionValue::Literal(value) => Some((option.key.clone(), value.clone())),
+                FunctionOptionValue::Var(_)
+                | FunctionOptionValue::ResolvedVar { .. }
+                | FunctionOptionValue::LocalVar { .. } => None,
+            })
+            .collect();
+        self.functions.push(CollectedFunc {
+            name: func.name.clone(),
+            static_options,
+        });
+        Ok(())
     }
 }
 
-/// Collect deduplicated function entries from all messages, returning the
-/// entries and a map from catalog key to `func_id`.
-pub(super) fn collect_functions(
-    messages: &[Message],
-) -> Result<(Vec<CollectedFunc>, BTreeMap<FunctionCatalogKey, u16>), CompileError> {
-    let mut func_map: BTreeMap<FunctionCatalogKey, u16> = BTreeMap::new();
-    let mut entries: Vec<CollectedFunc> = Vec::new();
-
-    for message in messages {
-        collect_parts_functions(&message.parts, &mut func_map, &mut entries)?;
-    }
-
-    Ok((entries, func_map))
-}
-
-fn collect_parts_functions(
-    parts: &[Part],
-    func_map: &mut BTreeMap<FunctionCatalogKey, u16>,
-    entries: &mut Vec<CollectedFunc>,
-) -> Result<(), CompileError> {
-    for part in parts {
-        match part {
-            Part::Call(CallExpr { operand, func, .. }) => {
-                collect_operand_functions(operand, func_map, entries)?;
-                register_function(func, func_map, entries)?;
-            }
-            Part::Bind { value, .. } => {
-                collect_parts_functions(core::slice::from_ref(value), func_map, entries)?;
-            }
-            Part::Select(SelectExpr {
-                selector,
-                arms,
-                default,
-            }) => {
-                collect_selector_functions(selector, func_map, entries)?;
-                for arm in arms {
-                    collect_parts_functions(&arm.parts, func_map, entries)?;
-                }
-                collect_parts_functions(default, func_map, entries)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn collect_selector_strings(selector: &SelectorExpr, out: &mut BTreeSet<String>) {
-    match selector {
-        SelectorExpr::Var(name) => {
-            out.insert(name.clone());
-        }
-        SelectorExpr::Local { .. } | SelectorExpr::CheckedLocal { .. } => {}
-        SelectorExpr::Call { operand, func } => {
-            collect_operand_strings(operand, out);
-            collect_function_strings(func, out);
-        }
-        SelectorExpr::Literal(value) => {
-            out.insert(value.clone());
-        }
-    }
-}
-
-fn collect_selector_functions(
-    selector: &SelectorExpr,
-    func_map: &mut BTreeMap<FunctionCatalogKey, u16>,
-    entries: &mut Vec<CollectedFunc>,
-) -> Result<(), CompileError> {
-    match selector {
-        SelectorExpr::Call { operand, func } => {
-            collect_operand_functions(operand, func_map, entries)?;
-            register_function(func, func_map, entries)
-        }
-        SelectorExpr::Var(_)
-        | SelectorExpr::Local { .. }
-        | SelectorExpr::CheckedLocal { .. }
-        | SelectorExpr::Literal(_) => Ok(()),
-    }
-}
-
-fn collect_operand_strings(operand: &Operand, out: &mut BTreeSet<String>) {
-    match operand {
-        Operand::Var(value) | Operand::Literal { value, .. } => {
-            out.insert(value.clone());
-        }
-        Operand::Local(_) => {}
-        Operand::Call(call) => {
-            collect_operand_strings(&call.operand, out);
-            collect_function_strings(&call.func, out);
-            if let Some(fallback) = &call.fallback {
-                out.insert(fallback.clone());
-            } else {
-                out.insert(render_call_fallback(&call.operand, &call.func));
-            }
-        }
-    }
+fn is_optionless_string(func: &FunctionSpec) -> bool {
+    func.name == "string" && func.options.is_empty()
 }
 
 fn render_call_fallback(operand: &Operand, func: &FunctionSpec) -> String {
@@ -245,48 +203,6 @@ fn render_call_fallback(operand: &Operand, func: &FunctionSpec) -> String {
             .clone()
             .unwrap_or_else(|| render_call_fallback(&call.operand, &call.func)),
     }
-}
-
-fn collect_operand_functions(
-    operand: &Operand,
-    func_map: &mut BTreeMap<FunctionCatalogKey, u16>,
-    entries: &mut Vec<CollectedFunc>,
-) -> Result<(), CompileError> {
-    if let Operand::Call(call) = operand {
-        collect_operand_functions(&call.operand, func_map, entries)?;
-        register_function(&call.func, func_map, entries)?;
-    }
-    Ok(())
-}
-
-fn register_function(
-    func: &FunctionSpec,
-    func_map: &mut BTreeMap<FunctionCatalogKey, u16>,
-    entries: &mut Vec<CollectedFunc>,
-) -> Result<(), CompileError> {
-    let key = function_catalog_key(func);
-    if func_map.contains_key(&key) {
-        return Ok(());
-    }
-    let id = u16::try_from(entries.len()).map_err(|_| CompileError::FunctionIdOverflow)?;
-    func_map.insert(key, id);
-
-    let static_options: Vec<(String, String)> = func
-        .options
-        .iter()
-        .filter_map(|opt| match &opt.value {
-            FunctionOptionValue::Literal(value) => Some((opt.key.clone(), value.clone())),
-            FunctionOptionValue::Var(_)
-            | FunctionOptionValue::ResolvedVar { .. }
-            | FunctionOptionValue::LocalVar { .. } => None,
-        })
-        .collect();
-
-    entries.push(CollectedFunc {
-        name: func.name.clone(),
-        static_options,
-    });
-    Ok(())
 }
 
 pub(crate) fn function_catalog_key(func: &FunctionSpec) -> FunctionCatalogKey {

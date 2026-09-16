@@ -744,7 +744,9 @@ fn collect_local_names(locals: &[LocalDeclaration<'_>]) -> BTreeSet<String> {
     names
 }
 
-fn collect_var_refs(expr: &crate::compiler::syntax::ast::ExpressionNode<'_>) -> Vec<String> {
+pub(crate) fn collect_var_refs(
+    expr: &crate::compiler::syntax::ast::ExpressionNode<'_>,
+) -> Vec<String> {
     let mut refs = Vec::new();
     collect_var_refs_from_node(expr, &mut refs);
     refs
