@@ -2616,6 +2616,32 @@ fn function_fallback_reannotation_reports_cascading_bad_operand() {
     );
 }
 
+#[cfg(feature = "icu4x")]
+#[test]
+fn function_options_allow_grammar_whitespace_around_equals() {
+    for source in ["{:f k= v}", "{:f k = v}"] {
+        let bytes = compile_str(source).expect("compiled");
+        let catalog = Catalog::from_bytes(&bytes).expect("catalog");
+        let locale = "en".parse().expect("locale");
+        let host = BuiltinHost::new(&locale).expect("host");
+        let mut formatter = Formatter::new(&catalog, host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut output = String::new();
+        let mut diagnostics = Vec::new();
+
+        formatter
+            .format_to(message, &[], &mut output, Some(&mut diagnostics))
+            .expect("formatted");
+
+        assert_eq!(output, "{:f}", "source={source}");
+        assert_eq!(
+            diagnostics,
+            vec![crate::runtime::FormatError::UnknownFunction { fn_id: 0 }],
+            "source={source}"
+        );
+    }
+}
+
 #[test]
 fn catalog_builder_uses_manifest_for_structured_messages() {
     let mut builder = CatalogBuilder::new();

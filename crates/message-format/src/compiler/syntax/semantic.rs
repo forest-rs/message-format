@@ -846,6 +846,8 @@ fn parse_options_tail(
                 quoted_snippet(token),
             ));
         };
+        let key = key.trim_matches(is_ignorable_char);
+        let value = value.trim_matches(is_ignorable_char);
         if key.is_empty() || value.is_empty() {
             return Err(CompileError::invalid_expr_detail(
                 line,
