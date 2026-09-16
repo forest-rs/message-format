@@ -529,6 +529,21 @@ fn number_notation_scientific() {
     );
 }
 
+/// TR35 §14 — engineering notation uses exponents divisible by three.
+#[test]
+fn number_notation_engineering() {
+    assert_format(
+        "{ $x :number notation=engineering }",
+        &[("x", Value::Int(12345))],
+        "12.345E3",
+    );
+    assert_format(
+        "{ $x :number notation=engineering }",
+        &[("x", Value::Float(0.000123))],
+        "123E-6",
+    );
+}
+
 /// F-17 — :number MUST support useGrouping option.
 #[test]
 fn number_use_grouping() {

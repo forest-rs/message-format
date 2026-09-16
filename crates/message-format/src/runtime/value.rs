@@ -329,7 +329,7 @@ pub(crate) struct NumberFormatOptions {
     pub(crate) minimum_integer_digits: Option<u8>,
     pub(crate) numbering_system: Option<NumberingSystem>,
     pub(crate) sign_display: NumberSignDisplay,
-    pub(crate) notation_scientific: bool,
+    pub(crate) notation: NumberNotation,
     pub(crate) grouping: NumberGrouping,
 }
 
@@ -342,7 +342,7 @@ impl NumberFormatOptions {
         minimum_integer_digits: None,
         numbering_system: None,
         sign_display: NumberSignDisplay::Auto,
-        notation_scientific: false,
+        notation: NumberNotation::Standard,
         grouping: NumberGrouping::Auto,
     };
 }
@@ -354,6 +354,13 @@ pub(crate) enum NumberSignDisplay {
     ExceptZero,
     Negative,
     Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumberNotation {
+    Standard,
+    Scientific,
+    Engineering,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
