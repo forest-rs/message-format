@@ -16,7 +16,7 @@ use fixed_decimal::{Decimal, Sign, SignedRoundingMode, UnsignedRoundingMode};
 use icu_calendar::Date;
 use icu_datetime::fieldsets;
 use icu_datetime::input::{DateTime, Time};
-use icu_datetime::options::Length;
+use icu_datetime::options::{Length, TimePrecision};
 use icu_datetime::{DateTimeFormatter, NoCalendarFormatter};
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};
@@ -121,9 +121,13 @@ enum BuiltinOptionKey {
     Weekday,
     Era,
     TimeZoneName,
+    Length,
+    DateLength,
+    Precision,
+    TimePrecision,
 }
 
-const BUILTIN_OPTION_KEY_COUNT: usize = 26;
+const BUILTIN_OPTION_KEY_COUNT: usize = 30;
 
 impl BuiltinOptionKey {
     const fn index(self) -> usize {
@@ -154,6 +158,10 @@ impl BuiltinOptionKey {
             Self::Weekday => 22,
             Self::Era => 23,
             Self::TimeZoneName => 24,
+            Self::Length => 26,
+            Self::DateLength => 27,
+            Self::Precision => 28,
+            Self::TimePrecision => 29,
         }
     }
 }
@@ -197,9 +205,9 @@ struct DateFormatterCache {
 
 #[derive(Debug, Default)]
 struct TimeFormatterCache {
-    short: Option<NoCalendarFormatter<fieldsets::T>>,
-    medium: Option<NoCalendarFormatter<fieldsets::T>>,
-    long: Option<NoCalendarFormatter<fieldsets::T>>,
+    hour: Option<NoCalendarFormatter<fieldsets::T>>,
+    minute: Option<NoCalendarFormatter<fieldsets::T>>,
+    second: Option<NoCalendarFormatter<fieldsets::T>>,
 }
 
 #[derive(Debug, Default)]
@@ -211,9 +219,9 @@ struct DateTimeFormatterCache {
 
 #[derive(Debug, Default)]
 struct TimeStyleDateTimeFormatterCache {
-    short: Option<DateTimeFormatter<fieldsets::YMDT>>,
-    medium: Option<DateTimeFormatter<fieldsets::YMDT>>,
-    long: Option<DateTimeFormatter<fieldsets::YMDT>>,
+    hour: Option<DateTimeFormatter<fieldsets::YMDT>>,
+    minute: Option<DateTimeFormatter<fieldsets::YMDT>>,
+    second: Option<DateTimeFormatter<fieldsets::YMDT>>,
 }
 
 /// Pre-parsed catalog data needed by the built-in host.
@@ -422,7 +430,7 @@ impl BuiltinHost {
             BuiltinFn::Date => {
                 let text = validate_date_operand(raw_arg, catalog)?;
                 let (date, _) = parse_iso_datetime(text)?;
-                let style = resolve_date_style(&options);
+                let style = resolve_date_style(&options, false);
                 let formatted =
                     format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
                 Ok(resolved_formatted(
@@ -434,9 +442,9 @@ impl BuiltinHost {
             BuiltinFn::Time => {
                 let time_str = validate_time_operand(raw_arg, catalog)?;
                 let (_, time) = parse_iso_datetime(&time_str)?;
-                let style = resolve_time_style(&options);
+                let precision = resolve_time_precision(&options, false);
                 let formatted =
-                    format_icu_time_cached(locale, &mut icu_formatters.time, time, style)?;
+                    format_icu_time_cached(locale, &mut icu_formatters.time, time, precision)?;
                 Ok(resolved_formatted(
                     raw_arg,
                     formatted,
@@ -447,15 +455,15 @@ impl BuiltinHost {
                 validate_datetime_style_field_exclusivity(&options)?;
                 let text = validate_datetime_operand(raw_arg, catalog)?;
                 let (date, time) = parse_iso_datetime(&text)?;
-                let date_style = resolve_date_style(&options);
-                let time_style = resolve_time_style(&options);
+                let date_style = resolve_date_style(&options, true);
+                let time_precision = resolve_time_precision(&options, true);
                 let formatted = format_icu_datetime_cached(
                     locale,
                     &mut icu_formatters.datetime,
                     date,
                     time,
                     date_style,
-                    time_style,
+                    time_precision,
                 )?;
                 Ok(resolved_formatted(
                     raw_arg,
@@ -1417,6 +1425,10 @@ fn parse_builtin_option_key(value: &str) -> Option<BuiltinOptionKey> {
         "weekday" => BuiltinOptionKey::Weekday,
         "era" => BuiltinOptionKey::Era,
         "timeZoneName" => BuiltinOptionKey::TimeZoneName,
+        "length" => BuiltinOptionKey::Length,
+        "dateLength" => BuiltinOptionKey::DateLength,
+        "precision" => BuiltinOptionKey::Precision,
+        "timePrecision" => BuiltinOptionKey::TimePrecision,
         _ => return None,
     })
 }
@@ -1443,6 +1455,11 @@ fn validate_builtin_option_values(
                 BuiltinOptionKey::DateStyle,
                 &["short", "medium", "long", "full"],
             )?;
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::Length,
+                &["short", "medium", "long"],
+            )?;
         }
         BuiltinFn::Time => {
             validate_enum_option(
@@ -1454,6 +1471,11 @@ fn validate_builtin_option_values(
                 options,
                 BuiltinOptionKey::TimeStyle,
                 &["short", "medium", "long", "full"],
+            )?;
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::Precision,
+                &["hour", "minute", "second"],
             )?;
         }
         BuiltinFn::DateTime => {
@@ -1471,6 +1493,16 @@ fn validate_builtin_option_values(
                 options,
                 BuiltinOptionKey::TimeStyle,
                 &["short", "medium", "long", "full"],
+            )?;
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::DateLength,
+                &["short", "medium", "long"],
+            )?;
+            validate_enum_option(
+                options,
+                BuiltinOptionKey::TimePrecision,
+                &["hour", "minute", "second"],
             )?;
         }
         BuiltinFn::String
@@ -2300,10 +2332,16 @@ fn parse_seconds_component(value: &str) -> Result<(u8, u32), FormatError> {
     Ok((second, nanosecond))
 }
 
-/// Resolve the date style from options (`dateStyle` or `style`), defaulting to `medium`.
-fn resolve_date_style(options: &EffectiveOptions<'_>) -> Length {
+/// Resolve the date length, defaulting to `medium`.
+fn resolve_date_style(options: &EffectiveOptions<'_>, datetime: bool) -> Length {
+    let current_key = if datetime {
+        BuiltinOptionKey::DateLength
+    } else {
+        BuiltinOptionKey::Length
+    };
     let style_str = options
-        .get(BuiltinOptionKey::DateStyle)
+        .get(current_key)
+        .or_else(|| options.get(BuiltinOptionKey::DateStyle))
         .or_else(|| options.get(BuiltinOptionKey::Style));
     match style_str.as_deref() {
         Some("short") => Length::Short,
@@ -2312,15 +2350,34 @@ fn resolve_date_style(options: &EffectiveOptions<'_>) -> Length {
     }
 }
 
-/// Resolve the time style from options (`timeStyle` or `style`), defaulting to `short`.
-fn resolve_time_style(options: &EffectiveOptions<'_>) -> Length {
-    let style_str = options
+#[derive(Clone, Copy)]
+enum TimePrecisionBucket {
+    Hour,
+    Minute,
+    Second,
+}
+
+/// Resolve the current precision option, accepting the former style aliases.
+fn resolve_time_precision(options: &EffectiveOptions<'_>, datetime: bool) -> TimePrecisionBucket {
+    let current_key = if datetime {
+        BuiltinOptionKey::TimePrecision
+    } else {
+        BuiltinOptionKey::Precision
+    };
+    let precision = options.get(current_key);
+    match precision.as_deref() {
+        Some("hour") => return TimePrecisionBucket::Hour,
+        Some("second") => return TimePrecisionBucket::Second,
+        Some("minute") => return TimePrecisionBucket::Minute,
+        _ => {}
+    }
+
+    let former_style = options
         .get(BuiltinOptionKey::TimeStyle)
         .or_else(|| options.get(BuiltinOptionKey::Style));
-    match style_str.as_deref() {
-        Some("medium") => Length::Medium,
-        Some("long") | Some("full") => Length::Long,
-        _ => Length::Short,
+    match former_style.as_deref() {
+        Some("medium" | "long" | "full") => TimePrecisionBucket::Second,
+        _ => TimePrecisionBucket::Minute,
     }
 }
 
@@ -2335,11 +2392,14 @@ impl DateFormatterCache {
 }
 
 impl TimeFormatterCache {
-    fn slot_mut(&mut self, style: Length) -> &mut Option<NoCalendarFormatter<fieldsets::T>> {
-        match style_bucket(style) {
-            StyleBucket::Short => &mut self.short,
-            StyleBucket::Medium => &mut self.medium,
-            StyleBucket::Long => &mut self.long,
+    fn slot_mut(
+        &mut self,
+        precision: TimePrecisionBucket,
+    ) -> &mut Option<NoCalendarFormatter<fieldsets::T>> {
+        match precision {
+            TimePrecisionBucket::Hour => &mut self.hour,
+            TimePrecisionBucket::Minute => &mut self.minute,
+            TimePrecisionBucket::Second => &mut self.second,
         }
     }
 }
@@ -2348,17 +2408,17 @@ impl DateTimeFormatterCache {
     fn slot_mut(
         &mut self,
         date_style: Length,
-        time_style: Length,
+        time_precision: TimePrecisionBucket,
     ) -> &mut Option<DateTimeFormatter<fieldsets::YMDT>> {
         let time_slots = match style_bucket(date_style) {
             StyleBucket::Short => &mut self.short,
             StyleBucket::Medium => &mut self.medium,
             StyleBucket::Long => &mut self.long,
         };
-        match style_bucket(time_style) {
-            StyleBucket::Short => &mut time_slots.short,
-            StyleBucket::Medium => &mut time_slots.medium,
-            StyleBucket::Long => &mut time_slots.long,
+        match time_precision {
+            TimePrecisionBucket::Hour => &mut time_slots.hour,
+            TimePrecisionBucket::Minute => &mut time_slots.minute,
+            TimePrecisionBucket::Second => &mut time_slots.second,
         }
     }
 }
@@ -2385,14 +2445,15 @@ fn format_icu_time_cached(
     locale: &Locale,
     cache: &mut TimeFormatterCache,
     time: Time,
-    style: Length,
+    precision: TimePrecisionBucket,
 ) -> Result<String, FormatError> {
-    let slot = cache.slot_mut(style);
+    let slot = cache.slot_mut(precision);
     if slot.is_none() {
         *slot = Some(
-            NoCalendarFormatter::try_new(locale.clone().into(), time_field_set(style)).map_err(
-                |_| unsupported_operation(UnsupportedOperation::TimeFormattingForLocale),
-            )?,
+            NoCalendarFormatter::try_new(locale.clone().into(), time_field_set(precision))
+                .map_err(|_| {
+                    unsupported_operation(UnsupportedOperation::TimeFormattingForLocale)
+                })?,
         );
     }
     let formatter = slot.as_ref().expect("time formatter initialized");
@@ -2405,14 +2466,14 @@ fn format_icu_datetime_cached(
     date: Date<icu_calendar::Iso>,
     time: Time,
     date_style: Length,
-    time_style: Length,
+    time_precision: TimePrecisionBucket,
 ) -> Result<String, FormatError> {
-    let slot = cache.slot_mut(date_style, time_style);
+    let slot = cache.slot_mut(date_style, time_precision);
     if slot.is_none() {
         *slot = Some(
             DateTimeFormatter::try_new(
                 locale.clone().into(),
-                datetime_field_set(date_style, time_style),
+                datetime_field_set(date_style, time_precision),
             )
             .map_err(|_| {
                 unsupported_operation(UnsupportedOperation::DateTimeFormattingForLocale)
@@ -2447,20 +2508,20 @@ fn date_field_set(style: Length) -> fieldsets::YMD {
     }
 }
 
-fn time_field_set(style: Length) -> fieldsets::T {
-    match style_bucket(style) {
-        StyleBucket::Short => fieldsets::T::short(),
-        StyleBucket::Medium => fieldsets::T::medium(),
-        StyleBucket::Long => fieldsets::T::long(),
+fn icu_time_precision(precision: TimePrecisionBucket) -> TimePrecision {
+    match precision {
+        TimePrecisionBucket::Hour => TimePrecision::Hour,
+        TimePrecisionBucket::Minute => TimePrecision::Minute,
+        TimePrecisionBucket::Second => TimePrecision::Second,
     }
 }
 
-fn datetime_field_set(date_style: Length, time_style: Length) -> fieldsets::YMDT {
-    let date = date_field_set(date_style);
-    match style_bucket(time_style) {
-        StyleBucket::Short => date.with_time_hm(),
-        StyleBucket::Medium | StyleBucket::Long => date.with_time_hms(),
-    }
+fn time_field_set(precision: TimePrecisionBucket) -> fieldsets::T {
+    fieldsets::T::short().with_time_precision(icu_time_precision(precision))
+}
+
+fn datetime_field_set(date_style: Length, time_precision: TimePrecisionBucket) -> fieldsets::YMDT {
+    date_field_set(date_style).with_time(icu_time_precision(time_precision))
 }
 
 fn format_number_default_locale(value: f64, locale: &Locale) -> String {
@@ -3499,7 +3560,7 @@ mod tests {
         assert!(date_host.icu_formatters.date.short.is_some());
 
         let mut time_host = builtin_host(&["time style=short"]);
-        assert!(time_host.icu_formatters.time.short.is_none());
+        assert!(time_host.icu_formatters.time.minute.is_none());
         let _ = time_host
             .call(
                 0,
@@ -3507,10 +3568,17 @@ mod tests {
                 FunctionOptions::new(&[]),
             )
             .expect("formatted");
-        assert!(time_host.icu_formatters.time.short.is_some());
+        assert!(time_host.icu_formatters.time.minute.is_some());
 
         let mut datetime_host = builtin_host(&["datetime"]);
-        assert!(datetime_host.icu_formatters.datetime.medium.short.is_none());
+        assert!(
+            datetime_host
+                .icu_formatters
+                .datetime
+                .medium
+                .minute
+                .is_none()
+        );
         let _ = datetime_host
             .call(
                 0,
@@ -3518,7 +3586,14 @@ mod tests {
                 FunctionOptions::new(&[]),
             )
             .expect("formatted");
-        assert!(datetime_host.icu_formatters.datetime.medium.short.is_some());
+        assert!(
+            datetime_host
+                .icu_formatters
+                .datetime
+                .medium
+                .minute
+                .is_some()
+        );
     }
 
     #[test]
@@ -3587,8 +3662,8 @@ mod tests {
             .expect("formatted");
 
         assert_ne!(short, long);
-        assert!(short_host.icu_formatters.datetime.short.short.is_some());
-        assert!(long_host.icu_formatters.datetime.short.long.is_some());
+        assert!(short_host.icu_formatters.datetime.short.minute.is_some());
+        assert!(long_host.icu_formatters.datetime.short.second.is_some());
     }
 
     #[test]

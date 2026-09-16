@@ -38,6 +38,16 @@ fn date_long_style() {
     );
 }
 
+/// TR35 §15 — :date uses the current `length` option name.
+#[test]
+fn date_long_length() {
+    let out = format_locale("{|2024-09-01| :date length=long}", &[], "en");
+    assert!(
+        out.contains("September"),
+        "expected long date format, got: {out}",
+    );
+}
+
 /// TR35 §15 — :date with explicit style=short.
 #[test]
 fn date_short_style() {
@@ -82,6 +92,20 @@ fn time_default_short_style() {
         out.contains("2:30") || out.contains("14:30"),
         "expected short time format, got: {out}",
     );
+    assert!(
+        !out.contains(":00"),
+        "default minute precision must omit seconds, got: {out}",
+    );
+}
+
+/// TR35 §15 — :time accepts hour, minute, and second precision.
+#[test]
+fn time_precision() {
+    let hour = format_locale("{|2024-05-01T14:30:00| :time precision=hour}", &[], "en");
+    assert!(!hour.contains(":30"), "hour precision got: {hour}");
+
+    let second = format_locale("{|2024-05-01T14:30:00| :time precision=second}", &[], "en");
+    assert!(second.contains(":30:00"), "second precision got: {second}",);
 }
 
 /// TR35 §15 — :time with a date-only literal defaults to 00:00:00.
@@ -115,6 +139,20 @@ fn datetime_default_format() {
     assert!(
         out.contains("May") && out.contains("30"),
         "expected medium date + short time, got: {out}",
+    );
+}
+
+/// TR35 §15 — :datetime uses its current date and time option names.
+#[test]
+fn datetime_length_and_precision() {
+    let out = format_locale(
+        "{|2024-09-01T14:30:00| :datetime dateLength=long timePrecision=second}",
+        &[],
+        "en",
+    );
+    assert!(
+        out.contains("September") && out.contains(":30:00"),
+        "expected long date and second precision, got: {out}",
     );
 }
 
