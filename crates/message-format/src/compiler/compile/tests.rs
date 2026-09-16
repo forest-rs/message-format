@@ -1667,6 +1667,37 @@ fn compile_str_rejects_invalid_builtin_time_precision_literal() {
 }
 
 #[test]
+fn compile_str_validates_datetime_field_option_literals() {
+    compile_str(
+        "{|2024-01-01T12:00:00.123Z| :datetime year=|2-digit| month=long hourCycle=h23 fractionalSecondDigits=3}",
+    )
+    .expect("valid datetime fields");
+
+    for (source, option) in [
+        ("{|2024-01-01| :datetime year=long}", "year"),
+        ("{|2024-01-01| :datetime month=wide}", "month"),
+        (
+            "{|2024-01-01T12:00:00| :datetime fractionalSecondDigits=4}",
+            "fractionalSecondDigits",
+        ),
+        (
+            "{|2024-01-01T12:00:00| :datetime hourCycle=h13}",
+            "hourCycle",
+        ),
+    ] {
+        let error = compile_str(source).expect_err("invalid datetime field");
+        assert!(matches!(
+            error,
+            CompileError::InvalidBuiltinOptionValue {
+                function,
+                option: actual,
+                ..
+            } if function == "datetime" && actual == option
+        ));
+    }
+}
+
+#[test]
 fn compile_str_rejects_invalid_builtin_currency_display_literal() {
     let err =
         compile_str("{42 :currency currency=EUR currencyDisplay=short}").expect_err("must fail");

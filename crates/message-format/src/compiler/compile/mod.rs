@@ -1079,6 +1079,21 @@ fn builtin_option_literal_domain(function: &str, option: &str) -> Option<&'stati
         }
         ("datetime", "dateLength") => Some(&["short", "medium", "long"]),
         ("datetime", "timePrecision") => Some(&["hour", "minute", "second"]),
+        ("datetime", "weekday" | "era") => Some(&["long", "short", "narrow"]),
+        ("datetime", "year" | "day" | "hour" | "minute" | "second") => {
+            Some(&["numeric", "2-digit"])
+        }
+        ("datetime", "month") => Some(&["numeric", "2-digit", "long", "short", "narrow"]),
+        ("datetime", "fractionalSecondDigits") => Some(&["1", "2", "3"]),
+        ("datetime", "hourCycle") => Some(&["h11", "h12", "h23", "h24"]),
+        ("datetime", "timeZoneName") => Some(&[
+            "long",
+            "short",
+            "shortOffset",
+            "longOffset",
+            "shortGeneric",
+            "longGeneric",
+        ]),
         _ => None,
     }
 }
