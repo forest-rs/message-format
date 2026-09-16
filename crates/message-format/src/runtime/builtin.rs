@@ -751,10 +751,7 @@ impl Host for BuiltinHost {
                     kind: value.kind,
                     value: Cow::Borrowed(value.text()),
                     locale: Some(Cow::Owned(self.locale.to_string())),
-                    id: value
-                        .id
-                        .as_deref()
-                        .or_else(|| value.selection.as_ref()?.id.as_deref()),
+                    id: None,
                     direction: None,
                     fields: &[],
                 });
@@ -781,7 +778,7 @@ impl Host for BuiltinHost {
                     kind: FormattedValueKind::Number,
                     value: Cow::Borrowed(formatted.as_str()),
                     locale: Some(Cow::Owned(self.locale.to_string())),
-                    id: number.id.as_deref(),
+                    id: None,
                     direction: None,
                     fields,
                 });
@@ -823,7 +820,6 @@ fn plain_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Cow<'a, str> {
         Value::Int(v) => Cow::Owned(v.to_string()),
         Value::Float(v) => Cow::Owned(v.to_string()),
         Value::Str(v) => Cow::Borrowed(v.as_str()),
-        Value::Identified { value, .. } => plain_text(catalog, value),
         Value::String(v) => Cow::Borrowed(v.text()),
         Value::StrRef(id) => catalog
             .pool_string_opt(*id)
@@ -872,7 +868,7 @@ fn format_string(
         && dir.as_deref() == Some("\0inherit")
     {
         // Compiler-generated default isolation preserves explicit direction
-        // and identity already established by a stored resolved string.
+        // already established by a stored resolved string.
         let mut resolved = value.clone();
         if resolved.direction == StringDirection::Unspecified {
             resolved.direction = StringDirection::Auto;
@@ -886,22 +882,15 @@ fn format_string(
         Some("auto" | "\0inherit") => StringDirection::Auto,
         Some(_) => StringDirection::Unspecified,
     };
-    let id = options
-        .get(BuiltinOptionKey::UId)
-        .map(|value| value.into_owned().into_boxed_str());
     if let Value::Int(value) = value {
         let text = format_i64(*value);
-        let mut resolved = ResolvedString::from_integer(text.as_str(), *value, direction);
-        resolved.id = id;
-        return resolved;
+        return ResolvedString::from_integer(text.as_str(), *value, direction);
     }
     let text = plain_text(catalog, value);
-    let mut resolved = match text {
+    match text {
         Cow::Borrowed(text) => ResolvedString::from_borrowed(text, direction),
         Cow::Owned(text) => ResolvedString::from_owned(text, direction),
-    };
-    resolved.id = id;
-    resolved
+    }
 }
 
 fn value_text<'a>(catalog: &'a Catalog, value: &'a Value) -> Option<&'a str> {
@@ -937,23 +926,20 @@ fn resolve_number(
     on_error: &mut dyn FnMut(MessageFunctionError),
 ) -> Result<ResolvedNumber, FormatError> {
     let value = numeric_source(value);
-    let (mut number, inherited_format, inherited_selection, inherited_select, inherited_id) =
-        match value {
-            Value::Number(number) => (
-                number.value.clone(),
-                number.format,
-                number.selection,
-                number.has_explicit_select,
-                number.id.clone(),
-            ),
-            _ => (
-                parse_number_value(value, catalog)?,
-                NumberFormatOptions::DEFAULT,
-                NumberSelection::None,
-                false,
-                None,
-            ),
-        };
+    let (mut number, inherited_format, inherited_selection, inherited_select) = match value {
+        Value::Number(number) => (
+            number.value.clone(),
+            number.format,
+            number.selection,
+            number.has_explicit_select,
+        ),
+        _ => (
+            parse_number_value(value, catalog)?,
+            NumberFormatOptions::DEFAULT,
+            NumberSelection::None,
+            false,
+        ),
+    };
     if integer_only {
         // Integer annotations intentionally discard precision inherited from a
         // preceding number annotation. The integer function itself emits no
@@ -1001,12 +987,12 @@ fn resolve_number(
             selection => selection,
         }
     };
-    let mut resolved = ResolvedNumber::new(number, format, selection, has_explicit_select);
-    resolved.id = options
-        .get(BuiltinOptionKey::UId)
-        .map(|value| value.into_owned().into_boxed_str())
-        .or(inherited_id);
-    Ok(resolved)
+    Ok(ResolvedNumber::new(
+        number,
+        format,
+        selection,
+        has_explicit_select,
+    ))
 }
 
 fn resolve_percent(
@@ -1014,21 +1000,12 @@ fn resolve_percent(
     catalog: &Catalog,
     options: &EffectiveOptions<'_>,
 ) -> Result<(ResolvedNumber, ResolvedNumber), FormatError> {
-    let retained_id = match value {
-        Value::Formatted(formatted) => formatted.id.clone(),
-        _ => None,
-    };
     let value = numeric_source(value);
-    let (number, inherited_format, inherited_id) = match value {
-        Value::Number(number) => (
-            number.value.clone(),
-            number.format,
-            retained_id.or_else(|| number.id.clone()),
-        ),
+    let (number, inherited_format) = match value {
+        Value::Number(number) => (number.value.clone(), number.format),
         _ => (
             parse_number_value(value, catalog)?,
             NumberFormatOptions::DEFAULT,
-            retained_id,
         ),
     };
     let text = match &number {
@@ -1055,14 +1032,8 @@ fn resolve_percent(
     if format.maximum_fraction_digits.is_none() {
         format.maximum_fraction_digits = format.minimum_fraction_digits;
     }
-    let id = options
-        .get(BuiltinOptionKey::UId)
-        .map(|value| value.into_owned().into_boxed_str())
-        .or(inherited_id);
-    let mut source = ResolvedNumber::new(number, format, NumberSelection::Plural, false);
-    source.id.clone_from(&id);
-    let mut selection = ResolvedNumber::new(scaled, format, NumberSelection::Plural, false);
-    selection.id = id;
+    let source = ResolvedNumber::new(number, format, NumberSelection::Plural, false);
+    let selection = ResolvedNumber::new(scaled, format, NumberSelection::Plural, false);
     Ok((source, selection))
 }
 

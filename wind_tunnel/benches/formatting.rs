@@ -628,6 +628,7 @@ fn build_icu_datetime_catalog() -> Catalog {
 struct CountingSink {
     events: usize,
     bytes: usize,
+    structured: bool,
 }
 
 impl CountingSink {
@@ -638,6 +639,10 @@ impl CountingSink {
 }
 
 impl FormatSink for CountingSink {
+    fn wants_structured_output(&self) -> bool {
+        self.structured
+    }
+
     fn literal(&mut self, value: &str) {
         self.events += 1;
         self.bytes += value.len();
@@ -662,6 +667,11 @@ impl FormatSink for CountingSink {
         for option in options {
             self.bytes += option.key.len() + option.value.len();
         }
+    }
+
+    fn formatted_value(&mut self, value: &message_format::runtime::FormattedValue<'_>) {
+        self.events += 1;
+        self.bytes += value.value.len() + value.id.map_or(0, str::len);
     }
 }
 
@@ -1454,6 +1464,34 @@ fn bench_runtime_compiled_declarations(c: &mut Criterion) {
                 .format_for_bench(number_message, black_box(&number_args))
                 .expect("format");
             black_box(out);
+        });
+    });
+
+    let identified_catalog =
+        compile_catalog(".local $n = {21 :number u:id=item} {{a={$n} b={$n} c={$n}}}");
+    let identified_host = BuiltinHost::new(&locale("en-US")).expect("host");
+    let mut identified_formatter =
+        Formatter::new(&identified_catalog, identified_host).expect("formatter");
+    let identified_message = identified_formatter
+        .resolve("main")
+        .expect("resolved message");
+    let identified_args: Vec<(u32, Value)> = Vec::new();
+    let mut identified_sink = CountingSink {
+        structured: true,
+        ..CountingSink::default()
+    };
+    group.bench_function("structured_number_id_reused_three_places", |b| {
+        b.iter(|| {
+            identified_sink.reset();
+            identified_formatter
+                .format_to(
+                    identified_message,
+                    black_box(&identified_args),
+                    &mut identified_sink,
+                    None,
+                )
+                .expect("format");
+            black_box((identified_sink.events, identified_sink.bytes));
         });
     });
 
