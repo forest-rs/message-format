@@ -6,25 +6,34 @@
 use alloc::string::String;
 use alloc::{format, string::ToString};
 
-pub(crate) fn is_valid_number_literal(value: &str) -> bool {
+pub(crate) struct NumberLiteralParts<'a> {
+    pub(crate) negative: bool,
+    pub(crate) integer_digits: &'a [u8],
+    pub(crate) fraction_digits: &'a [u8],
+    pub(crate) exponent_digits: &'a [u8],
+}
+
+pub(crate) fn parse_number_literal_parts(value: &str) -> Option<NumberLiteralParts<'_>> {
     let bytes = value.as_bytes();
     let len = bytes.len();
     if len == 0 {
-        return false;
+        return None;
     }
 
     let mut idx = 0_usize;
-    if bytes[idx] == b'-' {
+    let negative = bytes[idx] == b'-';
+    if negative {
         idx += 1;
     }
     if idx >= len {
-        return false;
+        return None;
     }
 
+    let integer_start = idx;
     if bytes[idx] == b'0' {
         idx += 1;
         if idx < len && bytes[idx].is_ascii_digit() {
-            return false;
+            return None;
         }
     } else if bytes[idx].is_ascii_digit() {
         idx += 1;
@@ -32,9 +41,11 @@ pub(crate) fn is_valid_number_literal(value: &str) -> bool {
             idx += 1;
         }
     } else {
-        return false;
+        return None;
     }
+    let integer_digits = &bytes[integer_start..idx];
 
+    let mut fraction_digits = &bytes[0..0];
     if idx < len && bytes[idx] == b'.' {
         idx += 1;
         let frac_start = idx;
@@ -42,10 +53,12 @@ pub(crate) fn is_valid_number_literal(value: &str) -> bool {
             idx += 1;
         }
         if frac_start == idx {
-            return false;
+            return None;
         }
+        fraction_digits = &bytes[frac_start..idx];
     }
 
+    let mut exponent_digits = &bytes[0..0];
     if idx < len && (bytes[idx] == b'e' || bytes[idx] == b'E') {
         idx += 1;
         if idx < len && (bytes[idx] == b'+' || bytes[idx] == b'-') {
@@ -56,11 +69,25 @@ pub(crate) fn is_valid_number_literal(value: &str) -> bool {
             idx += 1;
         }
         if exp_start == idx {
-            return false;
+            return None;
         }
+        exponent_digits = &bytes[exp_start..idx];
     }
 
-    idx == len
+    if idx != len {
+        return None;
+    }
+
+    Some(NumberLiteralParts {
+        negative,
+        integer_digits,
+        fraction_digits,
+        exponent_digits,
+    })
+}
+
+pub(crate) fn is_valid_number_literal(value: &str) -> bool {
+    parse_number_literal_parts(value).is_some()
 }
 
 pub(crate) fn parse_number_literal(value: &str) -> Option<f64> {

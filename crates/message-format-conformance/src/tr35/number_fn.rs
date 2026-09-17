@@ -337,6 +337,21 @@ fn number_selection_exact() {
     );
 }
 
+/// Exact numeric selection accepts only an integer carrier's canonical text.
+#[test]
+fn number_selection_exact_integer_rejects_equivalent_noncanonical_keys() {
+    assert_format(
+        ".input { $x :number select=exact }\n.match $x\n1.0 {{ONE}}\n* {{OTHER}}",
+        &[("x", Value::Int(1))],
+        "OTHER",
+    );
+    assert_format(
+        ".input { $x :number select=exact }\n.match $x\n1e0 {{ONE}}\n* {{OTHER}}",
+        &[("x", Value::Int(1))],
+        "OTHER",
+    );
+}
+
 /// TR35 §14 — numeric exact keys outrank keyword keys during plural selection.
 #[test]
 fn number_selection_plural_exact_key_beats_keyword() {
@@ -344,6 +359,11 @@ fn number_selection_plural_exact_key_beats_keyword() {
         ".input { $x :number select=plural }\n.match $x\none {{KEYWORD}}\n1 {{EXACT}}\n* {{OTHER}}",
         &[("x", Value::Int(1))],
         "EXACT",
+    );
+    assert_format(
+        ".input { $x :number select=plural }\n.match $x\none {{KEYWORD}}\n1.00 {{EXACT}}\n* {{OTHER}}",
+        &[("x", Value::Int(1))],
+        "KEYWORD",
     );
 }
 

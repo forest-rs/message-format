@@ -16,7 +16,10 @@ use crate::runtime;
 /// missing referenced arguments still surface through normal message fallback.
 ///
 /// [`fixed_decimal::Decimal`] arguments may be inserted by value or by
-/// reference. Their scale is preserved, including trailing zeros:
+/// reference. Their scale and sign are preserved, including trailing zeros,
+/// for formatting, [`runtime::ResolvedNumber::text`], and plural operands.
+/// Numeric exact selection instead compares against the value's canonical
+/// plain-decimal serialization, so `1.00` selects the key `1`, not `1.00`:
 ///
 /// ```rust
 /// use core::str::FromStr;
@@ -29,7 +32,9 @@ use crate::runtime;
 /// args.insert("amount", decimal);
 /// ```
 ///
-/// Call [`Decimal::trim_end`] before insertion when normalization is desired:
+/// Call [`Decimal::trim_end`](fixed_decimal::UnsignedDecimal::trim_end) before
+/// insertion when visible formatting and plural scale should also be
+/// normalized:
 ///
 /// ```rust
 /// use core::str::FromStr;
