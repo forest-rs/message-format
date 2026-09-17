@@ -157,6 +157,17 @@ fn decimal_scale_participates_in_plural_selection() {
 }
 
 #[test]
+fn decimal_offset_defaults_to_plural_selection() {
+    let source = ".input { $amount :offset subtract=1 }\n\
+                  .match $amount\n\
+                  one {{one}}\n\
+                  * {{other}}";
+
+    assert_eq!(facade_format(source, decimal("2.0"), "en"), "one");
+    assert_eq!(runtime_format(source, decimal("2.0"), "en"), "one");
+}
+
+#[test]
 fn decimal_exact_selection_uses_one_canonical_spelling() {
     let equivalent_keys = ".input { $amount :number select=exact }\n\
                            .match $amount\n\
