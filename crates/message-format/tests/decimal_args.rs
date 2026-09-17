@@ -157,6 +157,108 @@ fn decimal_scale_participates_in_plural_selection() {
 }
 
 #[test]
+fn decimal_exact_selection_uses_one_canonical_spelling() {
+    let equivalent_keys = ".input { $amount :number select=exact }\n\
+                           .match $amount\n\
+                           1.0 {{fractional spelling}}\n\
+                           1e0 {{exponent spelling}}\n\
+                           1 {{canonical spelling}}\n\
+                           * {{other}}";
+    for amount in [decimal("1"), decimal("1.00"), decimal("1e0")] {
+        assert_eq!(
+            facade_format(equivalent_keys, amount, "en"),
+            "canonical spelling"
+        );
+    }
+
+    let fraction = ".input { $amount :number select=exact }\n\
+                    .match $amount\n\
+                    1.2300 {{retained scale}}\n\
+                    123e-2 {{exponent spelling}}\n\
+                    1.23 {{canonical spelling}}\n\
+                    * {{other}}";
+    assert_eq!(
+        facade_format(fraction, decimal("1.2300"), "en"),
+        "canonical spelling"
+    );
+
+    let zero = ".input { $amount :number select=exact }\n\
+                .match $amount\n\
+                -0 {{negative zero}}\n\
+                0.0 {{fractional zero}}\n\
+                0 {{canonical zero}}\n\
+                * {{other}}";
+    assert_eq!(
+        facade_format(zero, decimal("-0.00"), "en"),
+        "canonical zero"
+    );
+
+    let plural = ".input { $amount :number select=plural }\n\
+                  .match $amount\n\
+                  1 {{exact}}\n\
+                  one {{one}}\n\
+                  * {{other}}";
+    assert_eq!(facade_format(plural, decimal("1.00"), "en"), "exact");
+}
+
+#[test]
+fn numeric_transformations_match_the_canonical_transformed_payload() {
+    for (source, amount, expected) in [
+        (
+            ".input {$amount :integer select=exact} .match $amount 1.0 {{noncanonical}} 1 {{integer}} * {{other}}",
+            decimal("1.99"),
+            "integer",
+        ),
+        (
+            ".input {$amount :offset subtract=1 select=exact} .match $amount 1.0 {{noncanonical}} 1 {{offset}} * {{other}}",
+            decimal("2.00"),
+            "offset",
+        ),
+        (
+            ".input {$amount :percent select=exact} .match $amount 1.0 {{noncanonical}} 1 {{percent}} * {{other}}",
+            decimal("0.0100"),
+            "percent",
+        ),
+    ] {
+        assert_eq!(facade_format(source, amount, "en"), expected);
+    }
+}
+
+#[test]
+fn display_options_do_not_change_numeric_exact_serialization() {
+    for (source, amount) in [
+        (
+            ".input {$amount :number select=exact minimumFractionDigits=4 minimumIntegerDigits=6 useGrouping=always notation=scientific numberingSystem=arab signDisplay=always}\n\
+             .match $amount 1.2345 {{payload}} 1.23450 {{display precision}} * {{other}}",
+            decimal("1.2345"),
+        ),
+        (
+            ".input {$amount :number select=exact maximumFractionDigits=2}\n\
+             .match $amount 1.23456 {{payload}} 1.23 {{display precision}} * {{other}}",
+            decimal("1.23456"),
+        ),
+        (
+            ".input {$amount :number select=exact maximumSignificantDigits=3}\n\
+             .match $amount 12345 {{payload}} 12300 {{display precision}} * {{other}}",
+            decimal("12345"),
+        ),
+    ] {
+        assert_eq!(facade_format(source, amount, "en"), "payload");
+    }
+}
+
+#[test]
+fn string_selection_of_decimal_parameters_remains_textual() {
+    let source = ".input { $amount :string }\n\
+                  .match $amount\n\
+                  1 {{integer text}}\n\
+                  1.00 {{decimal text}}\n\
+                  * {{other}}";
+
+    assert_eq!(facade_format(source, decimal("1.00"), "en"), "decimal text");
+}
+
+#[test]
 fn callers_can_explicitly_trim_decimal_scale() {
     let mut amount = decimal("1.00");
     amount.trim_end();

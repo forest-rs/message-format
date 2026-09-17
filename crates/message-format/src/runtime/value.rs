@@ -445,7 +445,9 @@ impl ResolvedNumber {
     /// Return the exact finite numeric value as an ASCII decimal string.
     ///
     /// The returned text contains no locale formatting, grouping, or
-    /// annotation options. Hosts can use it when handling a [`Value::Number`]
+    /// annotation options, and preserves a decimal payload's scale and sign.
+    /// This text is distinct from the canonical serialization used by numeric
+    /// exact selection. Hosts can use it when handling a [`Value::Number`]
     /// operand without depending on the runtime's private numeric payload.
     #[must_use]
     pub fn text(&self) -> String {

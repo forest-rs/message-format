@@ -13,6 +13,9 @@ use alloc::{
 use core::fmt;
 use core::str;
 
+use fixed_decimal::{Decimal, Sign};
+
+use crate::common::text::parse_number_literal_parts;
 pub use crate::runtime::schema::{Decoded, FlowKind, Opcode, decode};
 use crate::runtime::value::{NumberSelection, NumberValue, ResolvedNumber};
 use crate::runtime::{
@@ -2025,7 +2028,7 @@ impl<'a> ValueView<'a> {
             Self::ExactText(value) => value == case,
             Self::ResolvedSelect(value) => value == case,
             Self::Formatted(value) => value == case,
-            Self::Number(value) => resolved_number_matches_case(value, case) == CaseMatch::Exact,
+            Self::Number(value) => resolved_number_text_matches_case(value, case),
         };
         if matches {
             CaseMatch::Exact
@@ -2080,7 +2083,7 @@ fn emit_fallback<S: FormatSink + ?Sized>(sink: &mut S, rendered: &str) {
 fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatch {
     let matches = match &number.value {
         NumberValue::Integer(value) => int_matches_case(*value, case),
-        NumberValue::Decimal(value) => display_matches_case(value.as_ref(), case),
+        NumberValue::Decimal(value) => decimal_matches_canonical_case(value.as_ref(), case),
         NumberValue::NonFinite(value) => display_matches_case(value, case),
     };
     if matches {
@@ -2088,6 +2091,125 @@ fn resolved_number_matches_case(number: &ResolvedNumber, case: &str) -> CaseMatc
     } else {
         CaseMatch::No
     }
+}
+
+fn resolved_number_text_matches_case(number: &ResolvedNumber, case: &str) -> bool {
+    match &number.value {
+        NumberValue::Integer(value) => int_matches_case(*value, case),
+        NumberValue::Decimal(value) => display_matches_case(value.as_ref(), case),
+        NumberValue::NonFinite(value) => display_matches_case(value, case),
+    }
+}
+
+/// Allocation-free view of a canonical numeric selector key.
+///
+/// The digits stay borrowed from the catalog string. Nonzero bounds are
+/// expressed in the same base-10 magnitudes used by [`Decimal`], so matching
+/// only needs a digit walk when the bounds and sign already agree.
+struct CanonicalDecimalCase<'a> {
+    integer_digits: &'a [u8],
+    fraction_digits: &'a [u8],
+    negative: bool,
+    nonzero_bounds: Option<(i16, i16)>,
+}
+
+impl<'a> CanonicalDecimalCase<'a> {
+    fn parse(case: &'a str) -> Option<Self> {
+        let parts = parse_number_literal_parts(case)?;
+
+        // Exact numeric selection uses one canonical plain-decimal spelling.
+        // The shared parser already rejects a leading plus and redundant
+        // integer leading zeros. Exponents and fractional trailing zeros are
+        // valid MF2 syntax, but they are not canonical exact keys.
+        if !parts.exponent_digits.is_empty()
+            || parts
+                .fraction_digits
+                .last()
+                .is_some_and(|digit| *digit == b'0')
+        {
+            return None;
+        }
+
+        let mut first_nonzero = None;
+        let mut last_nonzero = None;
+        for (index, byte) in parts
+            .integer_digits
+            .iter()
+            .chain(parts.fraction_digits)
+            .copied()
+            .enumerate()
+        {
+            if byte != b'0' {
+                first_nonzero.get_or_insert(index);
+                last_nonzero = Some(index);
+            }
+        }
+
+        let nonzero_bounds = match (first_nonzero, last_nonzero) {
+            (Some(first), Some(last)) => {
+                let integer_digits = i64::try_from(parts.integer_digits.len()).ok()?;
+                let first = i64::try_from(first).ok()?;
+                let last = i64::try_from(last).ok()?;
+                let high = integer_digits.checked_sub(1)?.checked_sub(first)?;
+                let low = integer_digits.checked_sub(1)?.checked_sub(last)?;
+                Some((i16::try_from(high).ok()?, i16::try_from(low).ok()?))
+            }
+            // Signed zero and zero with an explicit fractional part are not
+            // canonical. The only canonical zero key is exactly `0`.
+            (None, None) if !parts.negative && parts.fraction_digits.is_empty() => None,
+            (None, None) => return None,
+            _ => return None,
+        };
+
+        Some(Self {
+            integer_digits: parts.integer_digits,
+            fraction_digits: parts.fraction_digits,
+            negative: parts.negative,
+            nonzero_bounds,
+        })
+    }
+
+    fn digit_at(&self, magnitude: i16) -> u8 {
+        let Ok(integer_digit_count) = i64::try_from(self.integer_digits.len()) else {
+            return 0;
+        };
+        let Some(ordinal) = integer_digit_count
+            .checked_sub(1)
+            .and_then(|value| value.checked_sub(i64::from(magnitude)))
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return 0;
+        };
+        if ordinal < self.integer_digits.len() {
+            self.integer_digits[ordinal] - b'0'
+        } else {
+            self.fraction_digits
+                .get(ordinal - self.integer_digits.len())
+                .copied()
+                .map_or(0, |byte| byte - b'0')
+        }
+    }
+}
+
+fn decimal_matches_canonical_case(value: &Decimal, case: &str) -> bool {
+    let Some(case) = CanonicalDecimalCase::parse(case) else {
+        return false;
+    };
+    let value_is_zero = value.is_zero();
+    if value_is_zero || case.nonzero_bounds.is_none() {
+        return value_is_zero && case.nonzero_bounds.is_none();
+    }
+
+    if (value.sign() == Sign::Negative) != case.negative {
+        return false;
+    }
+
+    let value = &value.absolute;
+    let high = value.nonzero_magnitude_start();
+    let low = value.nonzero_magnitude_end();
+
+    case.nonzero_bounds == Some((high, low))
+        && (low..=high).all(|magnitude| value.digit_at(magnitude) == case.digit_at(magnitude))
 }
 
 fn display_matches_case(value: &impl fmt::Display, case: &str) -> bool {
@@ -2443,8 +2565,134 @@ fn bad_pc_from_pos(pos: usize) -> Result<u32, FormatError> {
 #[cfg(test)]
 mod tests {
     use alloc::{string::String, vec, vec::Vec};
+    use core::str::FromStr;
 
     use super::*;
+
+    fn canonical_decimal_reference(value: &Decimal) -> String {
+        if value.is_zero() {
+            return String::from("0");
+        }
+
+        let mut value = value.clone();
+        value.absolute.trim_start();
+        value.absolute.trim_end();
+        if value.sign == Sign::Positive {
+            value.sign = Sign::None;
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn canonical_decimal_case_comparison_matches_allocating_reference() {
+        let mut values = [
+            "-10000.5000",
+            "-100",
+            "-1.050",
+            "-0.00",
+            "0",
+            "+0.000",
+            "0.0001",
+            "0.5",
+            "1",
+            "+1.000",
+            "1.05",
+            "42.00",
+            "100",
+            "000123456789012345678901234567890.01000000000000000000",
+        ]
+        .map(|text| Decimal::from_str(text).expect("test value must be a decimal"))
+        .to_vec();
+        let mut large = Decimal::from(1);
+        large.multiply_pow10(1_000);
+        values.push(large);
+        let mut small = Decimal::from(-1);
+        small.multiply_pow10(-1_000);
+        values.push(small);
+
+        let mut cases = vec![
+            String::from("0"),
+            String::from("-0"),
+            String::from("0.0"),
+            String::from("-0.00"),
+            String::from("1"),
+            String::from("1.0"),
+            String::from("1.00"),
+            String::from("1e0"),
+            String::from("1E+0"),
+            String::from("0.0001"),
+            String::from("0.00010"),
+            String::from("-1.05"),
+            String::from("-1.050"),
+            String::from("100"),
+            String::from("1e2"),
+            String::from("123456789012345678901234567890.01"),
+        ];
+        cases.extend(values.iter().map(canonical_decimal_reference));
+
+        for value in &values {
+            let reference = canonical_decimal_reference(value);
+            for case in &cases {
+                assert_eq!(
+                    decimal_matches_canonical_case(value, case),
+                    case == &reference,
+                    "allocation-free comparison diverged for {value} and {case} (canonical {reference})"
+                );
+            }
+        }
+
+        let one = Decimal::from(1);
+        for invalid in [
+            "+1", "01", "-01", ".1", "1.", "1e", "1e+", "1e1e1", "NaN", "∞",
+        ] {
+            assert!(
+                !decimal_matches_canonical_case(&one, invalid),
+                "invalid MF2 numeric key {invalid} must not match"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_decimal_case_rejects_equivalent_noncanonical_spellings() {
+        for (value, canonical, noncanonical) in [
+            ("1.00", "1", &["1.0", "1.00", "1e0"][..]),
+            ("1.2300", "1.23", &["1.2300", "123e-2"][..]),
+            ("-0.00", "0", &["-0", "0.0", "-0.00", "0e0"][..]),
+            ("+42.0", "42", &["+42", "42.0", "420e-1"][..]),
+        ] {
+            let value = Decimal::from_str(value).expect("test value must be a decimal");
+            assert!(decimal_matches_canonical_case(&value, canonical));
+            for case in noncanonical {
+                assert!(
+                    !decimal_matches_canonical_case(&value, case),
+                    "noncanonical key {case} matched {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integer_case_comparison_uses_canonical_stack_text() {
+        for (value, canonical, noncanonical) in [
+            (1, "1", &["1.0", "1e0", "+1"][..]),
+            (0, "0", &["-0", "0.0", "0e0"][..]),
+            (
+                i64::MAX,
+                "9223372036854775807",
+                &["9223372036854775807.0"][..],
+            ),
+            (
+                i64::MIN,
+                "-9223372036854775808",
+                &["-9223372036854775808e0"][..],
+            ),
+        ] {
+            assert!(int_matches_case(value, canonical));
+            for case in noncanonical {
+                assert!(!int_matches_case(value, case));
+            }
+        }
+    }
 
     #[test]
     fn host_remains_object_safe() {

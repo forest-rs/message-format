@@ -87,6 +87,11 @@ fn string_selection_does_not_match_numeric_text_canonically() {
         &[("x", Value::Str("1.0".into()))],
         "OTHER",
     );
+    assert_format(
+        ".input { $x :string }\n.match $x\n1.0 {{MATCH}}\n* {{OTHER}}",
+        &[("x", Value::Int(1))],
+        "OTHER",
+    );
 }
 
 // ---------------------------------------------------------------------------
