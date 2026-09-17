@@ -22,6 +22,9 @@ pub type StrId = u32;
 /// Runtime value model used by the VM.
 ///
 /// `Value::Float` is used for locale-aware default interpolation paths.
+/// [`Value::Number`] can also originate directly from an owned or borrowed
+/// [`fixed_decimal::Decimal`] parameter. Direct decimal parameters retain
+/// their sign, magnitude, and trailing zeros.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// No value.
@@ -56,7 +59,8 @@ pub enum Value {
         /// Length in bytes.
         len: u32,
     },
-    /// A number resolved by a built-in numeric function.
+    /// A number resolved by a built-in numeric function or created from a
+    /// direct [`fixed_decimal::Decimal`] parameter.
     Number(ResolvedNumber),
     /// A resolved formatter value that retains its semantic source for a
     /// subsequent annotation while exposing its formatted presentation.
@@ -636,8 +640,29 @@ impl From<f64> for Value {
     }
 }
 
+impl From<Decimal> for Value {
+    fn from(value: Decimal) -> Self {
+        Self::Number(ResolvedNumber::new(
+            NumberValue::Decimal(Box::new(value)),
+            NumberFormatOptions::DEFAULT,
+            NumberSelection::None,
+            false,
+        ))
+    }
+}
+
+impl From<&Decimal> for Value {
+    fn from(value: &Decimal) -> Self {
+        Self::from(value.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use core::str::FromStr;
+
+    use fixed_decimal::Decimal;
+
     use super::StringDirection;
     use super::{ArgNameError, MessageArgs, ResolvedString, ResolvedStringText, Value};
     use crate::runtime::catalog::{MessageEntry, build_catalog};
@@ -708,5 +733,26 @@ mod tests {
         assert!(matches!(heap.text, ResolvedStringText::Heap(_)));
         assert_eq!(inline.text(), "éééééééééééé");
         assert_eq!(heap.text(), "ééééééééééééa");
+    }
+
+    #[test]
+    fn decimal_conversions_preserve_exact_text() {
+        for text in ["1.00", "-0.00", "-12345678901234567890.0100"] {
+            let decimal = Decimal::from_str(text).expect("decimal");
+            let owned = Value::from(decimal.clone());
+            let borrowed = Value::from(&decimal);
+
+            let Value::Number(owned) = owned else {
+                panic!("decimal must use the resolved number carrier");
+            };
+            let Value::Number(borrowed) = borrowed else {
+                panic!("decimal reference must use the resolved number carrier");
+            };
+            assert_eq!(owned.text(), text);
+            assert_eq!(borrowed.text(), text);
+            assert_eq!(owned.format, super::NumberFormatOptions::DEFAULT);
+            assert_eq!(owned.selection, super::NumberSelection::None);
+            assert!(!owned.has_explicit_select);
+        }
     }
 }

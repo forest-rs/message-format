@@ -14,6 +14,33 @@ use crate::runtime;
 /// Unknown names are ignored when resolved against a catalog. That matches the
 /// facade's plain-string focus: extra arguments do not fail formatting, while
 /// missing referenced arguments still surface through normal message fallback.
+///
+/// [`fixed_decimal::Decimal`] arguments may be inserted by value or by
+/// reference. Their scale is preserved, including trailing zeros:
+///
+/// ```rust
+/// use core::str::FromStr;
+/// use fixed_decimal::Decimal;
+/// use message_format::MessageArgs;
+///
+/// let decimal = Decimal::from_str("1.00").unwrap();
+/// let mut args = MessageArgs::new();
+/// args.insert("amount", &decimal);
+/// args.insert("amount", decimal);
+/// ```
+///
+/// Call [`Decimal::trim_end`] before insertion when normalization is desired:
+///
+/// ```rust
+/// use core::str::FromStr;
+/// use fixed_decimal::Decimal;
+/// use message_format::MessageArgs;
+///
+/// let mut decimal = Decimal::from_str("1.00").unwrap();
+/// decimal.trim_end();
+/// let mut args = MessageArgs::new();
+/// args.insert("amount", decimal);
+/// ```
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MessageArgs {
     values: Vec<(String, runtime::Value)>,
