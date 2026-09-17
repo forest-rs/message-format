@@ -2552,7 +2552,7 @@ fn resolve_offset(
     options: &EffectiveOptions<'_>,
 ) -> Result<ResolvedNumber, FormatError> {
     let value = numeric_source(value);
-    let (mut number, inherited_format, selection, has_explicit_select) = match value {
+    let (mut number, inherited_format, inherited_selection, has_explicit_select) = match value {
         Value::Number(number) => (
             number.value.clone(),
             number.format,
@@ -2565,6 +2565,10 @@ fn resolve_offset(
             NumberSelection::Plural,
             false,
         ),
+    };
+    let selection = match inherited_selection {
+        NumberSelection::None => NumberSelection::Plural,
+        selection => selection,
     };
     let add = options
         .get(BuiltinOptionKey::Add)
@@ -4430,6 +4434,12 @@ mod tests {
         let mut host = builtin_host(&["offset add=1"]);
         let out = host
             .call_select(0, &[Value::Str("0".to_string())], FunctionOptions::new(&[]))
+            .expect("selected");
+        assert_selector_result(host.catalog, out, "one");
+
+        let decimal = Decimal::from_str("0.0").expect("decimal");
+        let out = host
+            .call_select(0, &[Value::from(decimal)], FunctionOptions::new(&[]))
             .expect("selected");
         assert_selector_result(host.catalog, out, "one");
     }
