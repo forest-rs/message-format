@@ -734,6 +734,43 @@ impl Host for BuiltinHost {
         .map_err(into_host_call_error)
     }
 
+    fn call_to(
+        &mut self,
+        catalog: &Catalog,
+        index: &BuiltinHostCatalogIndex,
+        fn_id: u16,
+        args: &[Value],
+        opts: FunctionOptions<'_>,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+        sink: &mut dyn FormatSink,
+    ) -> Result<Option<Value>, HostCallError> {
+        let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
+            return Err(HostCallError::UnknownFunction { fn_id });
+        };
+        if entry.func != BuiltinFn::Currency {
+            return self
+                .call(catalog, index, fn_id, args, opts, on_error)
+                .map(Some);
+        }
+        let Some(raw_arg) = args.first() else {
+            return Err(into_host_call_error(bad_operand()));
+        };
+        if matches!(raw_arg, Value::FunctionFallback(_)) {
+            return Err(into_host_call_error(bad_operand()));
+        }
+        let options =
+            EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
+        options.validate_keys().map_err(into_host_call_error)?;
+        validate_builtin_option_values(entry.func, &options).map_err(into_host_call_error)?;
+        let (number, resolved) =
+            resolve_currency(raw_arg, catalog, &options).map_err(into_host_call_error)?;
+        let formatter =
+            cached_currency_formatter(&self.locale, &mut self.icu_formatters.currency, &resolved)
+                .map_err(into_host_call_error)?;
+        sink.expression_fmt(format_args!("{}", formatter.format_fixed_decimal(&number)));
+        Ok(None)
+    }
+
     fn call_select(
         &mut self,
         catalog: &Catalog,
@@ -2365,6 +2402,17 @@ fn format_currency(
     cache: &mut Option<CachedCurrencyFormatter>,
     options: &EffectiveOptions<'_>,
 ) -> Result<(String, ResolvedCurrencyOptions), FormatError> {
+    let (number, resolved) = resolve_currency(value, catalog, options)?;
+    let formatter = cached_currency_formatter(locale, cache, &resolved)?;
+    let formatted = formatter.format_fixed_decimal(&number).to_string();
+    Ok((formatted, resolved))
+}
+
+fn resolve_currency<'a>(
+    value: &'a Value,
+    catalog: &Catalog,
+    options: &EffectiveOptions<'_>,
+) -> Result<(Cow<'a, Decimal>, ResolvedCurrencyOptions), FormatError> {
     let inherited = match value {
         Value::Formatted(value) => value.currency.as_ref(),
         _ => None,
@@ -2390,19 +2438,26 @@ fn format_currency(
         None => inherited.map_or(CurrencySign::Standard, |options| options.sign),
         Some(_) => return Err(bad_option()),
     };
-    let number = match parse_number_value(value, catalog)? {
-        NumberValue::Integer(value) => Decimal::from(value),
-        NumberValue::Decimal(value) => *value,
-        NumberValue::NonFinite(_) => return Err(bad_operand()),
+    let number: Cow<'a, Decimal> = match numeric_source(value) {
+        Value::Number(number) => match &number.value {
+            NumberValue::Integer(value) => Cow::Owned(Decimal::from(*value)),
+            NumberValue::Decimal(value) => Cow::Borrowed(value.as_ref()),
+            NumberValue::NonFinite(_) => return Err(bad_operand()),
+        },
+        value => match parse_number_value(value, catalog)? {
+            NumberValue::Integer(value) => Cow::Owned(Decimal::from(value)),
+            NumberValue::Decimal(value) => Cow::Owned(*value),
+            NumberValue::NonFinite(_) => return Err(bad_operand()),
+        },
     };
-    let resolved = ResolvedCurrencyOptions {
-        code: currency,
-        display,
-        sign,
-    };
-    let formatter = cached_currency_formatter(locale, cache, &resolved)?;
-    let formatted = formatter.format_fixed_decimal(&number).to_string();
-    Ok((formatted, resolved))
+    Ok((
+        number,
+        ResolvedCurrencyOptions {
+            code: currency,
+            display,
+            sign,
+        },
+    ))
 }
 
 fn cached_currency_formatter<'a>(
