@@ -20,7 +20,8 @@ pub(crate) struct VmState {
     pub(crate) stack: Vec<usize>,
     pub(crate) locals: Vec<usize>,
     pub(crate) call_args: Vec<Value>,
-    pub(crate) call_options: Vec<(u32, Value)>,
+    pub(crate) call_options: Vec<(u32, usize)>,
+    pub(crate) markup_options: Vec<(u32, Value)>,
 }
 
 impl VmState {
@@ -30,6 +31,7 @@ impl VmState {
         self.locals.clear();
         self.call_args.clear();
         self.call_options.clear();
+        self.markup_options.clear();
     }
 }
 
@@ -138,6 +140,7 @@ impl<'a, H: Host> Formatter<'a, H> {
             diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
+            &mut self.vm.markup_options,
         );
         self.vm.clear_execution();
         result?;
@@ -311,6 +314,7 @@ impl<'a, H: Host> MultiFormatter<'a, H> {
             diagnostics,
             &mut self.vm.call_args,
             &mut self.vm.call_options,
+            &mut self.vm.markup_options,
         );
         self.vm.clear_execution();
         result?;
