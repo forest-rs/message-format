@@ -304,6 +304,27 @@ pub trait Host {
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError>;
 
+    /// Call a function whose result is immediately interpolated.
+    ///
+    /// The default returns the resolved value for the VM to format. Hosts may
+    /// instead write one expression to `sink` and return `None`, avoiding an
+    /// owned intermediate value. The VM only uses this path for unstructured
+    /// output; values retained by declarations and selectors still use
+    /// [`Host::call`].
+    fn call_to(
+        &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+        args: &[Value],
+        opts: FunctionOptions<'_>,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+        _sink: &mut dyn FormatSink,
+    ) -> Result<Option<Value>, HostCallError> {
+        self.call(catalog, index, fn_id, args, opts, on_error)
+            .map(Some)
+    }
+
     /// Call function id for selection (e.g. plural/ordinal category).
     ///
     /// The default delegates to [`call`](Host::call). Hosts may override this
@@ -417,6 +438,19 @@ impl<H: Host + ?Sized> Host for Box<H> {
         on_error: &mut dyn FnMut(MessageFunctionError),
     ) -> Result<Value, HostCallError> {
         H::call(self, catalog, index, fn_id, args, opts, on_error)
+    }
+
+    fn call_to(
+        &mut self,
+        catalog: &Catalog,
+        index: &Self::CatalogIndex,
+        fn_id: u16,
+        args: &[Value],
+        opts: FunctionOptions<'_>,
+        on_error: &mut dyn FnMut(MessageFunctionError),
+        sink: &mut dyn FormatSink,
+    ) -> Result<Option<Value>, HostCallError> {
+        H::call_to(self, catalog, index, fn_id, args, opts, on_error, sink)
     }
 
     fn call_select(
@@ -553,6 +587,16 @@ pub trait FormatSink {
     fn literal(&mut self, s: &str);
     /// Expression output (variable interpolation, literal expressions, function results).
     fn expression(&mut self, s: &str);
+
+    /// Formatted expression output that may be written directly to the sink.
+    ///
+    /// The default preserves the single-expression callback contract by
+    /// materializing the formatted text before calling [`Self::expression`].
+    /// Sinks that can consume [`fmt::Arguments`] directly may override this to
+    /// avoid the temporary string.
+    fn expression_fmt(&mut self, args: fmt::Arguments<'_>) {
+        self.expression(&alloc::fmt::format(args));
+    }
     /// Markup open tag with options.
     ///
     /// Self-closing markup is reported as `markup_open` immediately followed by
@@ -661,6 +705,10 @@ impl FormatSink for String {
         self.push_str(s);
     }
 
+    fn expression_fmt(&mut self, args: fmt::Arguments<'_>) {
+        fmt::write(self, args).expect("writing to a string is infallible");
+    }
+
     fn markup_open(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
 
     fn markup_close(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
@@ -704,6 +752,10 @@ impl<S: FormatSink + ?Sized> FormatSink for SinkForward<'_, S> {
         } else {
             self.sink.expression(value);
         }
+    }
+
+    fn expression_fmt(&mut self, args: fmt::Arguments<'_>) {
+        self.sink.expression_fmt(args);
     }
 
     fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]) {
@@ -1097,6 +1149,7 @@ where
     let mut selector: Option<SelectorValue<'_>> = None;
     let mut expr_state = ExprState::new(&diagnostics);
     let mut remaining_fuel = fuel;
+    let mut direct_call_output = false;
 
     loop {
         if let Some(ref mut f) = remaining_fuel {
@@ -1193,18 +1246,22 @@ where
             | Opcode::OutExpr
             | Opcode::OutVal
             | Opcode::OutArg => {
-                handle_output_instruction(
-                    sink,
-                    host,
-                    index,
-                    values,
-                    stack,
-                    catalog,
-                    args,
-                    &mut diagnostics,
-                    opcode,
-                    base,
-                )?;
+                if opcode == Opcode::OutVal && direct_call_output {
+                    direct_call_output = false;
+                } else {
+                    handle_output_instruction(
+                        sink,
+                        host,
+                        index,
+                        values,
+                        stack,
+                        catalog,
+                        args,
+                        &mut diagnostics,
+                        opcode,
+                        base,
+                    )?;
+                }
             }
             Opcode::SelectArg
             | Opcode::SelectStringArg
@@ -1235,7 +1292,12 @@ where
                 expr_state.set_fallback(read_u32(code, base + 1)?);
             }
             Opcode::CallFunc | Opcode::CallSelect => {
-                handle_call_opcode(
+                let structured_output = sink.wants_structured_output();
+                let writes_directly = opcode == Opcode::CallFunc
+                    && !structured_output
+                    && decode_opcode_and_next_pc(code, next_pc)?.1 == Opcode::OutVal;
+                let mut forwarded = SinkForward::new(sink);
+                direct_call_output = handle_call_opcode(
                     host,
                     index,
                     values,
@@ -1249,7 +1311,8 @@ where
                     args,
                     &mut diagnostics,
                     &mut expr_state,
-                    sink.wants_structured_output(),
+                    structured_output,
+                    writes_directly.then_some(&mut forwarded),
                 )?;
             }
             Opcode::ProjectSelect => {
@@ -1655,7 +1718,8 @@ fn handle_call_opcode<H: Host>(
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
     structured_output: bool,
-) -> Result<(), FormatError> {
+    direct_sink: Option<&mut dyn FormatSink>,
+) -> Result<bool, FormatError> {
     let fn_id = read_u16(code, base + 1)?;
     let arg_count = code[base + 3] as usize;
     let optc = code[base + 4] as usize;
@@ -1687,6 +1751,7 @@ fn handle_call_opcode<H: Host>(
             expr_state,
             structured_output,
             inherited_id.as_deref(),
+            direct_sink,
         )?
     } else {
         decode_call_args(values, args, stack, arg_count, call_args)?;
@@ -1704,10 +1769,14 @@ fn handle_call_opcode<H: Host>(
             expr_state,
             structured_output,
             inherited_id.as_deref(),
+            direct_sink,
         )?
     };
+    let Some(result) = result else {
+        return Ok(true);
+    };
     stack.push(store_value_with_id(values, result, id));
-    Ok(())
+    Ok(false)
 }
 
 fn handle_project_select<H: Host>(
@@ -1811,7 +1880,8 @@ fn handle_call_instruction<H: Host>(
     expr_state: &mut ExprState,
     structured_output: bool,
     inherited_id: Option<&str>,
-) -> Result<(Value, Option<Box<str>>), FormatError> {
+    direct_sink: Option<&mut dyn FormatSink>,
+) -> Result<(Option<Value>, Option<Box<str>>), FormatError> {
     let call_options = FunctionOptions::from_stored(call_options, values, args);
     // If a missing variable was loaded as an operand for this function call,
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
@@ -1841,9 +1911,9 @@ fn handle_call_instruction<H: Host>(
         }
         if opcode == Opcode::CallSelect {
             expr_state.clear_fallback();
-            Ok((Value::Null, None))
+            Ok((Some(Value::Null), None))
         } else {
-            Ok((expr_state.take_fallback(catalog)?, None))
+            Ok((Some(expr_state.take_fallback(catalog)?), None))
         }
     } else {
         let result = handle_resolved_call(
@@ -1856,12 +1926,13 @@ fn handle_call_instruction<H: Host>(
             catalog,
             diagnostics,
             expr_state,
+            direct_sink,
         )?;
         let id = if opcode == Opcode::CallFunc
             && structured_output
             && !matches!(
                 result,
-                Value::Null | Value::Fallback(_) | Value::FunctionFallback(_)
+                Some(Value::Null | Value::Fallback(_) | Value::FunctionFallback(_))
             ) {
             resolved_call_id(fn_id, call_options, catalog)
                 .map(String::into_boxed_str)
@@ -1907,7 +1978,8 @@ fn handle_resolved_call<H: Host>(
     catalog: &Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
-) -> Result<Value, FormatError> {
+    direct_sink: Option<&mut dyn FormatSink>,
+) -> Result<Option<Value>, FormatError> {
     if let Some(option_errors) = expr_state.take_option_errors() {
         for error in option_errors {
             record_diagnostic(diagnostics, error);
@@ -1935,6 +2007,17 @@ fn handle_resolved_call<H: Host>(
             call_options,
             &mut on_error,
         )
+        .map(Some)
+    } else if let Some(sink) = direct_sink {
+        host.call_to(
+            catalog,
+            index,
+            fn_id,
+            call_args,
+            call_options,
+            &mut on_error,
+            sink,
+        )
     } else {
         host.call(
             catalog,
@@ -1944,13 +2027,14 @@ fn handle_resolved_call<H: Host>(
             call_options,
             &mut on_error,
         )
+        .map(Some)
     };
 
     match call_result {
         Ok(result) => {
             expr_state.clear_fallback();
             expr_state.clear_pending_errors();
-            if opcode == Opcode::CallSelect && matches!(result, Value::Null) {
+            if opcode == Opcode::CallSelect && matches!(result, Some(Value::Null)) {
                 // `Null` is the explicit host contract for an unselectable
                 // result. The callback has already reported the function
                 // diagnostic; this records the selector failure so the VM
@@ -1969,11 +2053,11 @@ fn handle_resolved_call<H: Host>(
                 record_diagnostic(diagnostics, into_bad_selector(err));
                 expr_state.clear_fallback();
                 expr_state.clear_pending_errors();
-                Ok(Value::Null)
+                Ok(Some(Value::Null))
             } else if expr_state.has_fallback() {
                 record_diagnostic(diagnostics, err);
                 expr_state.clear_pending_errors();
-                expr_state.take_function_fallback(catalog)
+                expr_state.take_function_fallback(catalog).map(Some)
             } else {
                 Err(err)
             }
