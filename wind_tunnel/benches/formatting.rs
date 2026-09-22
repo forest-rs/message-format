@@ -7,12 +7,14 @@
 )]
 
 use core::hint::black_box;
+use core::str::FromStr;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use fixed_decimal::Decimal;
 use icu_locale_core::Locale;
 use message_format::compiler::compile_str;
 use message_format::runtime::{
     Args, BuiltinHost, Catalog, FormatError, FormatSink, Formatter, Host, HostFn, MessageArgs,
-    MessageHandle, NoopHost, Value,
+    MessageHandle, MultiFormatter, NoopHost, Value,
     catalog::{FuncEntry, MessageEntry, build_catalog, build_catalog_with_funcs},
     vm,
 };
@@ -612,6 +614,10 @@ fn build_icu_currency_catalog() -> Catalog {
     compile_catalog("main = { $amount :currency currency=USD }")
 }
 
+fn build_money_catalog() -> Catalog {
+    compile_catalog("main = { $amount :currency currency=$currency currencyDisplay=code }")
+}
+
 fn build_icu_date_catalog() -> Catalog {
     compile_catalog("main = { $date :date style=short }")
 }
@@ -690,6 +696,7 @@ fn bench_formatting(c: &mut Criterion) {
     let builtin_percent_catalog_with_static_opts = build_builtin_percent_catalog_with_static_opts();
     let icu_percent_catalog = build_icu_percent_catalog();
     let icu_currency_catalog = build_icu_currency_catalog();
+    let money_catalog = build_money_catalog();
     let icu_date_catalog = build_icu_date_catalog();
     let icu_time_catalog = build_icu_time_catalog();
     let icu_datetime_catalog = build_icu_datetime_catalog();
@@ -905,6 +912,16 @@ fn bench_formatting(c: &mut Criterion) {
     let icu_percent_args = message_args(&icu_percent_catalog, &[("amount", Value::Float(42.125))]);
     let icu_currency_args =
         message_args(&icu_currency_catalog, &[("amount", Value::Float(42.125))]);
+    let money_args = message_args(
+        &money_catalog,
+        &[
+            (
+                "amount",
+                Value::from(Decimal::from_str("42.125").expect("decimal")),
+            ),
+            ("currency", Value::Str("USD".to_string())),
+        ],
+    );
     let icu_date_args = message_args(
         &icu_date_catalog,
         &[("date", Value::Str("2024-05-01T14:30:00".to_string()))],
@@ -956,6 +973,19 @@ fn bench_formatting(c: &mut Criterion) {
                 .format_by_id_for_bench("main", black_box(&icu_currency_args))
                 .expect("format");
             black_box(out);
+        });
+    });
+    icu_group.bench_function("money_dynamic_currency_en-US", |b| {
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = MultiFormatter::new([&money_catalog], host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut sink = CountingSink::default();
+        b.iter(|| {
+            sink.reset();
+            formatter
+                .format_to(message, black_box(&money_args), &mut sink, None)
+                .expect("format");
+            black_box(&sink);
         });
     });
     icu_group.bench_function("time_short_en-US", |b| {
