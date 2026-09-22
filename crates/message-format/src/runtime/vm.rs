@@ -27,8 +27,23 @@ use crate::runtime::{
 
 #[derive(Debug)]
 pub(crate) struct StoredValue {
-    value: Value,
+    value: StoredValueSource,
     id: Option<Box<str>>,
+}
+
+#[derive(Debug)]
+enum StoredValueSource {
+    Owned(Value),
+    Argument(StrId),
+}
+
+impl StoredValue {
+    fn value<'a>(&'a self, args: &'a dyn Args) -> Option<&'a Value> {
+        match &self.value {
+            StoredValueSource::Owned(value) => Some(value),
+            StoredValueSource::Argument(key) => args.get_ref(*key),
+        }
+    }
 }
 
 fn store_value(values: &mut Vec<StoredValue>, value: Value) -> usize {
@@ -37,7 +52,19 @@ fn store_value(values: &mut Vec<StoredValue>, value: Value) -> usize {
 
 fn store_value_with_id(values: &mut Vec<StoredValue>, value: Value, id: Option<Box<str>>) -> usize {
     let index = values.len();
-    values.push(StoredValue { value, id });
+    values.push(StoredValue {
+        value: StoredValueSource::Owned(value),
+        id,
+    });
+    index
+}
+
+fn store_argument(values: &mut Vec<StoredValue>, key: StrId) -> usize {
+    let index = values.len();
+    values.push(StoredValue {
+        value: StoredValueSource::Argument(key),
+        id: None,
+    });
     index
 }
 
@@ -47,8 +74,14 @@ fn stored(values: &[StoredValue], id: usize) -> Result<&StoredValue, FormatError
         .ok_or(FormatError::Trap(Trap::InvalidValueIndex))
 }
 
-fn stored_value(values: &[StoredValue], id: usize) -> Result<&Value, FormatError> {
-    Ok(&stored(values, id)?.value)
+fn stored_value<'a>(
+    values: &'a [StoredValue],
+    args: &'a dyn Args,
+    id: usize,
+) -> Result<&'a Value, FormatError> {
+    stored(values, id)?
+        .value(args)
+        .ok_or(FormatError::Trap(Trap::InvalidValueIndex))
 }
 
 /// Resolved message handle for repeated formatting.
@@ -778,6 +811,7 @@ impl<'a> SelectorValue<'a> {
     fn case_match(
         &self,
         values: &[StoredValue],
+        args: &dyn Args,
         locals: &[usize],
         case_str_id: u32,
         catalog: &Catalog,
@@ -786,7 +820,7 @@ impl<'a> SelectorValue<'a> {
             let value_id = locals
                 .get(*slot)
                 .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
-            let value = stored_value(values, *value_id)?;
+            let value = stored_value(values, args, *value_id)?;
             if matches!(value, Value::StrRef(id) if *id == case_str_id) {
                 return Ok(CaseMatch::Exact);
             }
@@ -795,7 +829,10 @@ impl<'a> SelectorValue<'a> {
                 .map_err(|_| FormatError::Trap(Trap::InvalidCaseStringId))?;
             return Ok(value_case_match(value, case, catalog));
         }
-        if self.fast_str_id(values).is_some_and(|id| id == case_str_id) {
+        if self
+            .fast_str_id(values, args)
+            .is_some_and(|id| id == case_str_id)
+        {
             return Ok(CaseMatch::Exact);
         }
 
@@ -813,20 +850,24 @@ impl<'a> SelectorValue<'a> {
             }
             Self::Local(_) => unreachable!("local selectors are handled above"),
             Self::InvalidBorrowed => CaseMatch::No,
-            Self::Stored(value) => value_case_match(stored_value(values, *value)?, case, catalog),
+            Self::Stored(value) => {
+                value_case_match(stored_value(values, args, *value)?, case, catalog)
+            }
         })
     }
 
-    fn fast_str_id(&self, values: &[StoredValue]) -> Option<u32> {
+    fn fast_str_id(&self, values: &[StoredValue], args: &dyn Args) -> Option<u32> {
         match self {
             Self::Borrowed { str_id, .. } => *str_id,
             Self::ExactText(_) => None,
             Self::Local(_) => None,
             Self::InvalidBorrowed => None,
-            Self::Stored(value_id) => match values.get(*value_id).map(|stored| &stored.value) {
-                Some(Value::StrRef(id)) => Some(*id),
-                _ => None,
-            },
+            Self::Stored(value_id) => {
+                match values.get(*value_id).and_then(|stored| stored.value(args)) {
+                    Some(Value::StrRef(id)) => Some(*id),
+                    _ => None,
+                }
+            }
         }
     }
 }
@@ -931,17 +972,21 @@ impl ExprState {
         &mut self,
         value_id: usize,
         values: &mut Vec<StoredValue>,
+        args: &dyn Args,
         catalog: &Catalog,
         diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     ) -> Result<usize, FormatError> {
-        let failed = self.should_skip_call() || stored_value(values, value_id)?.is_fallback();
+        let failed = self.should_skip_call() || stored_value(values, args, value_id)?.is_fallback();
         if let Some(pending_errors) = self.take_pending_errors() {
             for error in pending_errors {
                 record_diagnostic(diagnostics, error);
             }
         }
 
-        let function_failed = matches!(stored_value(values, value_id)?, Value::FunctionFallback(_));
+        let function_failed = matches!(
+            stored_value(values, args, value_id)?,
+            Value::FunctionFallback(_)
+        );
         let value_id = if function_failed {
             if let Some(fallback_id) = self.fallback_id.take() {
                 catalog
@@ -1014,7 +1059,7 @@ where
             }
             Opcode::JmpIfFalse => {
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-                if is_falsey(stored_value(values, value)?, catalog) {
+                if is_falsey(stored_value(values, args, value)?, catalog) {
                     pc = apply_rel_jump(pc, next_pc, read_i32(code, base + 1)?)?;
                     continue;
                 }
@@ -1029,19 +1074,30 @@ where
             Opcode::LoadArg => {
                 let id = read_u32(code, base + 1)?;
                 let value = load_arg_value(args, catalog, id, &mut expr_state);
-                stack.push(store_value(values, value));
+                stack.push(match value {
+                    Some(key) => store_argument(values, key),
+                    None => store_value(values, Value::Null),
+                });
             }
             Opcode::LoadOptionArg => {
                 let id = read_u32(code, base + 1)?;
                 let fallback_id = read_u32(code, base + 5)?;
                 let value = load_option_arg_value(args, catalog, id, fallback_id, &mut expr_state)?;
-                stack.push(store_value(values, value));
+                stack.push(match value {
+                    Some(key) => store_argument(values, key),
+                    None => store_value(values, Value::Fallback(fallback_id)),
+                });
             }
             Opcode::StoreLocal => {
                 let slot = local_slot(code, base)?;
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-                let value =
-                    expr_state.finish_declaration(value, values, catalog, &mut diagnostics)?;
+                let value = expr_state.finish_declaration(
+                    value,
+                    values,
+                    args,
+                    catalog,
+                    &mut diagnostics,
+                )?;
                 if slot == locals.len() {
                     locals.push(value);
                 } else if let Some(existing) = locals.get_mut(slot) {
@@ -1062,12 +1118,12 @@ where
                 let value = locals
                     .get(slot)
                     .ok_or(FormatError::Trap(Trap::InvalidLocalSlot))?;
-                check_selector_value(stored_value(values, *value)?, &mut diagnostics);
+                check_selector_value(stored_value(values, args, *value)?, &mut diagnostics);
             }
             Opcode::ResolveString => {
                 let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
                 let resolved = resolve_optionless_string(
-                    stored_value(values, value)?,
+                    stored_value(values, args, value)?,
                     catalog,
                     &mut diagnostics,
                     &mut expr_state,
@@ -1133,6 +1189,7 @@ where
                     code,
                     call_args,
                     call_options,
+                    args,
                     &mut diagnostics,
                     &mut expr_state,
                     sink.wants_structured_output(),
@@ -1145,6 +1202,7 @@ where
                     values,
                     stack,
                     catalog,
+                    args,
                     base,
                     code,
                     &mut diagnostics,
@@ -1160,6 +1218,7 @@ where
                     base,
                     code,
                     call_options,
+                    args,
                     &mut diagnostics,
                 )?;
             }
@@ -1231,7 +1290,9 @@ where
                 host,
                 index,
                 catalog,
-                &value.value,
+                value
+                    .value(args)
+                    .ok_or(FormatError::Trap(Trap::InvalidValueIndex))?,
                 value.id.as_deref(),
             );
         }
@@ -1285,7 +1346,7 @@ fn handle_select_instruction<'a>(
         }
         Opcode::SelectBegin => {
             let value = stack.pop().ok_or(FormatError::StackUnderflow)?;
-            check_selector_value(stored_value(values, value)?, diagnostics);
+            check_selector_value(stored_value(values, args, value)?, diagnostics);
             *selector = Some(SelectorValue::Stored(value));
             Ok(None)
         }
@@ -1294,7 +1355,7 @@ fn handle_select_instruction<'a>(
                 .as_ref()
                 .ok_or(FormatError::Trap(Trap::CaseStringWithoutSelector))?;
             let case_str_id = read_u32(code, base + 1)?;
-            match selector.case_match(values, locals, case_str_id, catalog)? {
+            match selector.case_match(values, args, locals, case_str_id, catalog)? {
                 CaseMatch::Exact => {
                     let rel = read_i32(code, base + 5)?;
                     apply_rel_jump(pc, next_pc, rel).map(Some)
@@ -1355,12 +1416,12 @@ fn load_arg_value(
     catalog: &Catalog,
     key_id: StrId,
     expr_state: &mut ExprState,
-) -> Value {
+) -> Option<StrId> {
     match args.get_ref(key_id) {
-        Some(v) => v.clone(),
+        Some(_) => Some(key_id),
         None => {
             expr_state.record_error(FormatError::MissingArg(format_id(catalog, key_id)));
-            Value::Null
+            None
         }
     }
 }
@@ -1409,27 +1470,34 @@ fn load_option_arg_value(
     key_id: StrId,
     fallback_id: StrId,
     expr_state: &mut ExprState,
-) -> Result<Value, FormatError> {
-    if let Some(value) = args.get_ref(key_id) {
-        return Ok(value.clone());
+) -> Result<Option<StrId>, FormatError> {
+    if args.get_ref(key_id).is_some() {
+        return Ok(Some(key_id));
     }
     expr_state.record_option_error(FormatError::MissingArg(format_id(catalog, key_id)));
     catalog
         .string(fallback_id)
         .map_err(|_| FormatError::Trap(Trap::InvalidFallbackStringId))?;
-    Ok(Value::Fallback(fallback_id))
+    Ok(None)
 }
 
 fn decode_call_args(
     values: &[StoredValue],
+    args: &dyn Args,
     stack: &mut Vec<usize>,
     arg_count: usize,
     call_args: &mut Vec<Value>,
 ) -> Result<(), FormatError> {
     call_args.clear();
     for _ in 0..arg_count {
-        call_args
-            .push(stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone());
+        call_args.push(
+            stored_value(
+                values,
+                args,
+                stack.pop().ok_or(FormatError::StackUnderflow)?,
+            )?
+            .clone(),
+        );
     }
     call_args.reverse();
 
@@ -1438,6 +1506,7 @@ fn decode_call_args(
 
 fn decode_option_pairs(
     values: &[StoredValue],
+    args: &dyn Args,
     stack: &mut Vec<usize>,
     catalog: &Catalog,
     optc: usize,
@@ -1446,8 +1515,18 @@ fn decode_option_pairs(
 ) -> Result<(), FormatError> {
     options.clear();
     for _ in 0..optc {
-        let value = stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone();
-        let key = stored_value(values, stack.pop().ok_or(FormatError::StackUnderflow)?)?.clone();
+        let value = stored_value(
+            values,
+            args,
+            stack.pop().ok_or(FormatError::StackUnderflow)?,
+        )?
+        .clone();
+        let key = stored_value(
+            values,
+            args,
+            stack.pop().ok_or(FormatError::StackUnderflow)?,
+        )?
+        .clone();
         let key_id = resolve_key(key, catalog)?;
         options.push((key_id, value));
     }
@@ -1489,6 +1568,7 @@ fn handle_call_opcode<H: Host>(
     code: &[u8],
     call_args: &mut Vec<Value>,
     call_options: &mut Vec<(u32, Value)>,
+    args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
     structured_output: bool,
@@ -1499,6 +1579,7 @@ fn handle_call_opcode<H: Host>(
 
     decode_option_pairs(
         values,
+        args,
         stack,
         catalog,
         optc,
@@ -1522,7 +1603,7 @@ fn handle_call_opcode<H: Host>(
             index,
             opcode,
             fn_id,
-            core::slice::from_ref(stored_value(values, arg)?),
+            core::slice::from_ref(stored_value(values, args, arg)?),
             call_options,
             catalog,
             diagnostics,
@@ -1531,7 +1612,7 @@ fn handle_call_opcode<H: Host>(
             inherited_id.as_deref(),
         )?
     } else {
-        decode_call_args(values, stack, arg_count, call_args)?;
+        decode_call_args(values, args, stack, arg_count, call_args)?;
         handle_call_instruction(
             host,
             index,
@@ -1556,13 +1637,14 @@ fn handle_project_select<H: Host>(
     values: &mut Vec<StoredValue>,
     stack: &mut Vec<usize>,
     catalog: &Catalog,
+    args: &dyn Args,
     base: usize,
     code: &[u8],
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) -> Result<(), FormatError> {
     let fn_id = read_u16(code, base + 1)?;
     let value_id = stack.pop().ok_or(FormatError::StackUnderflow)?;
-    let value = stored_value(values, value_id)?;
+    let value = stored_value(values, args, value_id)?;
     let prechecked_invalid_number =
         matches!(value, Value::Number(number) if number.selection == NumberSelection::Invalid);
     if prechecked_invalid_number {
@@ -1606,6 +1688,7 @@ fn handle_markup_instruction<S>(
     base: usize,
     code: &[u8],
     call_options: &mut Vec<(u32, Value)>,
+    args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
 ) -> Result<(), FormatError>
 where
@@ -1615,6 +1698,7 @@ where
     let optc = code[base + 5] as usize;
     decode_option_pairs(
         values,
+        args,
         stack,
         catalog,
         optc,
@@ -2709,8 +2793,9 @@ mod tests {
 
     #[test]
     fn invalid_execution_value_indices_have_their_own_trap() {
+        let args: [(u32, Value); 0] = [];
         assert_eq!(
-            stored_value(&[], 0).expect_err("empty arena must reject an index"),
+            stored_value(&[], &args, 0).expect_err("empty arena must reject an index"),
             FormatError::Trap(Trap::InvalidValueIndex)
         );
     }
