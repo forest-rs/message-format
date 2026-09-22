@@ -92,9 +92,12 @@ pub struct MessageHandle {
 
 /// Resolved function options. Fallback-valued options are retained privately
 /// for provenance but are omitted from [`Self::iter`] and [`Self::get`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct FunctionOptions<'a> {
     raw: &'a [(u32, Value)],
+    stored: &'a [(u32, usize)],
+    values: &'a [StoredValue],
+    args: Option<&'a dyn Args>,
 }
 
 impl<'a> FunctionOptions<'a> {
@@ -105,13 +108,48 @@ impl<'a> FunctionOptions<'a> {
     /// function entry.
     #[must_use]
     pub fn new(raw: &'a [(u32, Value)]) -> Self {
-        Self { raw }
+        Self {
+            raw,
+            stored: &[],
+            values: &[],
+            args: None,
+        }
+    }
+
+    fn from_stored(
+        stored: &'a [(u32, usize)],
+        values: &'a [StoredValue],
+        args: &'a dyn Args,
+    ) -> Self {
+        Self {
+            raw: &[],
+            stored,
+            values,
+            args: Some(args),
+        }
+    }
+
+    fn raw_len(self) -> usize {
+        self.args.map_or(self.raw.len(), |_| self.stored.len())
+    }
+
+    fn raw_at(self, index: usize) -> Option<(u32, &'a Value)> {
+        if let Some(args) = self.args {
+            let (key, value_id) = *self.stored.get(index)?;
+            self.values
+                .get(value_id)?
+                .value(args)
+                .map(|value| (key, value))
+        } else {
+            self.raw.get(index).map(|(key, value)| (*key, value))
+        }
     }
 
     /// Iterate over resolved, non-fallback options.
     pub fn iter(self) -> FunctionOptionsIter<'a> {
         FunctionOptionsIter {
-            inner: self.raw.iter(),
+            options: self,
+            index: 0,
         }
     }
 
@@ -137,35 +175,53 @@ impl<'a> FunctionOptions<'a> {
     /// Whether this call supplied a runtime option with `key`.
     #[must_use]
     pub fn was_dynamic(self, key: u32) -> bool {
-        self.raw.iter().any(|(candidate, _)| *candidate == key)
+        (0..self.raw_len()).any(|index| {
+            self.raw_at(index)
+                .is_some_and(|(candidate, _)| candidate == key)
+        })
     }
 
     /// Whether the runtime option with `key` resolved to a fallback.
     #[must_use]
     pub fn was_unresolved(self, key: u32) -> bool {
-        self.raw
-            .iter()
-            .any(|(candidate, value)| *candidate == key && value.is_fallback())
+        (0..self.raw_len()).any(|index| {
+            self.raw_at(index)
+                .is_some_and(|(candidate, value)| candidate == key && value.is_fallback())
+        })
     }
 
     pub(crate) fn has_raw_options(self) -> bool {
-        !self.raw.is_empty()
+        self.raw_len() != 0
+    }
+}
+
+impl fmt::Debug for FunctionOptions<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        for index in 0..self.raw_len() {
+            if let Some(option) = self.raw_at(index) {
+                list.entry(&option);
+            }
+        }
+        list.finish()
     }
 }
 
 /// Iterator over resolved function options.
 #[derive(Debug)]
 pub struct FunctionOptionsIter<'a> {
-    inner: core::slice::Iter<'a, (u32, Value)>,
+    options: FunctionOptions<'a>,
+    index: usize,
 }
 
 impl<'a> Iterator for FunctionOptionsIter<'a> {
     type Item = (u32, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
-        for (key, value) in self.inner.by_ref() {
+        while let Some((key, value)) = self.options.raw_at(self.index) {
+            self.index += 1;
             if !value.is_fallback() {
-                return Some((*key, value));
+                return Some((key, value));
             }
         }
         None
@@ -1027,7 +1083,8 @@ pub(crate) fn run_bytecode<H: Host, S>(
     sink: &mut S,
     mut diagnostics: Option<&mut dyn DiagnosticsSink>,
     call_args: &mut Vec<Value>,
-    call_options: &mut Vec<(u32, Value)>,
+    call_options: &mut Vec<(u32, usize)>,
+    markup_options: &mut Vec<(u32, Value)>,
 ) -> Result<(), FormatError>
 where
     S: FormatSink + ?Sized,
@@ -1217,7 +1274,7 @@ where
                     opcode,
                     base,
                     code,
-                    call_options,
+                    markup_options,
                     args,
                     &mut diagnostics,
                 )?;
@@ -1504,6 +1561,32 @@ fn decode_call_args(
     Ok(())
 }
 
+fn decode_call_option_pairs(
+    values: &[StoredValue],
+    args: &dyn Args,
+    stack: &mut Vec<usize>,
+    catalog: &Catalog,
+    optc: usize,
+    options: &mut Vec<(u32, usize)>,
+) -> Result<(), FormatError> {
+    options.clear();
+    for _ in 0..optc {
+        let value_id = stack.pop().ok_or(FormatError::StackUnderflow)?;
+        stored_value(values, args, value_id)?;
+        let key_id = resolve_call_option_key(
+            stored_value(
+                values,
+                args,
+                stack.pop().ok_or(FormatError::StackUnderflow)?,
+            )?,
+            catalog,
+        )?;
+        options.push((key_id, value_id));
+    }
+    options.reverse();
+    Ok(())
+}
+
 fn decode_option_pairs(
     values: &[StoredValue],
     args: &dyn Args,
@@ -1534,14 +1617,14 @@ fn decode_option_pairs(
     Ok(())
 }
 
-fn resolve_call_option_key(key: Value, catalog: &Catalog) -> Result<u32, FormatError> {
+fn resolve_call_option_key(key: &Value, catalog: &Catalog) -> Result<u32, FormatError> {
     match key {
-        Value::Int(id) if id >= 0 => {
-            u32::try_from(id).map_err(|_| FormatError::Trap(Trap::CallOptionKeyOutOfRange))
+        Value::Int(id) if *id >= 0 => {
+            u32::try_from(*id).map_err(|_| FormatError::Trap(Trap::CallOptionKeyOutOfRange))
         }
-        Value::StrRef(id) => Ok(id),
+        Value::StrRef(id) => Ok(*id),
         Value::Str(name) => catalog
-            .string_id(&name)
+            .string_id(name)
             .ok_or(FormatError::Trap(Trap::CallOptionKeyUnknown)),
         _ => Err(FormatError::Trap(Trap::CallOptionKeyWrongType)),
     }
@@ -1567,7 +1650,7 @@ fn handle_call_opcode<H: Host>(
     base: usize,
     code: &[u8],
     call_args: &mut Vec<Value>,
-    call_options: &mut Vec<(u32, Value)>,
+    call_options: &mut Vec<(u32, usize)>,
     args: &dyn Args,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
@@ -1577,15 +1660,7 @@ fn handle_call_opcode<H: Host>(
     let arg_count = code[base + 3] as usize;
     let optc = code[base + 4] as usize;
 
-    decode_option_pairs(
-        values,
-        args,
-        stack,
-        catalog,
-        optc,
-        call_options,
-        resolve_call_option_key,
-    )?;
+    decode_call_option_pairs(values, args, stack, catalog, optc, call_options)?;
     let inherited_id = if structured_output && arg_count > 0 {
         let first_arg = stack
             .len()
@@ -1605,6 +1680,8 @@ fn handle_call_opcode<H: Host>(
             fn_id,
             core::slice::from_ref(stored_value(values, args, arg)?),
             call_options,
+            values,
+            args,
             catalog,
             diagnostics,
             expr_state,
@@ -1620,6 +1697,8 @@ fn handle_call_opcode<H: Host>(
             fn_id,
             call_args,
             call_options,
+            values,
+            args,
             catalog,
             diagnostics,
             expr_state,
@@ -1724,13 +1803,16 @@ fn handle_call_instruction<H: Host>(
     opcode: Opcode,
     fn_id: u16,
     call_args: &[Value],
-    call_options: &[(u32, Value)],
+    call_options: &[(u32, usize)],
+    values: &[StoredValue],
+    args: &dyn Args,
     catalog: &Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
     structured_output: bool,
     inherited_id: Option<&str>,
 ) -> Result<(Value, Option<Box<str>>), FormatError> {
+    let call_options = FunctionOptions::from_stored(call_options, values, args);
     // If a missing variable was loaded as an operand for this function call,
     // skip the call and use the expression fallback (e.g. `{$varname}`) per
     // TR35 §16.
@@ -1791,9 +1873,10 @@ fn handle_call_instruction<H: Host>(
     }
 }
 
-fn resolved_call_id(fn_id: u16, options: &[(u32, Value)], catalog: &Catalog) -> Option<String> {
-    for (key_id, value) in options.iter().rev() {
-        if catalog.pool_string_opt(*key_id) == Some("u:id") {
+fn resolved_call_id(fn_id: u16, options: FunctionOptions<'_>, catalog: &Catalog) -> Option<String> {
+    for index in (0..options.raw_len()).rev() {
+        let (key_id, value) = options.raw_at(index)?;
+        if catalog.pool_string_opt(key_id) == Some("u:id") {
             if value.is_fallback() {
                 return None;
             }
@@ -1820,7 +1903,7 @@ fn handle_resolved_call<H: Host>(
     opcode: Opcode,
     fn_id: u16,
     call_args: &[Value],
-    call_options: &[(u32, Value)],
+    call_options: FunctionOptions<'_>,
     catalog: &Catalog,
     diagnostics: &mut Option<&mut dyn DiagnosticsSink>,
     expr_state: &mut ExprState,
@@ -1830,7 +1913,10 @@ fn handle_resolved_call<H: Host>(
             record_diagnostic(diagnostics, error);
         }
     }
-    for (_, value) in call_options {
+    for index in 0..call_options.raw_len() {
+        let Some((_, value)) = call_options.raw_at(index) else {
+            continue;
+        };
         if value.is_fallback() {
             record_diagnostic(
                 diagnostics,
@@ -1846,7 +1932,7 @@ fn handle_resolved_call<H: Host>(
             index,
             fn_id,
             call_args,
-            FunctionOptions::new(call_options),
+            call_options,
             &mut on_error,
         )
     } else {
@@ -1855,7 +1941,7 @@ fn handle_resolved_call<H: Host>(
             index,
             fn_id,
             call_args,
-            FunctionOptions::new(call_options),
+            call_options,
             &mut on_error,
         )
     };
