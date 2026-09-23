@@ -332,6 +332,24 @@ struct CachedCurrencyFormatter {
     formatter: CurrencyFormatter<DecimalFormatter>,
 }
 
+trait PresentationOutput {
+    fn write(&mut self, args: fmt::Arguments<'_>);
+}
+
+impl PresentationOutput for String {
+    fn write(&mut self, args: fmt::Arguments<'_>) {
+        fmt::write(self, args).expect("writing to String cannot fail");
+    }
+}
+
+struct DirectOutput<'a>(&'a mut dyn FormatSink);
+
+impl PresentationOutput for DirectOutput<'_> {
+    fn write(&mut self, args: fmt::Arguments<'_>) {
+        self.0.expression_fmt(args);
+    }
+}
+
 #[derive(Debug, Default)]
 struct DateFormatterCache {
     short: Option<DateTimeFormatter<fieldsets::YMD>>,
@@ -541,12 +559,14 @@ impl BuiltinHost {
                 ))))
             }
             BuiltinFn::Currency => {
-                let (formatted, currency) = format_currency(
+                let mut formatted = String::new();
+                let currency = render_currency(
                     raw_arg,
                     catalog,
                     locale,
                     &mut icu_formatters.currency,
                     &options,
+                    &mut formatted,
                 )?;
                 let source = match raw_arg {
                     Value::Formatted(value) => value.source.clone(),
@@ -568,11 +588,15 @@ impl BuiltinHost {
                 format_test_select(raw_arg, catalog, &options, false)?,
             )))),
             BuiltinFn::Date => {
-                let text = validate_date_operand(raw_arg, catalog)?;
-                let (date, _) = parse_iso_datetime(text)?;
-                let style = resolve_date_style(&options, false);
-                let formatted =
-                    format_icu_date_cached(locale, &mut icu_formatters.date, date, style)?;
+                let mut formatted = String::new();
+                let style = render_date(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    locale,
+                    &mut icu_formatters.date,
+                    &mut formatted,
+                )?;
                 Ok(resolved_datetime(
                     raw_arg,
                     formatted,
@@ -580,11 +604,15 @@ impl BuiltinHost {
                 ))
             }
             BuiltinFn::Time => {
-                let time_str = validate_time_operand(raw_arg, catalog)?;
-                let (_, time) = parse_iso_datetime(&time_str)?;
-                let precision = resolve_time_precision(&options, false);
-                let formatted =
-                    format_icu_time_cached(locale, &mut icu_formatters.time, time, precision)?;
+                let mut formatted = String::new();
+                let precision = render_time(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    locale,
+                    &mut icu_formatters.time,
+                    &mut formatted,
+                )?;
                 Ok(resolved_datetime(
                     raw_arg,
                     formatted,
@@ -592,47 +620,15 @@ impl BuiltinHost {
                 ))
             }
             BuiltinFn::DateTime => {
-                validate_datetime_style_field_exclusivity(&options)?;
-                let text = validate_datetime_operand(raw_arg, catalog)?;
-                let (date, time) = parse_iso_datetime(&text)?;
-                let (formatted, presentation) = if has_datetime_field_options(&options) {
-                    let offset = parse_iso_utc_offset(&text)?;
-                    let (field_set, hour_cycle) = resolve_datetime_field_set(&options)?;
-                    let formatted = format_icu_datetime_fields_cached(
-                        locale,
-                        &mut icu_formatters.datetime,
-                        date,
-                        time,
-                        offset,
-                        field_set,
-                        hour_cycle,
-                    )?;
-                    (
-                        formatted,
-                        ResolvedDateTimeOptions::Fields {
-                            field_set,
-                            hour_cycle,
-                        },
-                    )
-                } else {
-                    let date_style = resolve_date_style(&options, true);
-                    let time_precision = resolve_time_precision(&options, true);
-                    let formatted = format_icu_datetime_cached(
-                        locale,
-                        &mut icu_formatters.datetime,
-                        date,
-                        time,
-                        date_style,
-                        time_precision,
-                    )?;
-                    (
-                        formatted,
-                        ResolvedDateTimeOptions::DateTime {
-                            date: date_style,
-                            time: time_precision.icu(),
-                        },
-                    )
-                };
+                let mut formatted = String::new();
+                let presentation = render_datetime(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    locale,
+                    &mut icu_formatters.datetime,
+                    &mut formatted,
+                )?;
                 Ok(resolved_datetime(raw_arg, formatted, presentation))
             }
         }
@@ -803,70 +799,48 @@ impl Host for BuiltinHost {
         validate_builtin_option_values(entry.func, &options).map_err(into_host_call_error)?;
         match entry.func {
             BuiltinFn::Currency => {
-                let (number, resolved) =
-                    resolve_currency(raw_arg, catalog, &options).map_err(into_host_call_error)?;
-                let formatter = cached_currency_formatter(
+                render_currency(
+                    raw_arg,
+                    catalog,
                     &self.locale,
                     &mut self.icu_formatters.currency,
-                    &resolved,
+                    &options,
+                    &mut DirectOutput(sink),
                 )
                 .map_err(into_host_call_error)?;
-                sink.expression_fmt(format_args!("{}", formatter.format_fixed_decimal(&number)));
             }
             BuiltinFn::Date => {
-                let text = validate_date_operand(raw_arg, catalog).map_err(into_host_call_error)?;
-                let (date, _) = parse_iso_datetime(text).map_err(into_host_call_error)?;
-                let style = resolve_date_style(&options, false);
-                let formatter =
-                    cached_date_formatter(&self.locale, &mut self.icu_formatters.date, style)
-                        .map_err(into_host_call_error)?;
-                sink.expression_fmt(format_args!("{}", formatter.format(&date)));
+                render_date(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    &self.locale,
+                    &mut self.icu_formatters.date,
+                    &mut DirectOutput(sink),
+                )
+                .map_err(into_host_call_error)?;
             }
             BuiltinFn::Time => {
-                let text = validate_time_operand(raw_arg, catalog).map_err(into_host_call_error)?;
-                let (_, time) = parse_iso_datetime(&text).map_err(into_host_call_error)?;
-                let precision = resolve_time_precision(&options, false);
-                let formatter =
-                    cached_time_formatter(&self.locale, &mut self.icu_formatters.time, precision)
-                        .map_err(into_host_call_error)?;
-                sink.expression_fmt(format_args!("{}", formatter.format(&time)));
+                render_time(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    &self.locale,
+                    &mut self.icu_formatters.time,
+                    &mut DirectOutput(sink),
+                )
+                .map_err(into_host_call_error)?;
             }
             BuiltinFn::DateTime => {
-                validate_datetime_style_field_exclusivity(&options)
-                    .map_err(into_host_call_error)?;
-                let text =
-                    validate_datetime_operand(raw_arg, catalog).map_err(into_host_call_error)?;
-                let (date, time) = parse_iso_datetime(&text).map_err(into_host_call_error)?;
-                if has_datetime_field_options(&options) {
-                    let offset = parse_iso_utc_offset(&text).map_err(into_host_call_error)?;
-                    let (field_set, hour_cycle) =
-                        resolve_datetime_field_set(&options).map_err(into_host_call_error)?;
-                    let formatter = cached_datetime_fields_formatter(
-                        &self.locale,
-                        &mut self.icu_formatters.datetime,
-                        field_set,
-                        hour_cycle,
-                    )
-                    .map_err(into_host_call_error)?;
-                    let datetime = DateTime { date, time };
-                    let zone = TimeZone::UNKNOWN
-                        .with_offset(Some(offset))
-                        .at_date_time(datetime);
-                    let datetime = ZonedDateTime { date, time, zone };
-                    sink.expression_fmt(format_args!("{}", formatter.format(&datetime)));
-                } else {
-                    let date_style = resolve_date_style(&options, true);
-                    let time_precision = resolve_time_precision(&options, true);
-                    let formatter = cached_datetime_formatter(
-                        &self.locale,
-                        &mut self.icu_formatters.datetime,
-                        date_style,
-                        time_precision,
-                    )
-                    .map_err(into_host_call_error)?;
-                    let datetime = DateTime { date, time };
-                    sink.expression_fmt(format_args!("{}", formatter.format(&datetime)));
-                }
+                render_datetime(
+                    raw_arg,
+                    catalog,
+                    &options,
+                    &self.locale,
+                    &mut self.icu_formatters.datetime,
+                    &mut DirectOutput(sink),
+                )
+                .map_err(into_host_call_error)?;
             }
             _ => unreachable!("direct output only handles rendering functions"),
         }
@@ -2529,17 +2503,19 @@ fn multiply_decimal_by_100(value: &str) -> Result<String, FormatError> {
     Ok(out)
 }
 
-fn format_currency(
+#[inline]
+fn render_currency(
     value: &Value,
     catalog: &Catalog,
     locale: &Locale,
     cache: &mut Option<CachedCurrencyFormatter>,
     options: &EffectiveOptions<'_>,
-) -> Result<(String, ResolvedCurrencyOptions), FormatError> {
+    output: &mut impl PresentationOutput,
+) -> Result<ResolvedCurrencyOptions, FormatError> {
     let (number, resolved) = resolve_currency(value, catalog, options)?;
     let formatter = cached_currency_formatter(locale, cache, &resolved)?;
-    let formatted = formatter.format_fixed_decimal(&number).to_string();
-    Ok((formatted, resolved))
+    output.write(format_args!("{}", formatter.format_fixed_decimal(&number)));
+    Ok(resolved)
 }
 
 fn resolve_currency<'a>(
@@ -3444,15 +3420,21 @@ impl DateTimeFormatterCache {
     }
 }
 
-fn format_icu_date_cached(
+#[inline]
+fn render_date(
+    value: &Value,
+    catalog: &Catalog,
+    options: &EffectiveOptions<'_>,
     locale: &Locale,
     cache: &mut DateFormatterCache,
-    date: Date<icu_calendar::Iso>,
-    style: Length,
-) -> Result<String, FormatError> {
-    Ok(cached_date_formatter(locale, cache, style)?
-        .format(&date)
-        .to_string())
+    output: &mut impl PresentationOutput,
+) -> Result<Length, FormatError> {
+    let text = validate_date_operand(value, catalog)?;
+    let (date, _) = parse_iso_datetime(text)?;
+    let style = resolve_date_style(options, false);
+    let formatter = cached_date_formatter(locale, cache, style)?;
+    output.write(format_args!("{}", formatter.format(&date)));
+    Ok(style)
 }
 
 fn cached_date_formatter<'a>(
@@ -3471,15 +3453,21 @@ fn cached_date_formatter<'a>(
     Ok(slot.as_ref().expect("date formatter initialized"))
 }
 
-fn format_icu_time_cached(
+#[inline]
+fn render_time(
+    value: &Value,
+    catalog: &Catalog,
+    options: &EffectiveOptions<'_>,
     locale: &Locale,
     cache: &mut TimeFormatterCache,
-    time: Time,
-    precision: TimePrecisionBucket,
-) -> Result<String, FormatError> {
-    Ok(cached_time_formatter(locale, cache, precision)?
-        .format(&time)
-        .to_string())
+    output: &mut impl PresentationOutput,
+) -> Result<TimePrecisionBucket, FormatError> {
+    let text = validate_time_operand(value, catalog)?;
+    let (_, time) = parse_iso_datetime(&text)?;
+    let precision = resolve_time_precision(options, false);
+    let formatter = cached_time_formatter(locale, cache, precision)?;
+    output.write(format_args!("{}", formatter.format(&time)));
+    Ok(precision)
 }
 
 fn cached_time_formatter<'a>(
@@ -3499,17 +3487,43 @@ fn cached_time_formatter<'a>(
     Ok(slot.as_ref().expect("time formatter initialized"))
 }
 
-fn format_icu_datetime_cached(
+#[inline]
+fn render_datetime(
+    value: &Value,
+    catalog: &Catalog,
+    options: &EffectiveOptions<'_>,
     locale: &Locale,
     cache: &mut DateTimeFormatterCache,
-    date: Date<icu_calendar::Iso>,
-    time: Time,
-    date_style: Length,
-    time_precision: TimePrecisionBucket,
-) -> Result<String, FormatError> {
-    let formatter = cached_datetime_formatter(locale, cache, date_style, time_precision)?;
-    let dt = DateTime { date, time };
-    Ok(formatter.format(&dt).to_string())
+    output: &mut impl PresentationOutput,
+) -> Result<ResolvedDateTimeOptions, FormatError> {
+    validate_datetime_style_field_exclusivity(options)?;
+    let text = validate_datetime_operand(value, catalog)?;
+    let (date, time) = parse_iso_datetime(&text)?;
+    if has_datetime_field_options(options) {
+        let offset = parse_iso_utc_offset(&text)?;
+        let (field_set, hour_cycle) = resolve_datetime_field_set(options)?;
+        let formatter = cached_datetime_fields_formatter(locale, cache, field_set, hour_cycle)?;
+        let datetime = DateTime { date, time };
+        let zone = TimeZone::UNKNOWN
+            .with_offset(Some(offset))
+            .at_date_time(datetime);
+        let datetime = ZonedDateTime { date, time, zone };
+        output.write(format_args!("{}", formatter.format(&datetime)));
+        Ok(ResolvedDateTimeOptions::Fields {
+            field_set,
+            hour_cycle,
+        })
+    } else {
+        let date_style = resolve_date_style(options, true);
+        let time_precision = resolve_time_precision(options, true);
+        let formatter = cached_datetime_formatter(locale, cache, date_style, time_precision)?;
+        let datetime = DateTime { date, time };
+        output.write(format_args!("{}", formatter.format(&datetime)));
+        Ok(ResolvedDateTimeOptions::DateTime {
+            date: date_style,
+            time: time_precision.icu(),
+        })
+    }
 }
 
 fn cached_datetime_formatter<'a>(
@@ -3531,24 +3545,6 @@ fn cached_datetime_formatter<'a>(
         );
     }
     Ok(slot.as_ref().expect("datetime formatter initialized"))
-}
-
-fn format_icu_datetime_fields_cached(
-    locale: &Locale,
-    cache: &mut DateTimeFormatterCache,
-    date: Date<icu_calendar::Iso>,
-    time: Time,
-    offset: UtcOffset,
-    field_set: CompositeFieldSet,
-    hour_cycle: Option<HourCycle>,
-) -> Result<String, FormatError> {
-    let formatter = cached_datetime_fields_formatter(locale, cache, field_set, hour_cycle)?;
-    let datetime = DateTime { date, time };
-    let zone = TimeZone::UNKNOWN
-        .with_offset(Some(offset))
-        .at_date_time(datetime);
-    let datetime = ZonedDateTime { date, time, zone };
-    Ok(formatter.format(&datetime).to_string())
 }
 
 fn cached_datetime_fields_formatter<'a>(
@@ -4083,6 +4079,40 @@ mod tests {
             let resolved = host
                 .call(0, &args, FunctionOptions::new(&[]))
                 .expect("resolved datetime");
+            assert_eq!(
+                direct,
+                host.host
+                    .format_default(host.catalog, &host.index, &resolved)
+                    .unwrap(),
+                "{function}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_currency_matches_resolved_output() {
+        for function in [
+            "currency currency=USD currencyDisplay=code",
+            "currency currency=EUR currencyDisplay=symbol",
+        ] {
+            let mut host = builtin_host(&[function]);
+            let args = [Value::Str("12345.67".to_string())];
+            let mut direct = String::new();
+            let result = Host::call_to(
+                &mut host.host,
+                host.catalog,
+                &host.index,
+                0,
+                &args,
+                FunctionOptions::new(&[]),
+                &mut |_| {},
+                &mut direct,
+            )
+            .expect("direct currency");
+            assert!(result.is_none(), "{function}");
+            let resolved = host
+                .call(0, &args, FunctionOptions::new(&[]))
+                .expect("resolved currency");
             assert_eq!(
                 direct,
                 host.host
