@@ -610,6 +610,10 @@ fn build_icu_percent_catalog() -> Catalog {
     compile_catalog("main = { $amount :number style=percent minimumFractionDigits=1 }")
 }
 
+fn build_direct_number_catalog(function: &str) -> Catalog {
+    compile_catalog(&format!("main = {{ $amount :{function} }}"))
+}
+
 fn build_icu_currency_catalog() -> Catalog {
     compile_catalog("main = { $amount :currency currency=USD }")
 }
@@ -707,6 +711,9 @@ fn bench_formatting(c: &mut Criterion) {
     let builtin_catalog_with_opts = build_builtin_call_catalog_with_opts();
     let builtin_percent_catalog_with_static_opts = build_builtin_percent_catalog_with_static_opts();
     let icu_percent_catalog = build_icu_percent_catalog();
+    let number_catalog = build_direct_number_catalog("number");
+    let integer_catalog = build_direct_number_catalog("integer");
+    let percent_catalog = build_direct_number_catalog("percent");
     let icu_currency_catalog = build_icu_currency_catalog();
     let money_catalog = build_money_catalog();
     let icu_date_catalog = build_icu_date_catalog();
@@ -922,6 +929,26 @@ fn bench_formatting(c: &mut Criterion) {
     let mut icu_group = c.benchmark_group("runtime_icu4x_paths");
     icu_group.throughput(Throughput::Elements(1));
     let icu_percent_args = message_args(&icu_percent_catalog, &[("amount", Value::Float(42.125))]);
+    for (name, catalog) in [
+        ("number", &number_catalog),
+        ("integer", &integer_catalog),
+        ("percent", &percent_catalog),
+    ] {
+        let args = message_args(catalog, &[("amount", Value::Int(42))]);
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = MultiFormatter::new([catalog], host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut sink = CountingSink::default();
+        icu_group.bench_function(format!("direct_{name}_en-US"), |b| {
+            b.iter(|| {
+                sink.reset();
+                formatter
+                    .format_to(message, black_box(&args), &mut sink, None)
+                    .expect("format");
+                black_box(&sink);
+            });
+        });
+    }
     let icu_currency_args =
         message_args(&icu_currency_catalog, &[("amount", Value::Float(42.125))]);
     let money_args = message_args(
@@ -946,6 +973,25 @@ fn bench_formatting(c: &mut Criterion) {
         &icu_datetime_catalog,
         &[("date", Value::Str("2024-05-01T14:30:00".to_string()))],
     );
+    for (name, catalog, args) in [
+        ("date", &icu_date_catalog, &icu_date_args),
+        ("time", &icu_time_catalog, &icu_time_args),
+        ("datetime", &icu_datetime_catalog, &icu_datetime_args),
+    ] {
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = MultiFormatter::new([catalog], host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut sink = CountingSink::default();
+        icu_group.bench_function(format!("direct_{name}_en-US"), |b| {
+            b.iter(|| {
+                sink.reset();
+                formatter
+                    .format_to(message, black_box(args), &mut sink, None)
+                    .expect("format");
+                black_box(&sink);
+            });
+        });
+    }
     let ar_eg = locale("ar-EG");
     for (locale_name, locale) in [("en-US", &en_us), ("ar-EG", &ar_eg)] {
         icu_group.bench_with_input(
