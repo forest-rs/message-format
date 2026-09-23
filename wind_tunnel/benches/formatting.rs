@@ -973,6 +973,33 @@ fn bench_formatting(c: &mut Criterion) {
         &icu_datetime_catalog,
         &[("date", Value::Str("2024-05-01T14:30:00".to_string()))],
     );
+    let fractional_datetime_args = message_args(
+        &icu_datetime_catalog,
+        &[(
+            "date",
+            Value::Str("2024-05-01T14:30:45.123456789".to_string()),
+        )],
+    );
+    {
+        let host = BuiltinHost::new(&en_us).expect("host");
+        let mut formatter = MultiFormatter::new([&icu_datetime_catalog], host).expect("formatter");
+        let message = formatter.resolve("main").expect("message");
+        let mut sink = CountingSink::default();
+        icu_group.bench_function("direct_datetime_fractional_en-US", |b| {
+            b.iter(|| {
+                sink.reset();
+                formatter
+                    .format_to(
+                        message,
+                        black_box(&fractional_datetime_args),
+                        &mut sink,
+                        None,
+                    )
+                    .expect("format");
+                black_box(&sink);
+            });
+        });
+    }
     for (name, catalog, args) in [
         ("date", &icu_date_catalog, &icu_date_args),
         ("time", &icu_time_catalog, &icu_time_args),
