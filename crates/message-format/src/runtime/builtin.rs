@@ -747,6 +747,26 @@ impl Host for BuiltinHost {
         let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
+        if entry.func == BuiltinFn::Percent
+            && !opts.has_raw_options()
+            && entry.options.iter().all(Option::is_none)
+            && let Some(Value::Int(amount)) = args.first()
+        {
+            let mut decimal = Decimal::from(*amount);
+            if *amount != 0 {
+                decimal.multiply_pow10(2);
+            }
+            let formatter = cached_percent_formatter(
+                &self.locale,
+                &mut self.icu_formatters,
+                NumberGrouping::Auto,
+                None,
+                PercentDisplay::Standard,
+            )
+            .map_err(into_host_call_error)?;
+            sink.expression_fmt(format_args!("{}", formatter.format(&decimal)));
+            return Ok(None);
+        }
         if entry.func != BuiltinFn::Currency {
             return self
                 .call(catalog, index, fn_id, args, opts, on_error)
@@ -1640,40 +1660,15 @@ fn render_resolved_number_inner(
         } else {
             PercentDisplay::Standard
         };
-        if !cache.percent.as_ref().is_some_and(|cached| {
-            cached.grouping == format.grouping
-                && cached.numbering_system == format.numbering_system
-                && cached.display == display
-        }) {
-            let mut decimal_preferences = DecimalFormatterPreferences::from(locale);
-            decimal_preferences.numbering_system = format.numbering_system;
-            let decimal_formatter = DecimalFormatter::try_new(
-                decimal_preferences,
-                DecimalFormatterOptions::from(grouping_strategy),
-            )
-            .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-            let mut percent_preferences = PercentFormatterPreferences::from(locale);
-            percent_preferences.numbering_system = format.numbering_system;
-            let formatter = PercentFormatter::try_new_with_decimal_formatter(
-                percent_preferences,
-                decimal_formatter,
-                PercentFormatterOptions::from(display),
-            )
-            .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-            cache.percent = Some(CachedPercentFormatter {
-                grouping: format.grouping,
-                numbering_system: format.numbering_system,
-                display,
-                formatter,
-            });
-        }
-        let formatted = cache
-            .percent
-            .as_ref()
-            .expect("percent formatter initialized")
-            .formatter
-            .format(&decimal)
-            .to_string();
+        let formatted = cached_percent_formatter(
+            locale,
+            cache,
+            format.grouping,
+            format.numbering_system,
+            display,
+        )?
+        .format(&decimal)
+        .to_string();
         let fields = if structured {
             split_number_parts(
                 &formatted,
@@ -1718,6 +1713,53 @@ fn render_resolved_number_inner(
         text: formatted.to_string(),
         fields,
     })
+}
+
+fn cached_percent_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut IcuFormatterCache,
+    grouping: NumberGrouping,
+    numbering_system: Option<NumberingSystem>,
+    display: PercentDisplay,
+) -> Result<&'a PercentFormatter<DecimalFormatter>, FormatError> {
+    if !cache.percent.as_ref().is_some_and(|cached| {
+        cached.grouping == grouping
+            && cached.numbering_system == numbering_system
+            && cached.display == display
+    }) {
+        let grouping_strategy = match grouping {
+            NumberGrouping::Auto => GroupingStrategy::Auto,
+            NumberGrouping::Always => GroupingStrategy::Always,
+            NumberGrouping::Never => GroupingStrategy::Never,
+            NumberGrouping::Min2 => GroupingStrategy::Min2,
+        };
+        let mut decimal_preferences = DecimalFormatterPreferences::from(locale);
+        decimal_preferences.numbering_system = numbering_system;
+        let decimal_formatter = DecimalFormatter::try_new(
+            decimal_preferences,
+            DecimalFormatterOptions::from(grouping_strategy),
+        )
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        let mut percent_preferences = PercentFormatterPreferences::from(locale);
+        percent_preferences.numbering_system = numbering_system;
+        let formatter = PercentFormatter::try_new_with_decimal_formatter(
+            percent_preferences,
+            decimal_formatter,
+            PercentFormatterOptions::from(display),
+        )
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        cache.percent = Some(CachedPercentFormatter {
+            grouping,
+            numbering_system,
+            display,
+            formatter,
+        });
+    }
+    Ok(&cache
+        .percent
+        .as_ref()
+        .expect("percent formatter initialized")
+        .formatter)
 }
 
 fn localized_number_separators(
@@ -3841,6 +3883,36 @@ mod tests {
         match value {
             Value::String(value) => assert_eq!(value.text(), expected_text),
             other => panic!("expected resolved string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_percent_matches_resolved_output() {
+        let mut host = builtin_host(&["percent"]);
+        for amount in [i64::MIN, -42, -1, 0, 1, 42, i64::MAX] {
+            let args = [Value::Int(amount)];
+            let mut direct = String::new();
+            let result = Host::call_to(
+                &mut host.host,
+                host.catalog,
+                &host.index,
+                0,
+                &args,
+                FunctionOptions::new(&[]),
+                &mut |_| {},
+                &mut direct,
+            )
+            .expect("direct percent");
+            assert!(result.is_none());
+            let resolved = host
+                .call(0, &args, FunctionOptions::new(&[]))
+                .expect("resolved percent");
+            assert_eq!(
+                direct,
+                host.host
+                    .format_default(host.catalog, &host.index, &resolved)
+                    .unwrap()
+            );
         }
     }
 
