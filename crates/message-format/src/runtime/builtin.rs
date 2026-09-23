@@ -3190,16 +3190,19 @@ fn validate_date_operand<'a>(
     }
 }
 
-fn validate_time_operand(value: &Value, catalog: &Catalog) -> Result<String, FormatError> {
+fn validate_time_operand<'a>(
+    value: &'a Value,
+    catalog: &'a Catalog,
+) -> Result<Cow<'a, str>, FormatError> {
     let text = value_text(catalog, value).ok_or_else(bad_operand)?;
     if text.contains('T') && text.matches(':').count() >= 1 {
-        Ok(text.to_string())
+        Ok(Cow::Borrowed(text))
     } else if text.len() >= 10
         && text.chars().nth(4) == Some('-')
         && text.chars().nth(7) == Some('-')
     {
         // Date-only input: default time component to 00:00:00
-        Ok(format!("{text}T00:00:00"))
+        Ok(Cow::Owned(format!("{text}T00:00:00")))
     } else {
         Err(bad_operand())
     }
@@ -5245,9 +5248,9 @@ mod tests {
             &[vm::Opcode::Halt as u8],
         );
         let catalog = Catalog::from_bytes(&bytes).expect("catalog");
-        let validated =
-            validate_time_operand(&Value::Str("2024-05-01T14:30".to_string()), &catalog)
-                .expect("validated");
+        let input = Value::Str("2024-05-01T14:30".to_string());
+        let validated = validate_time_operand(&input, &catalog).expect("validated");
+        assert!(matches!(validated, Cow::Borrowed(_)));
         assert_eq!(validated, "2024-05-01T14:30");
 
         let (_, time) = parse_iso_datetime(&validated).expect("parsed");
