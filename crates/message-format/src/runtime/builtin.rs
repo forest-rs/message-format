@@ -747,6 +747,22 @@ impl Host for BuiltinHost {
         let Some(entry) = index.by_id.get(usize::from(fn_id)).and_then(Option::as_ref) else {
             return Err(HostCallError::UnknownFunction { fn_id });
         };
+        if matches!(entry.func, BuiltinFn::Number | BuiltinFn::Integer)
+            && !opts.has_raw_options()
+            && entry.options.iter().all(Option::is_none)
+            && let Some(Value::Int(amount)) = args.first()
+        {
+            let decimal = Decimal::from(*amount);
+            let formatter = cached_decimal_formatter(
+                &self.locale,
+                &mut self.icu_formatters,
+                NumberGrouping::Auto,
+                None,
+            )
+            .map_err(into_host_call_error)?;
+            sink.expression_fmt(format_args!("{}", formatter.format(&decimal)));
+            return Ok(None);
+        }
         if entry.func == BuiltinFn::Percent
             && !opts.has_raw_options()
             && entry.options.iter().all(Option::is_none)
@@ -1714,12 +1730,6 @@ fn render_resolved_number_inner(
     let text = apply_minimum_integer_digits(text, format.minimum_integer_digits.map(usize::from));
     let decimal = Decimal::from_str(&text)
         .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-    let grouping_strategy = match format.grouping {
-        NumberGrouping::Auto => GroupingStrategy::Auto,
-        NumberGrouping::Always => GroupingStrategy::Always,
-        NumberGrouping::Never => GroupingStrategy::Never,
-        NumberGrouping::Min2 => GroupingStrategy::Min2,
-    };
     if format.style == NumberStyle::Percent {
         let display = if text.starts_with('+') {
             PercentDisplay::ExplicitSign
@@ -1748,28 +1758,9 @@ fn render_resolved_number_inner(
             fields,
         });
     }
-    if !cache.decimal.as_ref().is_some_and(|cached| {
-        cached.grouping == format.grouping && cached.numbering_system == format.numbering_system
-    }) {
-        let mut preferences = DecimalFormatterPreferences::from(locale);
-        preferences.numbering_system = format.numbering_system;
-        let formatter = DecimalFormatter::try_new(
-            preferences,
-            DecimalFormatterOptions::from(grouping_strategy),
-        )
-        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
-        cache.decimal = Some(CachedDecimalFormatter {
-            grouping: format.grouping,
-            numbering_system: format.numbering_system,
-            formatter,
-        });
-    }
-    let formatted = cache
-        .decimal
-        .as_ref()
-        .expect("decimal formatter initialized")
-        .formatter
-        .format(&decimal);
+    let formatted =
+        cached_decimal_formatter(locale, cache, format.grouping, format.numbering_system)?
+            .format(&decimal);
     let fields = if structured {
         collect_icu_parts(&formatted, "decimal")?
     } else {
@@ -1779,6 +1770,41 @@ fn render_resolved_number_inner(
         text: formatted.to_string(),
         fields,
     })
+}
+
+fn cached_decimal_formatter<'a>(
+    locale: &Locale,
+    cache: &'a mut IcuFormatterCache,
+    grouping: NumberGrouping,
+    numbering_system: Option<NumberingSystem>,
+) -> Result<&'a DecimalFormatter, FormatError> {
+    if !cache.decimal.as_ref().is_some_and(|cached| {
+        cached.grouping == grouping && cached.numbering_system == numbering_system
+    }) {
+        let grouping_strategy = match grouping {
+            NumberGrouping::Auto => GroupingStrategy::Auto,
+            NumberGrouping::Always => GroupingStrategy::Always,
+            NumberGrouping::Never => GroupingStrategy::Never,
+            NumberGrouping::Min2 => GroupingStrategy::Min2,
+        };
+        let mut preferences = DecimalFormatterPreferences::from(locale);
+        preferences.numbering_system = numbering_system;
+        let formatter = DecimalFormatter::try_new(
+            preferences,
+            DecimalFormatterOptions::from(grouping_strategy),
+        )
+        .map_err(|_| implementation_failure(ImplementationFailure::Host))?;
+        cache.decimal = Some(CachedDecimalFormatter {
+            grouping,
+            numbering_system,
+            formatter,
+        });
+    }
+    Ok(&cache
+        .decimal
+        .as_ref()
+        .expect("decimal formatter initialized")
+        .formatter)
 }
 
 fn cached_percent_formatter<'a>(
@@ -3979,6 +4005,39 @@ mod tests {
                     .format_default(host.catalog, &host.index, &resolved)
                     .unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn direct_integer_number_calls_match_resolved_output() {
+        for function in ["number", "integer"] {
+            let mut host = builtin_host(&[function]);
+            for amount in [i64::MIN, -42, 0, 42, i64::MAX] {
+                let args = [Value::Int(amount)];
+                let mut direct = String::new();
+                let result = Host::call_to(
+                    &mut host.host,
+                    host.catalog,
+                    &host.index,
+                    0,
+                    &args,
+                    FunctionOptions::new(&[]),
+                    &mut |_| {},
+                    &mut direct,
+                )
+                .expect("direct number");
+                assert!(result.is_none(), "{function}");
+                let resolved = host
+                    .call(0, &args, FunctionOptions::new(&[]))
+                    .expect("resolved number");
+                assert_eq!(
+                    direct,
+                    host.host
+                        .format_default(host.catalog, &host.index, &resolved)
+                        .unwrap(),
+                    "{function}: {amount}"
+                );
+            }
         }
     }
 
