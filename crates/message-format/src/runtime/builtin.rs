@@ -3319,19 +3319,18 @@ fn parse_seconds_component(value: &str) -> Result<(u8, u32), FormatError> {
     if fraction.is_empty() {
         return Ok((second, 0));
     }
-    if !fraction.chars().all(|ch| ch.is_ascii_digit()) {
+    if !fraction.bytes().all(|digit| digit.is_ascii_digit()) {
         return Err(bad());
     }
-
-    let mut digits = fraction.as_bytes().to_vec();
-    digits.truncate(9);
-    while digits.len() < 9 {
-        digits.push(b'0');
+    let mut nanosecond = 0;
+    let mut digits = 0;
+    for digit in fraction.bytes().take(9) {
+        nanosecond = nanosecond * 10 + u32::from(digit - b'0');
+        digits += 1;
     }
-    let nanosecond = core::str::from_utf8(&digits)
-        .ok()
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .ok_or_else(bad)?;
+    for _ in digits..9 {
+        nanosecond *= 10;
+    }
     Ok((second, nanosecond))
 }
 
@@ -5234,6 +5233,12 @@ mod tests {
         let (date, time) = parse_iso_datetime("2024-05-01T14:30:45.123").expect("parsed");
         assert_eq!(date, Date::try_new_iso(2024, 5, 1).expect("date"));
         assert_eq!(time, Time::try_new(14, 30, 45, 123_000_000).expect("time"));
+        assert_eq!(parse_seconds_component("45.1"), Ok((45, 100_000_000)));
+        assert_eq!(
+            parse_seconds_component("45.1234567899"),
+            Ok((45, 123_456_789))
+        );
+        assert!(parse_seconds_component("45.123456789x").is_err());
     }
 
     #[test]
