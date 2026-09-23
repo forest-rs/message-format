@@ -3236,13 +3236,22 @@ fn parse_iso_datetime(text: &str) -> Result<(Date<icu_calendar::Iso>, Time), For
     };
 
     // Parse date: YYYY-MM-DD
-    let date_parts: Vec<&str> = date_str.split('-').collect();
-    if date_parts.len() < 3 {
-        return Err(bad());
-    }
-    let year: i32 = date_parts[0].parse().map_err(|_| bad())?;
-    let month: u8 = date_parts[1].parse().map_err(|_| bad())?;
-    let day: u8 = date_parts[2].parse().map_err(|_| bad())?;
+    let mut date_parts = date_str.split('-');
+    let year: i32 = date_parts
+        .next()
+        .ok_or_else(bad)?
+        .parse()
+        .map_err(|_| bad())?;
+    let month: u8 = date_parts
+        .next()
+        .ok_or_else(bad)?
+        .parse()
+        .map_err(|_| bad())?;
+    let day: u8 = date_parts
+        .next()
+        .ok_or_else(bad)?
+        .parse()
+        .map_err(|_| bad())?;
 
     let date = Date::try_new_iso(year, month, day).map_err(|_| bad())?;
 
@@ -3260,12 +3269,12 @@ fn parse_iso_datetime(text: &str) -> Result<(Date<icu_calendar::Iso>, Time), For
         } else {
             ts
         };
-        let time_parts: Vec<&str> = ts.split(':').collect();
-        let hour: u8 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let minute: u8 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mut time_parts = ts.split(':');
+        let hour: u8 = time_parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minute: u8 = time_parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let (second, nanosecond) = time_parts
-            .get(2)
-            .map_or(Ok((0, 0)), |part| parse_seconds_component(part))?;
+            .next()
+            .map_or(Ok((0, 0)), parse_seconds_component)?;
         Time::try_new(hour, minute, second, nanosecond).map_err(|_| bad())?
     } else {
         Time::try_new(0, 0, 0, 0).map_err(|_| bad())?
