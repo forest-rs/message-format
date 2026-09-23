@@ -767,7 +767,10 @@ impl Host for BuiltinHost {
             sink.expression_fmt(format_args!("{}", formatter.format(&decimal)));
             return Ok(None);
         }
-        if entry.func != BuiltinFn::Currency {
+        if !matches!(
+            entry.func,
+            BuiltinFn::Currency | BuiltinFn::Date | BuiltinFn::Time | BuiltinFn::DateTime
+        ) {
             return self
                 .call(catalog, index, fn_id, args, opts, on_error)
                 .map(Some);
@@ -782,12 +785,75 @@ impl Host for BuiltinHost {
             EffectiveOptions::new(&entry.options, opts, catalog, &index.option_keys_by_str_id);
         options.validate_keys().map_err(into_host_call_error)?;
         validate_builtin_option_values(entry.func, &options).map_err(into_host_call_error)?;
-        let (number, resolved) =
-            resolve_currency(raw_arg, catalog, &options).map_err(into_host_call_error)?;
-        let formatter =
-            cached_currency_formatter(&self.locale, &mut self.icu_formatters.currency, &resolved)
+        match entry.func {
+            BuiltinFn::Currency => {
+                let (number, resolved) =
+                    resolve_currency(raw_arg, catalog, &options).map_err(into_host_call_error)?;
+                let formatter = cached_currency_formatter(
+                    &self.locale,
+                    &mut self.icu_formatters.currency,
+                    &resolved,
+                )
                 .map_err(into_host_call_error)?;
-        sink.expression_fmt(format_args!("{}", formatter.format_fixed_decimal(&number)));
+                sink.expression_fmt(format_args!("{}", formatter.format_fixed_decimal(&number)));
+            }
+            BuiltinFn::Date => {
+                let text = validate_date_operand(raw_arg, catalog).map_err(into_host_call_error)?;
+                let (date, _) = parse_iso_datetime(text).map_err(into_host_call_error)?;
+                let style = resolve_date_style(&options, false);
+                let formatter =
+                    cached_date_formatter(&self.locale, &mut self.icu_formatters.date, style)
+                        .map_err(into_host_call_error)?;
+                sink.expression_fmt(format_args!("{}", formatter.format(&date)));
+            }
+            BuiltinFn::Time => {
+                let text = validate_time_operand(raw_arg, catalog).map_err(into_host_call_error)?;
+                let (_, time) = parse_iso_datetime(&text).map_err(into_host_call_error)?;
+                let precision = resolve_time_precision(&options, false);
+                let formatter =
+                    cached_time_formatter(&self.locale, &mut self.icu_formatters.time, precision)
+                        .map_err(into_host_call_error)?;
+                sink.expression_fmt(format_args!("{}", formatter.format(&time)));
+            }
+            BuiltinFn::DateTime => {
+                validate_datetime_style_field_exclusivity(&options)
+                    .map_err(into_host_call_error)?;
+                let text =
+                    validate_datetime_operand(raw_arg, catalog).map_err(into_host_call_error)?;
+                let (date, time) = parse_iso_datetime(&text).map_err(into_host_call_error)?;
+                if has_datetime_field_options(&options) {
+                    let offset = parse_iso_utc_offset(&text).map_err(into_host_call_error)?;
+                    let (field_set, hour_cycle) =
+                        resolve_datetime_field_set(&options).map_err(into_host_call_error)?;
+                    let formatter = cached_datetime_fields_formatter(
+                        &self.locale,
+                        &mut self.icu_formatters.datetime,
+                        field_set,
+                        hour_cycle,
+                    )
+                    .map_err(into_host_call_error)?;
+                    let datetime = DateTime { date, time };
+                    let zone = TimeZone::UNKNOWN
+                        .with_offset(Some(offset))
+                        .at_date_time(datetime);
+                    let datetime = ZonedDateTime { date, time, zone };
+                    sink.expression_fmt(format_args!("{}", formatter.format(&datetime)));
+                } else {
+                    let date_style = resolve_date_style(&options, true);
+                    let time_precision = resolve_time_precision(&options, true);
+                    let formatter = cached_datetime_formatter(
+                        &self.locale,
+                        &mut self.icu_formatters.datetime,
+                        date_style,
+                        time_precision,
+                    )
+                    .map_err(into_host_call_error)?;
+                    let datetime = DateTime { date, time };
+                    sink.expression_fmt(format_args!("{}", formatter.format(&datetime)));
+                }
+            }
+            _ => unreachable!("direct output only handles rendering functions"),
+        }
         Ok(None)
     }
 
@@ -3912,6 +3978,47 @@ mod tests {
                 host.host
                     .format_default(host.catalog, &host.index, &resolved)
                     .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn direct_datetime_functions_match_resolved_output() {
+        for (function, input) in [
+            ("date", "2024-05-01T14:30:00"),
+            ("date length=long", "2024-05-01T14:30:00"),
+            ("time", "2024-05-01T14:30:00"),
+            ("time", "2024-05-01"),
+            ("datetime", "2024-05-01T14:30:00"),
+            (
+                "datetime year=numeric month=2-digit day=2-digit",
+                "2024-05-01T14:30:00",
+            ),
+        ] {
+            let mut host = builtin_host(&[function]);
+            let args = [Value::Str(input.to_string())];
+            let mut direct = String::new();
+            let result = Host::call_to(
+                &mut host.host,
+                host.catalog,
+                &host.index,
+                0,
+                &args,
+                FunctionOptions::new(&[]),
+                &mut |_| {},
+                &mut direct,
+            )
+            .expect("direct datetime");
+            assert!(result.is_none(), "{function}");
+            let resolved = host
+                .call(0, &args, FunctionOptions::new(&[]))
+                .expect("resolved datetime");
+            assert_eq!(
+                direct,
+                host.host
+                    .format_default(host.catalog, &host.index, &resolved)
+                    .unwrap(),
+                "{function}"
             );
         }
     }
