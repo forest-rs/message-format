@@ -212,8 +212,8 @@ pub use schema::{FuncEntry, MessageEntry, Opcode};
 pub use value::{ArgNameError, Args, MessageArgs, ResolvedSelect, ResolvedString, StrId, Value};
 pub use value::{ResolvedFormatted, ResolvedNumber};
 pub use vm::{
-    FormatDirection, FormatField, FormatOption, FormatSink, FormattedValue, FormattedValueKind,
-    FunctionOptions, Host, HostFn, MarkupKind, MessageHandle, NoopHost,
+    ExpressionWriter, FormatDirection, FormatField, FormatOption, FormatSink, FormattedValue,
+    FormattedValueKind, FunctionOptions, Host, HostFn, MarkupKind, MessageHandle, NoopHost,
 };
 
 /// Catalog decoding and verification.

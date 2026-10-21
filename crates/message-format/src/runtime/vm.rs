@@ -560,6 +560,26 @@ where
     }
 }
 
+/// A complete expression that can write its presentation into a sink.
+///
+/// This object-safe interface lets a host supply an existing formatter without
+/// routing it through [`fmt::Arguments`]. Writers must produce identical text
+/// for both destinations and propagate destination errors. They must succeed
+/// when writing to an infallible string destination.
+pub trait ExpressionWriter {
+    /// Write all chunks of this expression into a general text destination.
+    fn write_to(&self, output: &mut dyn fmt::Write) -> fmt::Result;
+
+    /// Write into a concrete string destination.
+    ///
+    /// The default delegates to [`Self::write_to`]. Formatters with generic
+    /// writer implementations may override this to avoid dynamic dispatch on
+    /// each chunk written into the string.
+    fn write_to_string(&self, output: &mut String) -> fmt::Result {
+        self.write_to(output)
+    }
+}
+
 /// Sink for structured formatting output.
 ///
 /// Implement this trait to receive rich formatting events instead of flat string output.
@@ -596,6 +616,36 @@ pub trait FormatSink {
     /// avoid the temporary string.
     fn expression_fmt(&mut self, args: fmt::Arguments<'_>) {
         self.expression(&alloc::fmt::format(args));
+    }
+
+    /// Write one complete expression through a formatter-independent writer.
+    ///
+    /// Invoke one of `value`'s writing methods exactly once. It may emit multiple
+    /// chunks, including no chunks for an empty expression; they all belong to
+    /// this one expression. The writer is consumed synchronously.
+    ///
+    /// The default materializes the complete text, then calls
+    /// [`Self::expression`] once. Text sinks may override this to write directly
+    /// into their output, using [`ExpressionWriter::write_to_string`] for a
+    /// concrete string or [`ExpressionWriter::write_to`] for other destinations.
+    /// Forwarding sinks should delegate this method to their wrapped sink.
+    ///
+    /// ICU built-ins use this method instead of [`Self::expression_fmt`]. Sinks
+    /// that override only `expression_fmt` retain correct output through this
+    /// default, but should also override this method to preserve direct writing
+    /// and any instrumentation specific to their formatting hook. Structured
+    /// output still uses [`Self::formatted_value`] with its existing metadata.
+    ///
+    /// # Panics
+    ///
+    /// The default panics if the writer fails with its infallible string
+    /// destination.
+    fn expression_write(&mut self, value: &dyn ExpressionWriter) {
+        let mut output = String::new();
+        value
+            .write_to_string(&mut output)
+            .expect("writing to String cannot fail");
+        self.expression(&output);
     }
     /// Markup open tag with options.
     ///
@@ -709,6 +759,12 @@ impl FormatSink for String {
         fmt::write(self, args).expect("writing to a string is infallible");
     }
 
+    fn expression_write(&mut self, value: &dyn ExpressionWriter) {
+        value
+            .write_to_string(self)
+            .expect("writing to a string is infallible");
+    }
+
     fn markup_open(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
 
     fn markup_close(&mut self, _name: &str, _options: &[FormatOption<'_>]) {}
@@ -756,6 +812,10 @@ impl<S: FormatSink + ?Sized> FormatSink for SinkForward<'_, S> {
 
     fn expression_fmt(&mut self, args: fmt::Arguments<'_>) {
         self.sink.expression_fmt(args);
+    }
+
+    fn expression_write(&mut self, value: &dyn ExpressionWriter) {
+        self.sink.expression_write(value);
     }
 
     fn markup_open(&mut self, name: &str, options: &[FormatOption<'_>]) {
@@ -4175,6 +4235,95 @@ mod tests {
                     .collect(),
             ));
         }
+    }
+
+    #[test]
+    fn expression_writer_preserves_chunked_and_empty_expression_boundaries() {
+        struct Chunks<'a> {
+            chunks: &'a [&'a str],
+            calls: &'a core::cell::Cell<usize>,
+        }
+
+        impl ExpressionWriter for Chunks<'_> {
+            fn write_to(&self, output: &mut dyn fmt::Write) -> fmt::Result {
+                self.calls.set(self.calls.get() + 1);
+                for chunk in self.chunks {
+                    output.write_str(chunk)?;
+                }
+                Ok(())
+            }
+        }
+
+        let mut sink = CollectingSink::default();
+        let calls = core::cell::Cell::new(0);
+        sink.expression_write(&Chunks {
+            chunks: &["USD ", "1.00"],
+            calls: &calls,
+        });
+        sink.expression_write(&Chunks {
+            chunks: &[],
+            calls: &calls,
+        });
+        assert_eq!(calls.get(), 2, "each writer must run exactly once");
+        assert_eq!(
+            sink.events,
+            vec![
+                SinkEvent::Expression("USD 1.00".into()),
+                SinkEvent::Expression(String::new()),
+            ],
+        );
+    }
+
+    #[test]
+    fn expression_writer_forwards_the_direct_sink_override() {
+        #[derive(Default)]
+        struct DirectSink {
+            text: String,
+            calls: usize,
+        }
+
+        impl FormatSink for DirectSink {
+            fn literal(&mut self, _: &str) {
+                panic!("an expression must not become a literal");
+            }
+            fn expression(&mut self, _: &str) {
+                panic!("the direct writer override must be forwarded");
+            }
+            fn expression_fmt(&mut self, _: fmt::Arguments<'_>) {
+                panic!("the writer must bypass fmt::Arguments");
+            }
+            fn expression_write(&mut self, value: &dyn ExpressionWriter) {
+                self.calls += 1;
+                value
+                    .write_to_string(&mut self.text)
+                    .expect("string writer");
+            }
+            fn markup_open(&mut self, _: &str, _: &[FormatOption<'_>]) {}
+            fn markup_close(&mut self, _: &str, _: &[FormatOption<'_>]) {}
+        }
+
+        struct StringExpression;
+
+        impl ExpressionWriter for StringExpression {
+            fn write_to(&self, _: &mut dyn fmt::Write) -> fmt::Result {
+                panic!("string destinations must use the concrete string method");
+            }
+            fn write_to_string(&self, output: &mut String) -> fmt::Result {
+                output.push_str("1\u{a0}234,56");
+                output.push_str("\u{a0}SEK");
+                Ok(())
+            }
+        }
+
+        let mut sink = DirectSink::default();
+        let mut forward = SinkForward::new(&mut sink);
+        let erased: &mut dyn FormatSink = &mut forward;
+        erased.expression_write(&StringExpression);
+        assert_eq!(sink.calls, 1);
+        let mut text = String::new();
+        text.expression_write(&StringExpression);
+        assert_eq!(text, "1\u{a0}234,56\u{a0}SEK");
+        assert_eq!(sink.text, text);
     }
 
     #[test]
