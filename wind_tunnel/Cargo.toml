@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "loading"
 harness = false
+
+[[bench]]
+name = "money"
+harness = false
