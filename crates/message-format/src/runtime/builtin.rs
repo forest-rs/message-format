@@ -56,8 +56,8 @@ use crate::runtime::{
         StringDirection, Value,
     },
     vm::{
-        FormatDirection, FormatField, FormatSink, FormattedValue, FormattedValueKind,
-        FunctionOptions, Host, emit_resolved_string, format_i64,
+        ExpressionWriter, FormatDirection, FormatField, FormatSink, FormattedValue,
+        FormattedValueKind, FunctionOptions, Host, emit_resolved_string, format_i64,
     },
 };
 
@@ -333,20 +333,32 @@ struct CachedCurrencyFormatter {
 }
 
 trait PresentationOutput {
-    fn write(&mut self, args: fmt::Arguments<'_>);
+    fn write(&mut self, value: &impl Writeable);
 }
 
 impl PresentationOutput for String {
-    fn write(&mut self, args: fmt::Arguments<'_>) {
-        fmt::write(self, args).expect("writing to String cannot fail");
+    fn write(&mut self, value: &impl Writeable) {
+        value.write_to(self).expect("writing to String cannot fail");
     }
 }
 
 struct DirectOutput<'a>(&'a mut dyn FormatSink);
 
+struct IcuExpression<'a, W>(&'a W);
+
+impl<W: Writeable> ExpressionWriter for IcuExpression<'_, W> {
+    fn write_to(&self, output: &mut dyn fmt::Write) -> fmt::Result {
+        self.0.write_to(output)
+    }
+
+    fn write_to_string(&self, output: &mut String) -> fmt::Result {
+        self.0.write_to(output)
+    }
+}
+
 impl PresentationOutput for DirectOutput<'_> {
-    fn write(&mut self, args: fmt::Arguments<'_>) {
-        self.0.expression_fmt(args);
+    fn write(&mut self, value: &impl Writeable) {
+        self.0.expression_write(&IcuExpression(value));
     }
 }
 
@@ -756,7 +768,7 @@ impl Host for BuiltinHost {
                 None,
             )
             .map_err(into_host_call_error)?;
-            sink.expression_fmt(format_args!("{}", formatter.format(&decimal)));
+            DirectOutput(sink).write(&formatter.format(&decimal));
             return Ok(None);
         }
         if entry.func == BuiltinFn::Percent
@@ -776,7 +788,7 @@ impl Host for BuiltinHost {
                 PercentDisplay::Standard,
             )
             .map_err(into_host_call_error)?;
-            sink.expression_fmt(format_args!("{}", formatter.format(&decimal)));
+            DirectOutput(sink).write(&formatter.format(&decimal));
             return Ok(None);
         }
         if !matches!(
@@ -2514,7 +2526,7 @@ fn render_currency(
 ) -> Result<ResolvedCurrencyOptions, FormatError> {
     let (number, resolved) = resolve_currency(value, catalog, options)?;
     let formatter = cached_currency_formatter(locale, cache, &resolved)?;
-    output.write(format_args!("{}", formatter.format_fixed_decimal(&number)));
+    output.write(&formatter.format_fixed_decimal(&number));
     Ok(resolved)
 }
 
@@ -3433,7 +3445,7 @@ fn render_date(
     let (date, _) = parse_iso_datetime(text)?;
     let style = resolve_date_style(options, false);
     let formatter = cached_date_formatter(locale, cache, style)?;
-    output.write(format_args!("{}", formatter.format(&date)));
+    output.write(&formatter.format(&date));
     Ok(style)
 }
 
@@ -3466,7 +3478,7 @@ fn render_time(
     let (_, time) = parse_iso_datetime(&text)?;
     let precision = resolve_time_precision(options, false);
     let formatter = cached_time_formatter(locale, cache, precision)?;
-    output.write(format_args!("{}", formatter.format(&time)));
+    output.write(&formatter.format(&time));
     Ok(precision)
 }
 
@@ -3508,7 +3520,7 @@ fn render_datetime(
             .with_offset(Some(offset))
             .at_date_time(datetime);
         let datetime = ZonedDateTime { date, time, zone };
-        output.write(format_args!("{}", formatter.format(&datetime)));
+        output.write(&formatter.format(&datetime));
         Ok(ResolvedDateTimeOptions::Fields {
             field_set,
             hour_cycle,
@@ -3518,7 +3530,7 @@ fn render_datetime(
         let time_precision = resolve_time_precision(options, true);
         let formatter = cached_datetime_formatter(locale, cache, date_style, time_precision)?;
         let datetime = DateTime { date, time };
-        output.write(format_args!("{}", formatter.format(&datetime)));
+        output.write(&formatter.format(&datetime));
         Ok(ResolvedDateTimeOptions::DateTime {
             date: date_style,
             time: time_precision.icu(),
@@ -4091,35 +4103,65 @@ mod tests {
 
     #[test]
     fn direct_currency_matches_resolved_output() {
-        for function in [
-            "currency currency=USD currencyDisplay=code",
-            "currency currency=EUR currencyDisplay=symbol",
-        ] {
-            let mut host = builtin_host(&[function]);
-            let args = [Value::Str("12345.67".to_string())];
-            let mut direct = String::new();
-            let result = Host::call_to(
-                &mut host.host,
-                host.catalog,
-                &host.index,
-                0,
-                &args,
-                FunctionOptions::new(&[]),
-                &mut |_| {},
-                &mut direct,
-            )
-            .expect("direct currency");
-            assert!(result.is_none(), "{function}");
-            let resolved = host
-                .call(0, &args, FunctionOptions::new(&[]))
-                .expect("resolved currency");
-            assert_eq!(
-                direct,
-                host.host
-                    .format_default(host.catalog, &host.index, &resolved)
-                    .unwrap(),
-                "{function}"
-            );
+        #[derive(Default)]
+        struct ExpressionEvents(Vec<String>);
+
+        // An existing sink with no writer override still receives one complete
+        // expression, even when ICU writes signs, separators, and digits apart.
+        impl FormatSink for ExpressionEvents {
+            fn literal(&mut self, _: &str) {
+                panic!("currency must be an expression");
+            }
+            fn expression(&mut self, value: &str) {
+                self.0.push(value.into());
+            }
+            fn markup_open(&mut self, _: &str, _: &[crate::runtime::FormatOption<'_>]) {}
+            fn markup_close(&mut self, _: &str, _: &[crate::runtime::FormatOption<'_>]) {}
+        }
+
+        for tag in ["en-US", "sv", "ar-EG"] {
+            for function in [
+                "currency currency=USD currencyDisplay=code",
+                "currency currency=EUR currencyDisplay=symbol",
+                "currency currency=USD currencyDisplay=narrowSymbol",
+                "currency currency=USD currencyDisplay=name",
+                "currency currency=EUR currencyDisplay=never",
+                "currency currency=USD currencySign=accounting",
+                "currency currency=JPY currencyDisplay=code",
+            ] {
+                let mut host = builtin_host(&[function]);
+                host.host = BuiltinHost::new(&tag.parse().expect("locale")).expect("host");
+                for amount in ["12345.67", "-42.50", "0.00", "0.005"] {
+                    let args = [Value::from(Decimal::from_str(amount).expect("decimal"))];
+                    let mut direct = String::new();
+                    let mut events = ExpressionEvents::default();
+                    for sink in [&mut direct as &mut dyn FormatSink, &mut events] {
+                        let result = Host::call_to(
+                            &mut host.host,
+                            host.catalog,
+                            &host.index,
+                            0,
+                            &args,
+                            FunctionOptions::new(&[]),
+                            &mut |error| panic!("unexpected diagnostic: {error:?}"),
+                            sink,
+                        )
+                        .expect("direct currency");
+                        assert!(result.is_none(), "{tag}: {function}");
+                    }
+                    assert_eq!(events.0, [direct.clone()], "one complete expression");
+                    let resolved = host
+                        .call(0, &args, FunctionOptions::new(&[]))
+                        .expect("resolved currency");
+                    assert_eq!(
+                        direct,
+                        host.host
+                            .format_default(host.catalog, &host.index, &resolved)
+                            .unwrap(),
+                        "{tag}: {function}: {amount}"
+                    );
+                }
+            }
         }
     }
 

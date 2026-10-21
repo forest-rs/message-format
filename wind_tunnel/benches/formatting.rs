@@ -668,6 +668,13 @@ impl FormatSink for CountingSink {
         core::fmt::write(self, args).expect("counting formatted bytes is infallible");
     }
 
+    fn expression_write(&mut self, value: &dyn message_format::runtime::ExpressionWriter) {
+        self.events += 1;
+        value
+            .write_to(self)
+            .expect("counting formatted bytes is infallible");
+    }
+
     fn markup_open(&mut self, name: &str, options: &[message_format::runtime::FormatOption<'_>]) {
         self.events += 1;
         self.bytes += name.len();
